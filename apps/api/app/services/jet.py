@@ -75,6 +75,12 @@ EVENT_BREVO_WEBHOOK_RECEIVED = "brevo.webhook_received"
 EVENT_CLIENT_ANONYMIZED = "client.anonymized"
 EVENT_CLIENT_EXPORTED = "client.exported"
 
+# PR3b — impression physique des tickets (MUNBYN 047P ESC/POS, réseau ou
+# WebUSB) et ouverture du tiroir-caisse Safescan SD-4141 (décision Julien :
+# même matériel que l'application source). Voir `app/api/pos/router.py`.
+EVENT_RECEIPT_PRINTED = "receipt.printed"
+EVENT_DRAWER_KICKED = "drawer.kicked"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""

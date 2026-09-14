@@ -34,6 +34,19 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
     },
     "fiscal": {"tva_rate": f"{DEFAULT_TVA_RATE:.2f}"},
     "receipt": {"header_note": "", "footer_note": "", "return_policy": ""},
+    # PR3b (impression tickets, décision Julien) — matériel MUNBYN 047P +
+    # tiroir Safescan SD-4141 : jamais de secret ici, uniquement de la
+    # config réseau/USB. Voir `app/api/admin/router.py::HardwareSettingsIn`
+    # et `app/api/pos/router.py` / `app/api/hardware/router.py`.
+    "hardware": {
+        "printer_mode": "none",
+        "printer_host": "",
+        "printer_port": 9100,
+        "drawer_enabled": False,
+        "drawer_pin": 0,
+        "auto_print_on_sale": False,
+        "auto_kick_on_cash": False,
+    },
 }
 
 

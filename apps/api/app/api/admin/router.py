@@ -4,13 +4,17 @@
 # parametres boutique (`app_settings`) et le controle d'integrite fiscal.
 # PR3 (docs/ARCHITECTURE_PR3.md §4) ajoute la fiche client/RGPD, l'etat de
 # la messagerie et `dpo_email` sur `shop`.
+# PR3b (impression tickets, décision Julien) ajoute la clé `hardware`
+# (imprimante MUNBYN 047P + tiroir Safescan SD-4141) — jamais de secret,
+# uniquement de la config réseau/USB (voir app/services/escpos_service.py).
+import ipaddress
 import re
 import uuid
 from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -134,10 +138,47 @@ class ReceiptSettingsIn(BaseModel):
     return_policy: str = ""
 
 
+class HardwareSettingsIn(BaseModel):
+    """Réglages matériel (PR3b, décision Julien) — imprimante ticket MUNBYN
+    047P (réseau TCP 9100 ou WebUSB depuis la tablette) et tiroir-caisse
+    Safescan SD-4141 branché dessus. Aucun secret : uniquement de la
+    config réseau/USB, comme `shop`/`fiscal`/`receipt`."""
+
+    printer_mode: Literal["network", "webusb", "none"] = "none"
+    printer_host: str = ""
+    printer_port: int = Field(default=9100, ge=1, le=65535)
+    drawer_enabled: bool = False
+    drawer_pin: Literal[0, 1] = 0
+    auto_print_on_sale: bool = False
+    auto_kick_on_cash: bool = False
+
+    @field_validator("printer_host")
+    @classmethod
+    def _validate_printer_host(cls, value: str) -> str:
+        value = (value or "").strip()
+        if value:
+            try:
+                ipaddress.IPv4Address(value)
+            except ValueError:
+                raise ValueError(
+                    "Adresse IP de l'imprimante invalide (format IPv4 attendu, ex. 192.168.1.50)"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_network_requires_host(self) -> "HardwareSettingsIn":
+        if self.printer_mode == "network" and not self.printer_host:
+            raise ValueError(
+                "Adresse IP requise en mode réseau (printer_mode=network)"
+            )
+        return self
+
+
 _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "shop": ShopSettingsIn,
     "fiscal": FiscalSettingsIn,
     "receipt": ReceiptSettingsIn,
+    "hardware": HardwareSettingsIn,
 }
 
 
