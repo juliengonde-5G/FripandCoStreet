@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
+from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -33,6 +34,25 @@ from .schemas import (
 )
 
 router = APIRouter(prefix="/pos", tags=["pos"])
+
+
+# ---------------------------------------------------------------------------
+# PR3 (§4 ARCHITECTURE_PR3.md) — client + ticket par e-mail. Schemas définis
+# ici (pas dans `schemas.py`, hors périmètre de cet agent — voir §6 du
+# contrat) plutôt que d'y toucher.
+# ---------------------------------------------------------------------------
+
+
+class AttachClientRequest(BaseModel):
+    email: str
+    first_name: str | None = None
+    last_name: str | None = None
+    newsletter_optin: bool = False
+    send_receipt: bool = True
+
+
+class ResendReceiptEmailRequest(BaseModel):
+    email: str | None = None
 
 
 def _raise(exc: PosServiceError):
@@ -103,6 +123,7 @@ def _serialize_transaction(
     receipt_text: str | None = None,
     refund_of_sale: dict[str, str] | None = None,
     original_number_by_refund_id: dict[str, int] | None = None,
+    clients_by_id: dict[str, dict] | None = None,
 ) -> dict:
     """Serialise une transaction.
 
@@ -114,9 +135,16 @@ def _serialize_transaction(
     - pour une ANNULATION : ``cancelled`` est toujours false (on n'annule
       pas une annulation, D4/`not_a_sale`), ``original_transaction_number``
       = le n° de la vente d'origine, pour l'affichage cote front.
+
+    ``clients_by_id`` (PR3, §4/complement client "Tickets du jour" —
+    voir `_load_clients`) mappe ``str(client_id) -> {id, email,
+    first_name, last_name}`` pour TOUTE la page appelante — jamais une
+    requete par transaction. ``client`` vaut ``None`` quand `client_id`
+    est absent, ou (defensif) quand l'appelant n'a pas fourni le mapping.
     """
     refund_of_sale = refund_of_sale or {}
     original_number_by_refund_id = original_number_by_refund_id or {}
+    clients_by_id = clients_by_id or {}
     tx_id = str(transaction.id)
     is_refund = transaction.transaction_type == TransactionType.refund
     refund_transaction_id = None if is_refund else refund_of_sale.get(tx_id)
@@ -126,6 +154,7 @@ def _serialize_transaction(
         "transaction_type": transaction.transaction_type.value,
         "user_id": str(transaction.user_id),
         "client_uuid": str(transaction.client_uuid) if transaction.client_uuid else None,
+        "client": clients_by_id.get(str(transaction.client_id)) if transaction.client_id else None,
         "original_transaction_id": (
             str(transaction.original_transaction_id) if transaction.original_transaction_id else None
         ),
@@ -258,6 +287,27 @@ async def _load_refund_links(
     return refund_of_sale, original_number_by_refund_id
 
 
+async def _load_clients(db: AsyncSession, client_ids: list[uuid.UUID | None]) -> dict[str, dict]:
+    """Charge, en UNE seule requete, les clients rattaches a une page de
+    transactions (PR3) — evite le N+1 que ferait une requete par
+    transaction. Utilise par `_serialize_transaction` (``clients_by_id``)."""
+    ids = {cid for cid in client_ids if cid is not None}
+    if not ids:
+        return {}
+    from app.models.client import Client
+
+    rows = (await db.execute(select(Client).where(Client.id.in_(ids)))).scalars().all()
+    return {
+        str(c.id): {
+            "id": str(c.id),
+            "email": c.email,
+            "first_name": c.first_name,
+            "last_name": c.last_name,
+        }
+        for c in rows
+    }
+
+
 # ---------------------------------------------------------------------------
 # Caisse espèces (§4.3)
 # ---------------------------------------------------------------------------
@@ -370,11 +420,13 @@ async def create_transaction(
     if not created:
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction.id])
+    clients_by_id = await _load_clients(db, [transaction.client_id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt.content if receipt else None,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
+        clients_by_id=clients_by_id,
     )
 
 
@@ -390,16 +442,18 @@ async def list_transactions(
     except ValueError as exc:
         raise PosServiceError(f"Date invalide : {exc}", code="invalid_date", status_code=422)
     # Une seule requete agregee pour toute la page (pas de N+1) — voir
-    # `_load_refund_links`.
+    # `_load_refund_links`/`_load_clients`.
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(
         db, [t.id for t in transactions]
     )
+    clients_by_id = await _load_clients(db, [t.client_id for t in transactions])
     return {
         "transactions": [
             _serialize_transaction(
                 t,
                 refund_of_sale=refund_of_sale,
                 original_number_by_refund_id=original_number_by_refund_id,
+                clients_by_id=clients_by_id,
             )
             for t in transactions
         ]
@@ -417,11 +471,13 @@ async def get_transaction(
         raise PosServiceError("Transaction introuvable.", code="not_found", status_code=404)
     receipt = await PosService(db).get_receipt(transaction_id)
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
+    clients_by_id = await _load_clients(db, [transaction.client_id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt.content if receipt else None,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
+        clients_by_id=clients_by_id,
     )
 
 
@@ -444,11 +500,13 @@ async def cancel_transaction(
     if not created:
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [refund_tx.id])
+    clients_by_id = await _load_clients(db, [refund_tx.client_id])
     return _serialize_transaction(
         refund_tx,
         receipt_text=receipt.content if receipt else None,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
+        clients_by_id=clients_by_id,
     )
 
 
@@ -481,6 +539,68 @@ async def get_receipt(
     )
     await db.commit()
     return {"text": receipt.content, "duplicate_count": receipt.duplicate_count}
+
+
+# ---------------------------------------------------------------------------
+# Client + ticket par e-mail (PR3, §3/§4 ARCHITECTURE_PR3.md)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/transactions/{transaction_id}/client")
+async def attach_client(
+    transaction_id: uuid.UUID,
+    body: AttachClientRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    transaction = await PosService(db).get_transaction(transaction_id)
+    if transaction is None:
+        raise PosServiceError("Vente introuvable.", code="not_found", status_code=404)
+    try:
+        result = await PosService(db).attach_client_and_send_receipt(
+            transaction=transaction,
+            email=body.email,
+            first_name=body.first_name,
+            last_name=body.last_name,
+            newsletter_optin=body.newsletter_optin,
+            send_receipt=body.send_receipt,
+            user_id=user.id,
+        )
+    except PosServiceError as exc:
+        _raise(exc)
+    await db.commit()
+    client = result["client"]
+    return {
+        "client": {
+            "id": str(client.id),
+            "email": client.email,
+            "first_name": client.first_name,
+            "last_name": client.last_name,
+            "newsletter_optin": client.newsletter_optin,
+        },
+        "receipt_email": result["receipt_email"],
+        "brevo": result["brevo"],
+    }
+
+
+@router.post("/transactions/{transaction_id}/receipt/email")
+async def resend_receipt_email(
+    transaction_id: uuid.UUID,
+    body: ResendReceiptEmailRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    transaction = await PosService(db).get_transaction(transaction_id)
+    if transaction is None:
+        raise PosServiceError("Vente introuvable.", code="not_found", status_code=404)
+    try:
+        result = await PosService(db).resend_receipt_email(
+            transaction=transaction, email=body.email, user_id=user.id
+        )
+    except PosServiceError as exc:
+        _raise(exc)
+    await db.commit()
+    return result
 
 
 # ---------------------------------------------------------------------------

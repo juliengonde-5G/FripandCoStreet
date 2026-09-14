@@ -1,0 +1,367 @@
+# Nouveau test (PR3, §7 ARCHITECTURE_PR3.md) — rattachement client + ticket
+# par e-mail au POS (§4.1), fiche admin (§4). Environnement de test sans
+# BREVO_API_KEY/SMTP_* (cf. `.env`) : la passerelle e-mail retombe sur la
+# simulation — assez pour verifier le cablage bout-en-bout (communication
+# tracee, JET) sans dependre du reseau. `test_email_gateway.py` /
+# `test_brevo_contacts.py` couvrent deja les appels HTTP mockes en detail.
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from sqlalchemy import select
+
+from app.core.database import async_session
+from app.models.client import Client, Consent
+from app.models.communication import Communication
+from app.models.jet import JournalEvent
+
+pytestmark = pytest.mark.anyio
+
+
+async def _sell(client, auth_headers, amount: str = "10.00") -> dict:
+    r = await client.post(
+        "/api/pos/transactions",
+        json={
+            "client_uuid": str(uuid.uuid4()),
+            "items": [{"label": "Robe", "unit_price": amount, "quantity": 1}],
+            "payments": [{"method": "cash", "amount": amount, "tendered_amount": amount}],
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+# ---------------------------------------------------------------------------
+# POST /pos/transactions/{id}/client
+# ---------------------------------------------------------------------------
+
+
+async def test_attach_client_creates_client_links_and_sends_receipt(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+
+    r = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={
+            "email": "  Cliente@Example.COM  ",
+            "first_name": "Alice",
+            "last_name": "Martin",
+            "newsletter_optin": True,
+            "send_receipt": True,
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Normalisation e-mail (minuscules, trim).
+    assert body["client"]["email"] == "cliente@example.com"
+    assert body["client"]["newsletter_optin"] is True
+    assert body["receipt_email"]["status"] in {"sent", "simulated", "failed"}
+    assert body["brevo"] is not None  # opt-in => tentative de synchro
+
+    async with async_session() as db:
+        from app.models.pos import Transaction
+
+        tx = (
+            await db.execute(select(Transaction).where(Transaction.id == uuid.UUID(sale["id"])))
+        ).scalar_one()
+        assert tx.client_id is not None
+
+        comms = (
+            await db.execute(
+                select(Communication).where(Communication.transaction_id == tx.id)
+            )
+        ).scalars().all()
+        assert len(comms) == 1
+        assert comms[0].recipient == "cliente@example.com"
+
+        jet_types = {
+            e.event_type
+            for e in (await db.execute(select(JournalEvent))).scalars().all()
+        }
+        assert "client.created" in jet_types
+        assert "consent.granted" in jet_types
+        assert "client.linked" in jet_types
+        assert {"receipt.emailed", "receipt.email_failed"} & jet_types
+
+
+async def test_attach_client_without_newsletter_optin_skips_brevo(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    r = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "no-optin@example.com", "newsletter_optin": False},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["brevo"] is None
+
+
+async def test_attach_client_send_receipt_false_skips_email(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    r = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "sans-ticket@example.com", "send_receipt": False},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["receipt_email"] is None
+
+
+async def test_attach_client_invalid_email_returns_422(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    r = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "pas-un-email"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "invalid_email"
+
+
+async def test_attach_client_unknown_transaction_404(client, auth_headers):
+    r = await client.post(
+        f"/api/pos/transactions/{uuid.uuid4()}/client",
+        json={"email": "x@y.fr"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 404
+
+
+async def test_attach_client_already_linked_to_another_client_409(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    r1 = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "premiere@example.com"},
+        headers=auth_headers,
+    )
+    assert r1.status_code == 200
+
+    r2 = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "seconde@example.com"},
+        headers=auth_headers,
+    )
+    assert r2.status_code == 409
+    assert r2.json()["code"] == "client_already_linked"
+
+
+async def test_attach_client_same_client_again_is_idempotent(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    r1 = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "revient@example.com", "newsletter_optin": True},
+        headers=auth_headers,
+    )
+    assert r1.status_code == 200
+
+    r2 = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "revient@example.com", "newsletter_optin": True, "send_receipt": False},
+        headers=auth_headers,
+    )
+    assert r2.status_code == 200
+
+    async with async_session() as db:
+        consents = (
+            await db.execute(
+                select(Consent).join(Client).where(Client.email == "revient@example.com")
+            )
+        ).scalars().all()
+        # Idempotence POS (§3) : un seul consentement newsletter=True écrit,
+        # pas un par appel.
+        assert len(consents) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /pos/transactions/{id}/receipt/email
+# ---------------------------------------------------------------------------
+
+
+async def test_resend_receipt_email_requires_email_when_no_client_linked(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    r = await client.post(
+        f"/api/pos/transactions/{sale['id']}/receipt/email", json={}, headers=auth_headers
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "email_required"
+
+
+async def test_resend_receipt_email_uses_linked_client_email_by_default(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "lien@example.com", "send_receipt": False},
+        headers=auth_headers,
+    )
+
+    r = await client.post(
+        f"/api/pos/transactions/{sale['id']}/receipt/email", json={}, headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+
+    async with async_session() as db:
+        from app.models.pos import Transaction
+        from app.models.receipt import Receipt
+
+        tx = (
+            await db.execute(select(Transaction).where(Transaction.id == uuid.UUID(sale["id"])))
+        ).scalar_one()
+        receipt = (
+            await db.execute(select(Receipt).where(Receipt.transaction_id == tx.id))
+        ).scalar_one()
+        assert receipt.duplicate_count == 1
+
+        comms = (
+            await db.execute(select(Communication).where(Communication.transaction_id == tx.id))
+        ).scalars().all()
+        assert comms[0].recipient == "lien@example.com"
+
+
+async def test_resend_receipt_email_with_explicit_email_increments_duplicate(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    r1 = await client.post(
+        f"/api/pos/transactions/{sale['id']}/receipt/email",
+        json={"email": "walk-in@example.com"},
+        headers=auth_headers,
+    )
+    assert r1.status_code == 200
+    r2 = await client.post(
+        f"/api/pos/transactions/{sale['id']}/receipt/email",
+        json={"email": "walk-in@example.com"},
+        headers=auth_headers,
+    )
+    assert r2.status_code == 200
+
+    async with async_session() as db:
+        from app.models.pos import Transaction
+        from app.models.receipt import Receipt
+
+        tx = (
+            await db.execute(select(Transaction).where(Transaction.id == uuid.UUID(sale["id"])))
+        ).scalar_one()
+        receipt = (
+            await db.execute(select(Receipt).where(Receipt.transaction_id == tx.id))
+        ).scalar_one()
+        assert receipt.duplicate_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Admin — fiche client (§4)
+# ---------------------------------------------------------------------------
+
+
+async def test_admin_list_and_search_clients(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "recherche@example.com", "first_name": "Bea", "send_receipt": False},
+        headers=auth_headers,
+    )
+
+    r = await client.get("/api/admin/clients", params={"q": "recherche"}, headers=auth_headers)
+    assert r.status_code == 200
+    emails = [c["email"] for c in r.json()["clients"]]
+    assert "recherche@example.com" in emails
+
+    r2 = await client.get("/api/admin/clients", params={"q": "ne-matche-rien-xyz"}, headers=auth_headers)
+    assert r2.json()["clients"] == []
+
+
+async def test_admin_get_client_full_includes_consents_communications_transactions(
+    client, auth_headers, open_drawer
+):
+    sale = await _sell(client, auth_headers)
+    attach = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "fiche@example.com", "newsletter_optin": True},
+        headers=auth_headers,
+    )
+    client_id = attach.json()["client"]["id"]
+
+    r = await client.get(f"/api/admin/clients/{client_id}", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["client"]["email"] == "fiche@example.com"
+    assert len(body["consents"]) == 1
+    assert len(body["communications"]) == 1
+    assert len(body["transactions"]) == 1
+
+
+async def test_admin_get_unknown_client_404(client, auth_headers):
+    r = await client.get(f"/api/admin/clients/{uuid.uuid4()}", headers=auth_headers)
+    assert r.status_code == 404
+
+
+async def test_admin_add_consent_source_is_admin(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    attach = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "admin-consent@example.com", "newsletter_optin": False},
+        headers=auth_headers,
+    )
+    client_id = attach.json()["client"]["id"]
+
+    r = await client.post(
+        f"/api/admin/clients/{client_id}/consents",
+        json={"purpose": "newsletter", "granted": True, "note": "Demande orale en boutique"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["client"]["newsletter_optin"] is True
+    latest = body["consents"][0]
+    assert latest["source"] == "admin"
+    assert latest["granted"] is True
+
+
+async def test_admin_export_client_returns_full_json(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    attach = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "export@example.com", "send_receipt": False},
+        headers=auth_headers,
+    )
+    client_id = attach.json()["client"]["id"]
+
+    r = await client.get(f"/api/admin/clients/{client_id}/export", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["client"]["email"] == "export@example.com"
+    assert "tickets" in body
+    assert len(body["tickets"]) == 1
+    assert "exported_at" in body
+
+    async with async_session() as db:
+        events = (
+            await db.execute(
+                select(JournalEvent).where(JournalEvent.event_type == "client.exported")
+            )
+        ).scalars().all()
+        assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Messagerie — aucun secret
+# ---------------------------------------------------------------------------
+
+
+async def test_messaging_status_never_leaks_secrets(client, auth_headers, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "super-secret-brevo-key")
+    monkeypatch.setattr(settings, "BREVO_LIST_ID", "99")
+    monkeypatch.setattr(settings, "BREVO_WEBHOOK_TOKEN", "super-secret-webhook-token")
+
+    r = await client.get("/api/admin/messaging/status", headers=auth_headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["email"]["provider"] == "brevo"
+    assert body["brevo_contacts"] == {
+        "configured": True,
+        "list_id_set": True,
+        "webhook_token_set": True,
+    }
+    raw = r.text
+    assert "super-secret-brevo-key" not in raw
+    assert "super-secret-webhook-token" not in raw

@@ -53,6 +53,16 @@ class Transaction(Base):
     )
     refund_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # PR3 (E3, migration 0003) — SEULE colonne mutable hors hash sur une
+    # transaction deja signee (avec `updated_at`) : le trigger
+    # `fripco_protect_signed_transaction` l'exclut explicitement de sa
+    # comparaison OLD/NEW. Hors payload signe (`fiscal.py::_transaction_payload`
+    # ne la reference pas) : rattacher un client apres coup ne casse jamais
+    # `verify_chain_integrity`.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), nullable=True
+    )
+
     # Remise globale (D2) — ventilee au prorata sur les lignes, tracee dans
     # le payload signe (`fiscal.py::_transaction_payload`).
     discount_type: Mapped[DiscountType | None] = mapped_column(
