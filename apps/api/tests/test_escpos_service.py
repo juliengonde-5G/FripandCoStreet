@@ -124,14 +124,39 @@ async def test_send_to_printer_delivers_exact_bytes():
 
 
 async def test_send_to_printer_raises_on_unreachable_host():
-    with pytest.raises(escpos_service.PrinterUnreachable):
+    with pytest.raises(escpos_service.PrinterUnreachable) as exc_info:
         # Port fermé sur localhost : connexion refusée immédiatement.
         await escpos_service.send_to_printer("127.0.0.1", 1, b"x", timeout=1.0)
+    exc = exc_info.value
+    # host/port en attributs structures (pour les appelants HTTP) — le
+    # message brut (str(exc)) garde le detail technique (errno inclus) mais
+    # reste reserve au log serveur, jamais renvoye tel quel au client.
+    assert exc.host == "127.0.0.1"
+    assert exc.port == 1
+    assert "127.0.0.1:1" in str(exc)
 
 
 async def test_send_to_printer_raises_when_host_missing():
-    with pytest.raises(escpos_service.PrinterUnreachable):
+    with pytest.raises(escpos_service.PrinterUnreachable) as exc_info:
         await escpos_service.send_to_printer("", 9100, b"x")
+    assert exc_info.value.host == ""
+    assert exc_info.value.port == 9100
+
+
+def test_printer_unreachable_message_has_no_ip_port_or_errno():
+    message = escpos_service.PRINTER_UNREACHABLE_MESSAGE
+    assert "192." not in message
+    assert "Errno" not in message
+    assert not any(ch.isdigit() for ch in message)  # pas d'IP ni de port
+    assert "allumée" in message
+
+
+def test_printer_unreachable_admin_message_shows_host_port_but_not_errno():
+    message = escpos_service.printer_unreachable_admin_message("192.168.1.50", 9100)
+    assert "192.168.1.50:9100" in message
+    assert "Errno" not in message
+    assert "refused" not in message.lower()
+    assert "connection" not in message.lower()
 
 
 async def test_ping_printer_online():

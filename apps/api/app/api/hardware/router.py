@@ -9,6 +9,7 @@
 # sonder/tester le matériel déjà configuré.
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
@@ -19,7 +20,10 @@ from app.core.security import get_current_user
 from app.models.user import User
 from app.services import escpos_service
 from app.services.fiscal import PosServiceError
+from app.services.jet import EVENT_PRINTER_UNREACHABLE, JournalService
 from app.services.settings_service import SettingsService
+
+logger = logging.getLogger("fripco")
 
 router = APIRouter(prefix="/hardware", tags=["hardware"])
 
@@ -61,12 +65,18 @@ async def printer_status(
 
 @router.post("/receipt/test")
 async def receipt_test(
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Imprime un ticket de test sur la MUNBYN réseau (bouton "Tester" de
     l'écran Matériel). 409 si l'imprimante n'est pas en mode réseau ; 502 si
-    le TCP échoue."""
+    le TCP échoue.
+
+    L'écran Admin Matériel peut afficher ``host:port`` dans le message
+    d'erreur (l'opérateur les a saisis lui-même) — mais jamais l'errno
+    système brut, qui reste réservé au log serveur et au JET
+    `printer.unreachable`.
+    """
     hardware = await SettingsService(db).get("hardware")
     if hardware.get("printer_mode") != "network":
         raise PosServiceError(
@@ -81,7 +91,18 @@ async def receipt_test(
     try:
         await escpos_service.send_to_printer(host, port, payload)
     except escpos_service.PrinterUnreachable as exc:
-        raise PosServiceError(str(exc), code="printer_unreachable", status_code=502)
+        logger.warning("Imprimante injoignable (%s:%s) : %s", exc.host, exc.port, exc)
+        await JournalService(db).record(
+            EVENT_PRINTER_UNREACHABLE,
+            user_id=user.id,
+            payload={"host": exc.host, "port": exc.port, "context": "hardware_test"},
+        )
+        await db.commit()
+        raise PosServiceError(
+            escpos_service.printer_unreachable_admin_message(exc.host, exc.port),
+            code="printer_unreachable",
+            status_code=502,
+        )
     return {"printed": True, "host": host, "port": port}
 
 

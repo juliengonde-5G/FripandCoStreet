@@ -117,7 +117,35 @@ async def test_receipt_test_unreachable_returns_502(client, auth_headers):
     )
     r = await client.post("/api/hardware/receipt/test", headers=auth_headers)
     assert r.status_code == 502
-    assert r.json()["code"] == "printer_unreachable"
+    body = r.json()
+    assert body["code"] == "printer_unreachable"
+    # Admin Matériel : host:port affichable (saisis par l'opérateur), mais
+    # jamais l'errno système brut.
+    assert "127.0.0.1:1" in body["detail"]
+    assert "Errno" not in body["detail"]
+    assert "refused" not in body["detail"].lower()
+
+
+async def test_receipt_test_unreachable_journals_host_port_not_raw_exception(client, auth_headers):
+    from sqlalchemy import select
+
+    from app.core.database import async_session
+    from app.models.jet import JournalEvent
+
+    await _configure_hardware(
+        client, auth_headers, printer_mode="network", printer_host="127.0.0.1", printer_port=1
+    )
+    r = await client.post("/api/hardware/receipt/test", headers=auth_headers)
+    assert r.status_code == 502
+
+    async with async_session() as db:
+        events = (
+            await db.execute(
+                select(JournalEvent).where(JournalEvent.event_type == "printer.unreachable")
+            )
+        ).scalars().all()
+    assert len(events) == 1
+    assert events[0].payload == {"host": "127.0.0.1", "port": 1, "context": "hardware_test"}
 
 
 # ---------------------------------------------------------------------------

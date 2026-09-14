@@ -81,6 +81,12 @@ EVENT_CLIENT_EXPORTED = "client.exported"
 # même matériel que l'application source). Voir `app/api/pos/router.py`.
 EVENT_RECEIPT_PRINTED = "receipt.printed"
 EVENT_DRAWER_KICKED = "drawer.kicked"
+# Echec TCP vers la MUNBYN (connexion ou envoi) — payload host/port
+# seulement, jamais l'exception systeme brute (celle-ci va au log serveur).
+# Le `detail` renvoye au client HTTP est toujours un message metier
+# generique, sans IP/port/errno (persona vendeuse) — voir
+# `app/services/escpos_service.py::PRINTER_UNREACHABLE_MESSAGE`.
+EVENT_PRINTER_UNREACHABLE = "printer.unreachable"
 
 
 class JournalService:

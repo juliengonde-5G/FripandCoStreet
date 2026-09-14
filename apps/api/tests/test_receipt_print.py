@@ -220,7 +220,16 @@ async def test_print_receipt_unreachable_printer_returns_502_and_does_not_count(
 
     r = await client.post(f"/api/pos/transactions/{sale['id']}/print", json={}, headers=auth_headers)
     assert r.status_code == 502
-    assert r.json()["code"] == "printer_unreachable"
+    body = r.json()
+    assert body["code"] == "printer_unreachable"
+    # Persona vendeuse : message metier lisible, JAMAIS d'IP/port/errno
+    # systeme sur l'ecran caisse.
+    assert body["detail"] == (
+        "Imprimante injoignable : vérifiez qu'elle est allumée et connectée "
+        "au réseau, puis réessayez."
+    )
+    assert "127.0.0.1" not in body["detail"]
+    assert "Errno" not in body["detail"]
 
     r2 = await client.get(f"/api/pos/transactions/{sale['id']}/receipt", headers=auth_headers)
     # duplicate_count (PR2, lecture texte) n'est pas le meme compteur que
@@ -229,6 +238,16 @@ async def test_print_receipt_unreachable_printer_returns_502_and_does_not_count(
 
     events = await _journal_events("receipt.printed")
     assert events == []
+
+    # Le detail technique (host/port, jamais l'exception brute) va au JET.
+    unreachable_events = await _journal_events("printer.unreachable")
+    assert len(unreachable_events) == 1
+    assert unreachable_events[0].payload == {
+        "host": "127.0.0.1",
+        "port": 1,
+        "transaction_id": sale["id"],
+        "mode": "network",
+    }
 
 
 async def test_print_receipt_unknown_transaction_404(client, auth_headers):
@@ -336,6 +355,41 @@ async def test_drawer_kick_returns_409_when_printer_not_network(client, auth_hea
     r = await client.post("/api/pos/drawer/kick", json={}, headers=auth_headers)
     assert r.status_code == 409
     assert r.json()["code"] == "drawer_unavailable"
+
+
+async def test_drawer_kick_unreachable_printer_returns_502_with_generic_message(
+    client, auth_headers, open_drawer
+):
+    # Port TCP ferme sur localhost : connexion refusee immediatement.
+    await _configure_hardware(
+        client,
+        auth_headers,
+        printer_mode="network",
+        printer_host="127.0.0.1",
+        printer_port=1,
+        drawer_enabled=True,
+    )
+    r = await client.post(
+        "/api/pos/drawer/kick", json={"reason": "cash_sale"}, headers=auth_headers
+    )
+    assert r.status_code == 502
+    body = r.json()
+    assert body["code"] == "printer_unreachable"
+    assert body["detail"] == (
+        "Imprimante injoignable : vérifiez qu'elle est allumée et connectée "
+        "au réseau, puis réessayez."
+    )
+    assert "127.0.0.1" not in body["detail"]
+    assert "Errno" not in body["detail"]
+
+    assert await _journal_events("drawer.kicked") == []
+    unreachable_events = await _journal_events("printer.unreachable")
+    assert len(unreachable_events) == 1
+    assert unreachable_events[0].payload == {
+        "host": "127.0.0.1",
+        "port": 1,
+        "reason": "cash_sale",
+    }
 
 
 async def test_drawer_kick_defaults_to_manual_reason(client, auth_headers, open_drawer, fake_printer):

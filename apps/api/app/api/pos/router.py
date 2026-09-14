@@ -3,6 +3,7 @@
 # `cb_router.py` (agent B) : voir le montage protege dans `app/main.py`.
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal
@@ -23,6 +24,7 @@ from app.services import escpos_service
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.jet import (
     EVENT_DRAWER_KICKED,
+    EVENT_PRINTER_UNREACHABLE,
     EVENT_RECEIPT_DUPLICATE,
     EVENT_RECEIPT_PRINTED,
     EVENT_Z_REGULARIZATION,
@@ -40,6 +42,8 @@ from .schemas import (
     OpenDrawerRequest,
     RegularizationRequest,
 )
+
+logger = logging.getLogger("fripco")
 
 router = APIRouter(prefix="/pos", tags=["pos"])
 
@@ -588,6 +592,31 @@ def _drawer_kick_bytes(hardware: dict) -> bytes:
     )
 
 
+async def _raise_printer_unreachable(
+    db: AsyncSession,
+    user: User,
+    exc: escpos_service.PrinterUnreachable,
+    *,
+    extra_payload: dict | None = None,
+) -> None:
+    """Journalise l'échec TCP (host/port seulement, jamais l'errno système)
+    et lève l'erreur métier générique attendue côté caisse (persona
+    vendeuse : pas d'IP, de port ni d'errno à l'écran). Le détail technique
+    complet (``str(exc)``) ne va qu'au log serveur."""
+    logger.warning("Imprimante injoignable (%s:%s) : %s", exc.host, exc.port, exc)
+    await JournalService(db).record(
+        EVENT_PRINTER_UNREACHABLE,
+        user_id=user.id,
+        payload={"host": exc.host, "port": exc.port, **(extra_payload or {})},
+    )
+    await db.commit()
+    raise PosServiceError(
+        escpos_service.PRINTER_UNREACHABLE_MESSAGE,
+        code="printer_unreachable",
+        status_code=502,
+    )
+
+
 async def _mark_printed(db: AsyncSession, receipt: Receipt) -> bool:
     """Incrémente `printed_count`/`printed_at` et retourne ``True`` si cette
     impression est un duplicata (`printed_count` était déjà > 0)."""
@@ -640,7 +669,9 @@ async def print_receipt(
     try:
         await escpos_service.send_to_printer(host, port, payload)
     except escpos_service.PrinterUnreachable as exc:
-        raise PosServiceError(str(exc), code="printer_unreachable", status_code=502)
+        await _raise_printer_unreachable(
+            db, user, exc, extra_payload={"transaction_id": str(transaction_id), "mode": "network"}
+        )
 
     is_duplicate = await _mark_printed(db, receipt)
     transaction_number = receipt.transaction.transaction_number if receipt.transaction else None
@@ -747,7 +778,7 @@ async def kick_drawer_network(
     try:
         await escpos_service.send_to_printer(host, port, _drawer_kick_bytes(hardware))
     except escpos_service.PrinterUnreachable as exc:
-        raise PosServiceError(str(exc), code="printer_unreachable", status_code=502)
+        await _raise_printer_unreachable(db, user, exc, extra_payload={"reason": body.reason})
     await JournalService(db).record(
         EVENT_DRAWER_KICKED, user_id=user.id, payload={"reason": body.reason}
     )

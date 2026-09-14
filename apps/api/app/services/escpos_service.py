@@ -57,7 +57,41 @@ WIDTH = 42
 
 
 class PrinterUnreachable(RuntimeError):
-    """Imprimante injoignable (connexion ou envoi TCP echoue)."""
+    """Imprimante injoignable (connexion ou envoi TCP echoue).
+
+    Le message complet (``str(exc)``) inclut le detail technique (host,
+    port, errno systeme) — reserve aux LOGS SERVEUR et au payload JET,
+    jamais renvoye tel quel a un client HTTP (persona vendeuse : pas
+    d'adresse IP ni d'errno sur l'ecran caisse). ``host``/``port`` sont
+    exposes en attributs structures pour que chaque appelant construise le
+    message utilisateur adapte a son ecran — voir
+    ``PRINTER_UNREACHABLE_MESSAGE`` (caisse, generique) et
+    ``printer_unreachable_admin_message`` (Admin Materiel, host:port sans
+    errno).
+    """
+
+    def __init__(self, message: str, *, host: str = "", port: int | None = None):
+        super().__init__(message)
+        self.host = host
+        self.port = port
+
+
+# Message utilisateur generique (ecran caisse — POS) : jamais d'IP, de port
+# ni d'errno systeme. Le detail technique va dans le log serveur et le JET
+# (`EVENT_PRINTER_UNREACHABLE`, app/services/jet.py) via `exc.host`/`exc.port`.
+PRINTER_UNREACHABLE_MESSAGE = (
+    "Imprimante injoignable : vérifiez qu'elle est allumée et connectée "
+    "au réseau, puis réessayez."
+)
+
+
+def printer_unreachable_admin_message(host: str, port: int | None) -> str:
+    """Message lisible pour l'écran Admin Matériel : host:port (saisis par
+    l'opérateur, donc pas un secret) mais jamais l'errno système brut."""
+    return (
+        f"Imprimante {host}:{port} injoignable : vérifiez qu'elle est "
+        "allumée et connectée au réseau, puis réessayez."
+    )
 
 
 # --- Encodage -----------------------------------------------------------------
@@ -161,20 +195,26 @@ async def send_to_printer(
     nombre d'octets ecrits. Leve ``PrinterUnreachable`` si la connexion ou
     l'envoi echoue dans le delai imparti — jamais d'exception non geree."""
     if not host:
-        raise PrinterUnreachable("Adresse IP de l'imprimante non configuree")
+        raise PrinterUnreachable(
+            "Adresse IP de l'imprimante non configuree", host=host, port=port
+        )
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout
         )
     except (OSError, asyncio.TimeoutError) as exc:
-        raise PrinterUnreachable(f"Imprimante {host}:{port} injoignable : {exc}") from exc
+        raise PrinterUnreachable(
+            f"Imprimante {host}:{port} injoignable : {exc}", host=host, port=port
+        ) from exc
     del reader
     try:
         writer.write(payload)
         await asyncio.wait_for(writer.drain(), timeout=timeout)
     except (OSError, asyncio.TimeoutError) as exc:
         raise PrinterUnreachable(
-            f"Imprimante {host}:{port} injoignable pendant l'envoi : {exc}"
+            f"Imprimante {host}:{port} injoignable pendant l'envoi : {exc}",
+            host=host,
+            port=port,
         ) from exc
     finally:
         writer.close()
