@@ -14,6 +14,7 @@ from sqlalchemy import text
 from app.api.admin.router import router as admin_router
 from app.api.auth.router import router as auth_router
 from app.api.health import router as health_router
+from app.api.pos.cb_router import router as cb_router
 from app.api.pos.router import router as pos_router
 from app.core.config import settings
 from app.core.database import async_session, engine
@@ -30,19 +31,6 @@ from app.jobs import register_all_jobs
 from app.services.fiscal import PosServiceError
 from app.services.jet import EVENT_SYSTEM_STARTUP, JournalService
 from app.version import APP_VERSION, EXPECTED_DB_REVISION
-
-# `cb_router.py` (agent B, §4.5/§7) : import protege — retire par
-# l'orchestrateur en fin de PR2 une fois le fichier definitivement livre.
-# Tant qu'il n'existe pas (parallelisation A/B), l'API demarre quand meme
-# sans les routes /pos/payments/cb/*.
-try:
-    from app.api.pos.cb_router import router as cb_router
-except ImportError:
-    cb_router = None
-    logging.getLogger("fripco").warning(
-        "app.api.pos.cb_router introuvable — routes CB SumUp non montees "
-        "(normal tant que l'agent B n'a pas livre le fichier)."
-    )
 
 setup_logging()
 logger = logging.getLogger("fripco")
@@ -235,5 +223,4 @@ app.include_router(health_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(pos_router, prefix="/api")
-if cb_router is not None:
-    app.include_router(cb_router, prefix="/api")
+app.include_router(cb_router, prefix="/api")

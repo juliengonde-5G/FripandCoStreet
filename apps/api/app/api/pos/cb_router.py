@@ -11,7 +11,6 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +20,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.payment_attempt import PaymentAttempt, PaymentAttemptStatus
 from app.models.user import User
+from app.services.fiscal import PosServiceError
 from app.services.jet import JournalService
 from app.services.sumup_service import SumUpService, is_test_api_key, redact_sumup_error
 
@@ -70,20 +70,6 @@ async def _cached_ping(svc: SumUpService) -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Aide — réponse d'erreur métier au format exact du contrat (§5) :
-# {"detail": "message français", "code": "snake_case"}. Un simple
-# `HTTPException(detail=...)` produirait `{"detail": {"detail":.., "code":..}}`
-# via le handler global — on construit donc la réponse nous-mêmes.
-# ---------------------------------------------------------------------------
-
-
-def _error(status_code: int, message: str, code: str, **extra) -> JSONResponse:
-    content = {"detail": message, "code": code}
-    content.update(extra)
-    return JSONResponse(status_code=status_code, content=content)
-
-
 def _client_ip(request: Request) -> str | None:
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
@@ -115,21 +101,20 @@ async def _get_attempt(db: AsyncSession, checkout_id: str) -> PaymentAttempt | N
     ).scalar_one_or_none()
 
 
-def _guard_configured_and_key(svc: SumUpService) -> JSONResponse | None:
-    """Vérifications communes à initiate/retry — None si tout va bien."""
+def _guard_configured_and_key(svc: SumUpService) -> None:
+    """Vérifications communes à initiate/retry — lève `PosServiceError` sinon."""
     if not svc.is_configured:
-        return _error(
-            409,
+        raise PosServiceError(
             "Aucun terminal de paiement configuré — encaissez en espèces.",
-            "reader_unavailable",
+            code="reader_unavailable",
+            status_code=409,
         )
     if settings.is_production and is_test_api_key(svc.api_key):
-        return _error(
-            409,
+        raise PosServiceError(
             "Une clé SumUp de test est interdite en production.",
-            "test_key_in_production",
+            code="test_key_in_production",
+            status_code=409,
         )
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -179,45 +164,39 @@ async def initiate_cb_payment(
     encore de `checkout_id` à journaliser).
     """
     svc = SumUpService()
-    guard = _guard_configured_and_key(svc)
-    if guard is not None:
-        return guard
+    _guard_configured_and_key(svc)
 
     existing = await _find_pending_or_terminal(db, body.client_uuid)
     if existing is not None:
         if existing.status == PaymentAttemptStatus.pending:
-            return _error(
-                409,
-                "Un paiement est déjà en attente pour cette vente.",
-                "attempt_pending",
-                checkout_id=existing.checkout_id,
-                status="pending",
+            raise PosServiceError(
+                f"Un paiement est déjà en attente pour cette vente "
+                f"(checkout_id={existing.checkout_id}).",
+                code="attempt_pending",
+                status_code=409,
             )
         if existing.status == PaymentAttemptStatus.paid:
-            return _error(
-                409,
-                "Cette vente a déjà un paiement CB validé.",
-                "already_paid",
-                checkout_id=existing.checkout_id,
-                status="paid",
+            raise PosServiceError(
+                f"Cette vente a déjà un paiement CB validé (checkout_id={existing.checkout_id}).",
+                code="already_paid",
+                status_code=409,
             )
         # failed / cancelled : un essai existe déjà pour ce client_uuid —
         # on ne peut pas repousser sur le MÊME checkout_id (contrainte
         # d'unicité) : la caissière doit utiliser le réessai dédié.
-        return _error(
-            409,
-            "Ce paiement CB a déjà échoué pour cette vente — utilisez le réessai.",
-            "attempt_failed",
-            checkout_id=existing.checkout_id,
-            status=existing.status.value,
+        raise PosServiceError(
+            f"Ce paiement CB a déjà échoué pour cette vente "
+            f"(checkout_id={existing.checkout_id}) — utilisez le réessai.",
+            code="attempt_failed",
+            status_code=409,
         )
 
     ping = await _cached_ping(svc)
     if not ping.get("ready"):
-        return _error(
-            409,
+        raise PosServiceError(
             ping.get("message") or "Terminal de paiement indisponible.",
-            "reader_unavailable",
+            code="reader_unavailable",
+            status_code=409,
         )
 
     client_transaction_id = str(body.client_uuid)
@@ -258,11 +237,14 @@ async def initiate_cb_payment(
     )
 
     if failed:
-        return _error(
-            409,
+        # L'essai (checkout_id + JET) est déjà écrit : commit explicite avant
+        # de lever, sinon le rollback déclenché par `get_db` sur l'exception
+        # effacerait cette trace — comme `auth/router.py::login` (PR1).
+        await db.commit()
+        raise PosServiceError(
             result.get("error_friendly") or "Le paiement a été refusé par le terminal.",
-            "payment_failed",
-            checkout_id=attempt.checkout_id,
+            code="payment_failed",
+            status_code=409,
         )
     return {"checkout_id": attempt.checkout_id, "status": "pending"}
 
@@ -281,7 +263,7 @@ async def get_cb_payment_status(
 ):
     attempt = await _get_attempt(db, checkout_id)
     if attempt is None:
-        return _error(404, "Paiement CB introuvable.", "not_found")
+        raise PosServiceError("Paiement CB introuvable.", code="not_found", status_code=404)
 
     if attempt.status != PaymentAttemptStatus.pending:
         # Déjà résolu — pas de nouveau poll SumUp, pas de nouvel événement JET
@@ -368,11 +350,17 @@ async def cancel_cb_payment(
 ):
     attempt = await _get_attempt(db, checkout_id)
     if attempt is None:
-        return _error(404, "Paiement CB introuvable.", "not_found")
+        raise PosServiceError("Paiement CB introuvable.", code="not_found", status_code=404)
     if attempt.status == PaymentAttemptStatus.paid:
-        return _error(409, "Ce paiement CB est déjà validé — impossible de l'annuler.", "already_paid")
+        raise PosServiceError(
+            "Ce paiement CB est déjà validé — impossible de l'annuler.",
+            code="already_paid",
+            status_code=409,
+        )
     if attempt.status != PaymentAttemptStatus.pending:
-        return _error(409, "Ce paiement CB n'est plus en attente.", "not_pending")
+        raise PosServiceError(
+            "Ce paiement CB n'est plus en attente.", code="not_pending", status_code=409
+        )
 
     svc = SumUpService()
     ok = await svc.cancel_checkout(checkout_id)
@@ -383,10 +371,10 @@ async def cancel_cb_payment(
         # comptable (client débité mais vente marquée annulée).
         recheck = await svc.get_checkout_status(checkout_id)
         if str(recheck.get("status", "")).upper() == "PAID":
-            return _error(
-                409,
+            raise PosServiceError(
                 "Le client vient de valider sa carte — ce paiement ne peut plus être annulé.",
-                "already_paid",
+                code="already_paid",
+                status_code=409,
             )
 
     attempt.status = PaymentAttemptStatus.cancelled
@@ -418,21 +406,23 @@ async def retry_cb_payment(
 ):
     attempt = await _get_attempt(db, checkout_id)
     if attempt is None:
-        return _error(404, "Paiement CB introuvable.", "not_found")
+        raise PosServiceError("Paiement CB introuvable.", code="not_found", status_code=404)
     if attempt.status not in (PaymentAttemptStatus.failed, PaymentAttemptStatus.cancelled):
-        return _error(409, "Ce paiement CB n'est pas réessayable dans son état actuel.", "not_retryable")
+        raise PosServiceError(
+            "Ce paiement CB n'est pas réessayable dans son état actuel.",
+            code="not_retryable",
+            status_code=409,
+        )
 
     svc = SumUpService()
-    guard = _guard_configured_and_key(svc)
-    if guard is not None:
-        return guard
+    _guard_configured_and_key(svc)
 
     ping = await _cached_ping(svc)
     if not ping.get("ready"):
-        return _error(
-            409,
+        raise PosServiceError(
             ping.get("message") or "Terminal de paiement indisponible.",
-            "reader_unavailable",
+            code="reader_unavailable",
+            status_code=409,
         )
 
     new_count = attempt.attempt_count + 1
@@ -475,10 +465,12 @@ async def retry_cb_payment(
     )
 
     if failed:
-        return _error(
-            409,
+        # Même raison que dans `initiate_cb_payment` : l'essai est déjà écrit,
+        # il doit survivre au rollback déclenché par `get_db` sur l'exception.
+        await db.commit()
+        raise PosServiceError(
             result.get("error_friendly") or "Le paiement a été refusé par le terminal.",
-            "payment_failed",
-            checkout_id=new_attempt.checkout_id,
+            code="payment_failed",
+            status_code=409,
         )
     return {"checkout_id": new_attempt.checkout_id, "status": "pending"}

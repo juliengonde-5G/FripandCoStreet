@@ -46,6 +46,17 @@ async def test_guard_closes_forgotten_open_drawer(client, auth_headers, open_dra
         assert z.counted is False
         assert z.transaction_count == 1
 
+        auto_closed_events = (
+            await db.execute(
+                select(JournalEvent).where(JournalEvent.event_type == "drawer.auto_closed")
+            )
+        ).scalars().all()
+        assert len(auto_closed_events) == 1
+        payload = auto_closed_events[0].payload
+        assert payload["drawer_id"] == str(drawer.id)
+        assert payload["z_number"] == z.report_number
+        assert payload["expected_amount"] == float(z.expected_amount)
+
 
 async def test_guard_is_a_noop_without_open_drawer(client, auth_headers):
     # Aucune caisse ouverte — ne doit rien faire, ne doit pas lever.

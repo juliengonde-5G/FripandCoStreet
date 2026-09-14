@@ -25,6 +25,7 @@ from app.models.pos import (
     TransactionType,
     ZReport,
 )
+from app.services.jet import EVENT_DRAWER_AUTO_CLOSED, JournalService
 from app.version import FISCAL_SIGNATURE_VERSION
 
 GENESIS_HASH = "0"
@@ -251,6 +252,14 @@ class FiscalService:
 
         previous_hash = GENESIS_HASH
         for t in transactions:
+            if not t.hash_chain:
+                return {
+                    "valid": False,
+                    "checked": t.transaction_number,
+                    "broken_at": t.transaction_number,
+                    "reason": "unsigned_transaction",
+                    "message": f"transaction non signée n° {t.transaction_number}",
+                }
             if t.previous_hash != previous_hash:
                 return {
                     "valid": False,
@@ -537,6 +546,14 @@ class FiscalService:
 
         previous_hash = GENESIS_HASH
         for report in reports:
+            if not report.hash:
+                return {
+                    "valid": False,
+                    "checked": report.report_number,
+                    "broken_at": report.report_number,
+                    "reason": "unsigned_z_report",
+                    "message": f"rapport Z non signé n° {report.report_number}",
+                }
             if report.previous_hash != previous_hash:
                 return {
                     "valid": False,
@@ -651,9 +668,17 @@ class FiscalService:
                 "par la garde fiscale 23:59."
             )
             await self.db.flush()
-            reports.append(
-                await self.generate_z_report(drawer, user_id or drawer.user_id, counted=False)
+            z_report = await self.generate_z_report(drawer, user_id or drawer.user_id, counted=False)
+            await JournalService(self.db).record(
+                EVENT_DRAWER_AUTO_CLOSED,
+                user_id=user_id,
+                payload={
+                    "drawer_id": str(drawer.id),
+                    "z_number": z_report.report_number,
+                    "expected_amount": float(z_report.expected_amount),
+                },
             )
+            reports.append(z_report)
         return reports
 
     # ------------------------------------------------------------------

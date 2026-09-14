@@ -51,12 +51,23 @@ async def list_journal_events(
 
     La lecture du JET n'est volontairement pas elle-meme journalisee (seul
     l'export futur le sera) — pas d'ajout de complexite non demandee ici.
+
+    `next_before_seq` porte le curseur de pagination du front : le `seq` du
+    dernier evenement de cette page (le plus ancien, l'ordre etant
+    decroissant), a repasser en `before_seq` pour la page suivante — ou
+    `null` quand cette page n'est pas pleine (`limit`), preuve qu'il n'y a
+    plus rien au-dela.
     """
     query = select(JournalEvent).order_by(JournalEvent.seq.desc())
     if before_seq is not None:
         query = query.where(JournalEvent.seq < before_seq)
     events = (await db.execute(query.limit(limit))).scalars().all()
-    return {"events": [_serialize(e) for e in events], "count": len(events)}
+    next_before_seq = events[-1].seq if len(events) == limit else None
+    return {
+        "events": [_serialize(e) for e in events],
+        "count": len(events),
+        "next_before_seq": next_before_seq,
+    }
 
 
 @router.get("/jet/integrity")

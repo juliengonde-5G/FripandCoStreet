@@ -180,7 +180,7 @@ async def test_initiate_duplicate_pending_returns_409(client, auth_headers, monk
     assert second.status_code == 409
     body = second.json()
     assert body["code"] == "attempt_pending"
-    assert body["checkout_id"] == client_uuid
+    assert client_uuid in body["detail"]  # checkout_id désormais dans le message, pas un champ à part
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +455,10 @@ async def test_retry_after_failure_creates_new_attempt(client, auth_headers, mon
         headers=auth_headers,
     )
     assert init.status_code == 409
-    checkout_id = init.json()["checkout_id"]
+    # L'échec du push initial n'expose plus `checkout_id` dans le corps
+    # d'erreur (PosServiceError = `{detail, code}` seulement) — mais pour un
+    # premier essai (`attempt_count=1`), il est toujours `= client_uuid`.
+    checkout_id = client_uuid
 
     state["fail_push"] = False
     retry = await client.post(f"/api/pos/payments/cb/{checkout_id}/retry", headers=auth_headers)

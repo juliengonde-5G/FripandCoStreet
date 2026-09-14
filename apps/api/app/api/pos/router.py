@@ -347,14 +347,21 @@ async def get_receipt(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """Texte du ticket + compteur de duplicata.
+
+    Décision d'intégration PR2 (tranchée par l'orchestrateur) : CHAQUE appel
+    à cet endpoint est compté comme un duplicata, y compris le tout premier.
+    Le texte du ticket est déjà livré au front dans la réponse 201 de
+    `POST /pos/transactions` (`receipt_text`) — toute lecture via ce GET est
+    donc par construction un renvoi/réimpression (§4.4), jamais "la"
+    lecture originale. `duplicate_count` est incrémenté et `receipt.duplicate`
+    journalisé au JET à chaque appel, sans exception pour le premier.
+    """
     receipt = (
         await db.execute(select(Receipt).where(Receipt.transaction_id == transaction_id))
     ).scalar_one_or_none()
     if receipt is None:
         raise HTTPException(status_code=404, detail={"detail": "Ticket introuvable.", "code": "not_found"})
-    # Chaque GET suit forcément la réponse 201 (qui a déjà livré le texte au
-    # front) : toute lecture via cet endpoint est donc un renvoi/réimpression
-    # (§4.4) — incrémentée et journalisée systématiquement.
     receipt.duplicate_count += 1
     await JournalService(db).record(
         EVENT_RECEIPT_DUPLICATE,
