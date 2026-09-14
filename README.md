@@ -10,7 +10,7 @@ apps/api/    FastAPI (Python 3.11) — auth, JET chaîné, ventes/Z signés (HMA
 apps/web/    Next.js 15 — connexion, caisse, administration
 docker/      Compose prod/dev, Dockerfiles, init des rôles PostgreSQL, fragment Caddy
 scripts/     deploy.sh, backup.sh
-docs/        DEPLOIEMENT.md, ARCHITECTURE_PR2.md (contrat), JEU_ESSAI_PR2.md (valeurs attendues)
+docs/        DEPLOIEMENT.md, ARCHITECTURE_PR{2,3}.md (contrats), JEU_ESSAI_PR{2,3}.md (valeurs attendues)
 ```
 
 ## Démarrage rapide (dev)
@@ -52,6 +52,6 @@ cd ../web && npm run lint && npx tsc --noEmit && npm run build
 |---|---|---|
 | PR0 | Audit d'extraction + écarts NF525 | livré |
 | PR1 | Squelette : auth mono-compte, JET chaîné, migration initiale, Docker, proxy, backup | livré |
-| PR2 | Vente en saisie libre, remise globale, espèces, tickets, Z journalier, annulation, TPE SumUp (push API) | **cette PR** |
-| PR3 | Client / e-mail Brevo / newsletter | à venir |
+| PR2 | Vente en saisie libre, remise globale, espèces, tickets, Z journalier, annulation, TPE SumUp (push API) | livré |
+| PR3 | Client, ticket par e-mail (Brevo), liste newsletter dédiée, consentement, RGPD | **cette PR** |
 | PR4 | Exports, archive fiscale, clôtures, attestation | à venir |
