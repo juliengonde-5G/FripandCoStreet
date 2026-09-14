@@ -31,6 +31,10 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
         "vat_number": "",
         "phone": "",
         "email": "",
+        # PR3 (E8) — déclaré par `ShopSettingsIn` (app/api/admin/router.py) ;
+        # doit être renvoyé par défaut (avant tout PUT) comme les autres
+        # champs, pas seulement une fois la clé écrite au moins une fois.
+        "dpo_email": "",
     },
     "fiscal": {"tva_rate": f"{DEFAULT_TVA_RATE:.2f}"},
     "receipt": {"header_note": "", "footer_note": "", "return_policy": ""},

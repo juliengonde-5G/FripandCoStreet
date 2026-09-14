@@ -654,6 +654,20 @@ async def print_receipt(
             "duplicate": is_duplicate,
         },
     )
+    if kick_bytes is not None:
+        # L'impulsion tiroir a effectivement ete incluse dans ce job
+        # d'impression (kick=true + hardware.drawer_enabled) : journalisee
+        # dans la MEME transaction SQL que `receipt.printed`, comme
+        # `POST /pos/drawer/kick` le fait pour une impulsion seule.
+        await JournalService(db).record(
+            EVENT_DRAWER_KICKED,
+            user_id=user.id,
+            payload={
+                "reason": "cash_sale",
+                "with_print": True,
+                "transaction_number": transaction_number,
+            },
+        )
     await db.commit()
     return {"printed": True, "printed_count": receipt.printed_count, "duplicate": is_duplicate}
 
@@ -691,6 +705,19 @@ async def get_transaction_escpos(
             "duplicate": is_duplicate,
         },
     )
+    if kick_bytes is not None:
+        # Meme regle que POST .../print ci-dessus : l'impulsion tiroir a
+        # ete incluse dans les octets renvoyes (kick=1 + drawer_enabled) —
+        # journalisee dans la meme transaction SQL que `receipt.printed`.
+        await JournalService(db).record(
+            EVENT_DRAWER_KICKED,
+            user_id=user.id,
+            payload={
+                "reason": "cash_sale",
+                "with_print": True,
+                "transaction_number": transaction_number,
+            },
+        )
     await db.commit()
     return Response(
         content=payload,

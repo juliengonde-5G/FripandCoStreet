@@ -101,6 +101,9 @@ async def test_print_receipt_network_success_first_print_is_not_a_duplicate(
         "mode": "network",
         "duplicate": False,
     }
+    # Pas de kick demande (drawer_enabled par defaut = False, body sans
+    # "kick") : aucun `drawer.kicked` ne doit etre journalise.
+    assert await _journal_events("drawer.kicked") == []
 
 
 async def test_print_receipt_second_print_is_a_duplicate(
@@ -146,6 +149,16 @@ async def test_print_receipt_with_kick_appends_kick_bytes(
     assert r.status_code == 200, r.text
     assert received[0].endswith(escpos_service.build_drawer_kick(pin=0))
 
+    printed_events = await _journal_events("receipt.printed")
+    assert len(printed_events) == 1
+    kicked_events = await _journal_events("drawer.kicked")
+    assert len(kicked_events) == 1
+    assert kicked_events[0].payload == {
+        "reason": "cash_sale",
+        "with_print": True,
+        "transaction_number": 1,
+    }
+
 
 async def test_print_receipt_kick_ignored_when_drawer_disabled(
     client, auth_headers, open_drawer, fake_printer
@@ -166,6 +179,11 @@ async def test_print_receipt_kick_ignored_when_drawer_disabled(
     )
     assert r.status_code == 200, r.text
     assert not received[0].endswith(escpos_service.build_drawer_kick(pin=0))
+
+    assert len(await _journal_events("receipt.printed")) == 1
+    # Tiroir desactive : l'impulsion n'a pas ete incluse -> pas de
+    # `drawer.kicked`, meme si `kick=true` a ete demande dans le corps.
+    assert await _journal_events("drawer.kicked") == []
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +260,9 @@ async def test_get_escpos_returns_raw_bytes_and_counts_as_print(client, auth_hea
     assert len(events2) == 2
     assert events2[1].payload["duplicate"] is True
 
+    # Pas de kick demande : aucun `drawer.kicked` journalise.
+    assert await _journal_events("drawer.kicked") == []
+
 
 async def test_get_escpos_with_kick_query_param(client, auth_headers, open_drawer):
     await _configure_hardware(client, auth_headers, drawer_enabled=True)
@@ -252,6 +273,17 @@ async def test_get_escpos_with_kick_query_param(client, auth_headers, open_drawe
     )
     assert r.status_code == 200
     assert r.content.endswith(escpos_service.build_drawer_kick(pin=0))
+
+    printed_events = await _journal_events("receipt.printed")
+    assert len(printed_events) == 1
+    assert printed_events[0].payload["mode"] == "webusb"
+    kicked_events = await _journal_events("drawer.kicked")
+    assert len(kicked_events) == 1
+    assert kicked_events[0].payload == {
+        "reason": "cash_sale",
+        "with_print": True,
+        "transaction_number": 1,
+    }
 
 
 async def test_get_escpos_unknown_transaction_404(client, auth_headers):
