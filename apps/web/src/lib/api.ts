@@ -2,7 +2,7 @@
  * Client API — Frip & Co Street.
  *
  * Déploiement même origine en production (site + API sous
- * https://street.fripco.fr, API sous /api/*) : NEXT_PUBLIC_API_URL reste
+ * https://lloomi.fr, API sous /api/*) : NEXT_PUBLIC_API_URL reste
  * vide et les chemins d'API sont donc relatifs. En dev, on pointe vers
  * l'API locale (http://localhost:8000 par défaut).
  */
