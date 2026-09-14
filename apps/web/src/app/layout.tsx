@@ -33,8 +33,12 @@ export const metadata: Metadata = {
   title: "Frip & Co Street — Caisse",
   description: "Frip & Co Street — caisse boutique éphémère, Rouen.",
   icons: {
-    icon: "/favicon.png",
-    shortcut: "/favicon.png",
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/favicon.png", type: "image/png" },
+    ],
+    shortcut: "/favicon.ico",
+    apple: "/apple-touch-icon.png",
   },
 };
 
