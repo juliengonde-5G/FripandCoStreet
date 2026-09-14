@@ -1,4 +1,4 @@
-# Nouveau service — remplace le fichier `data/app_config.json` de Vintiz par
+# Nouveau service — remplace le fichier `data/app_config.json` de l'application source par
 # un stockage en base (`app_settings`, D13 du contrat PR2). Modelise sur le
 # JournalService (verrou avisory Postgres avant lecture, ecriture JET dans la
 # meme transaction SQL, jamais d'exception avalee).

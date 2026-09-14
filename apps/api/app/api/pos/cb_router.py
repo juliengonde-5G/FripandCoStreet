@@ -1,6 +1,7 @@
 # Nouveau routeur (PR2, §4.5 + §5 ARCHITECTURE_PR2.md) — endpoints CB SumUp.
 # Monté par `app/main.py` (agent A) via un import protégé si ce module
-# existe. Modelé sur `apps/api/app/api/pos/router.py` de Vintiz (bloc
+# existe. Modelé sur le module équivalent de l'application source
+# (`apps/api/app/api/pos/router.py`, bloc
 # `payments/cb/*`, L1433-1830), réduit au push-reader seul (D5/D7 : pas de
 # mode « lien de paiement »).
 from __future__ import annotations

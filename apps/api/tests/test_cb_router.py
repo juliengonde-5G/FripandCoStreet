@@ -50,7 +50,7 @@ def _no_retry_sleep(monkeypatch):
 
 def _configure_sumup(monkeypatch, handler, *, configured: bool = True) -> None:
     """Fait en sorte que chaque `SumUpService()` créé par le routeur soit
-    configuré et route son HTTP par ``handler`` (comme Vintiz : le service
+    configuré et route son HTTP par ``handler`` (comme l'application source : le service
     est instancié à la demande dans chaque endpoint, pas injecté)."""
     original_init = SumUpService.__init__
 

@@ -1,6 +1,6 @@
-# Extrait de Vintiz (apps/api/app/services/brevo_contacts.py), fortement
+# Extrait de l'application source (apps/api/app/services/brevo_contacts.py), fortement
 # reduit et adapte aux regles E1/E2 du contrat (docs/ARCHITECTURE_PR3.md) :
-# le compte Brevo est PARTAGE avec Vintiz Vernon (Julien), donc ce module
+# le compte Brevo est PARTAGE avec la boutique de Vernon (Julien), donc ce module
 # n'ecrit JAMAIS sur la blocklist globale d'un contact (`emailBlacklisted`)
 # ni ne le supprime (`DELETE /v3/contacts`) — uniquement sur la liste
 # dediee `BREVO_LIST_ID` (`listIds`/`unlinkListIds`) et les attributs
@@ -122,7 +122,7 @@ async def push_contact(client: Client) -> SyncResult:
 async def remove_from_list(email: str) -> SyncResult:
     """Retire un contact de la liste Fripco dediee — JAMAIS `DELETE
     /v3/contacts` (E1) : le contact reste chez Brevo (compte partagé avec
-    Vintiz), seule son appartenance à la liste Fripco change.
+    la boutique de Vernon), seule son appartenance à la liste Fripco change.
 
     ``POST /v3/contacts/lists/{id}/contacts/remove {emails:[email]}``.
     """

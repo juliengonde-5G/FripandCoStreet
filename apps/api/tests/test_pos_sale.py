@@ -1,4 +1,4 @@
-# Extrait de Vintiz (tests/test_pos_idempotence.py + tests/test_pos.py),
+# Extrait de l'application source (tests/test_pos_idempotence.py + tests/test_pos.py),
 # adapte au panier libre PR2 (§4.1 du contrat) : pas de produits, deux
 # moyens de paiement (especes / CB via `sumup_verify` monkeypatche, §7).
 import uuid

@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/core/config.py) — perimetre reduit a la
+# Extrait de l'application source (apps/api/app/core/config.py) — perimetre reduit a la
 # caisse Frip & Co Street (mono-compte, sans IA/SMTP/Twilio/Redis/uploads).
 import logging
 import os
@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     SUMUP_API_BASE: str = "https://api.sumup.com"
 
     # E-mail (PR3) — passerelle Brevo -> SMTP -> simulation (E6). Le compte
-    # Brevo est PARTAGE avec Vintiz Vernon (Julien) : Fripco n'ecrit jamais
+    # Brevo est PARTAGE avec la boutique de Vernon (Julien) : Fripco n'ecrit jamais
     # sur la blocklist globale d'un contact ni ne supprime un contact Brevo,
     # seulement sur SA liste dediee (BREVO_LIST_ID, E1). BREVO_API_BASE est
     # la RACINE de l'hote Brevo (comme SUMUP_API_BASE), a ne changer que

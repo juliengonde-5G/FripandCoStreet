@@ -1,5 +1,5 @@
-# Extrait de Vintiz (apps/api/app/jobs.py:648-652 — daily_fiscal_close_guard
-# uniquement, §4.3 du contrat PR2). Aucun autre cron Vintiz (clotures
+# Extrait de l'application source (apps/api/app/jobs.py:648-652 — daily_fiscal_close_guard
+# uniquement, §4.3 du contrat PR2). Aucun autre cron de l'application source (clotures
 # mensuelle/annuelle, exports) n'est repris — hors perimetre PR2.
 from __future__ import annotations
 

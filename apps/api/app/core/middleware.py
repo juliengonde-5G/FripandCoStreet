@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/core/middleware.py) — AuditContextMiddleware
+# Extrait de l'application source (apps/api/app/core/middleware.py) — AuditContextMiddleware
 # retire (pas de piste d'audit ORM generique ici, seul le JET fait foi).
 """Middlewares HTTP pour le suivi des requetes et les en-tetes de securite."""
 

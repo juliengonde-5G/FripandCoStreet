@@ -1,7 +1,7 @@
 # Frip & Co Street — caisse boutique éphémère
 
 Application de caisse **isolée** (Rouen, sept. 2026 → janv. 2027), extraite
-des modules éprouvés de Vintiz : vente en saisie libre, espèces, CB SumUp,
+des modules éprouvés de l'application source : vente en saisie libre, espèces, CB SumUp,
 ticket par e-mail, contacts newsletter, exports comptables — sous régime
 NF525 par auto-attestation. Cahier des charges : `CDC_Caisse_FripCo_Street.md`.
 

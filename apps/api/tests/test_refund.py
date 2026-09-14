@@ -1,4 +1,4 @@
-# Extrait de Vintiz (tests/test_refund_service.py), reduit a l'annulation
+# Extrait de l'application source (tests/test_refund_service.py), reduit a l'annulation
 # TOTALE exposee par le contrat PR2 (D4, §4.2).
 import uuid
 

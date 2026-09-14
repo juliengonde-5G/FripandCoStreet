@@ -1,11 +1,12 @@
 # Nouveau service — Journal des Evenements Techniques (JET).
 #
-# Modelise sur le chainage HMAC-SHA256 de app/services/fiscal.py de Vintiz
-# (methodes `_canonical`, `_hmac`, `_iso`, `_get_previous_*_hash`, genesis
-# "0") et sur le verrou `pg_advisory_xact_lock` utilise pour serialiser
-# l'attribution des numeros de sequence (voir app/services/pos.py:103-107
-# et app/services/fiscal.py:247-248 dans Vintiz). Contrairement a
-# `EventService` (Vintiz), ce service NE PIEGE JAMAIS les exceptions : un
+# Modelise sur le chainage HMAC-SHA256 de app/services/fiscal.py de
+# l'application source (methodes `_canonical`, `_hmac`, `_iso`,
+# `_get_previous_*_hash`, genesis "0") et sur le verrou
+# `pg_advisory_xact_lock` utilise pour serialiser l'attribution des numeros
+# de sequence (voir app/services/pos.py:103-107 et app/services/fiscal.py:247-248
+# dans l'application source). Contrairement a `EventService` (l'application
+# source), ce service NE PIEGE JAMAIS les exceptions : un
 # echec d'ecriture du JET doit faire echouer la requete plutot que de laisser
 # passer un evenement de securite non journalise (pilier "securisation" de
 # l'auto-attestation NF525, cf. CDC Frip & Co Street §3.1).

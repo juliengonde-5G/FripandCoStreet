@@ -1,9 +1,10 @@
 # Frip & Co Street — API
 
 API de caisse pour la boutique éphémère **Frip & Co Street** (Rouen).
-Squelette backend isolé, extrait et simplifié du monorepo Vintiz — voir les
-en-têtes `# Extrait de Vintiz (...)` dans le code pour la provenance de
-chaque fichier. Mono-boutique, mono-utilisateur, auto-attestation NF525.
+Squelette backend isolé, extrait et simplifié du monorepo de l'application
+source — voir les en-têtes `# Extrait de l'application source (...)` dans le
+code pour la provenance de chaque fichier. Mono-boutique, mono-utilisateur,
+auto-attestation NF525.
 
 ## Démarrage rapide
 
@@ -80,5 +81,6 @@ Inclus : authentification (login/refresh/me/logout), rate-limit, JET,
 middlewares (request-id, en-têtes de sécurité), schéma Alembic + trigger
 d'immuabilité. **Exclus** (prochaines PR) : vente, caisse espèces, paiement
 CB SumUp, fidélité/newsletter Brevo, export comptable — voir
-`CDC_Caisse_FripCo_Street.md` à la racine du monorepo Vintiz pour le périmètre
-complet et `fripco-street/CLAUDE.md` pour les règles non négociables du repo.
+`CDC_Caisse_FripCo_Street.md` à la racine du monorepo de l'application source
+pour le périmètre complet et `fripco-street/CLAUDE.md` pour les règles non
+négociables du repo.

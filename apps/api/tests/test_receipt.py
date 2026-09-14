@@ -1,4 +1,4 @@
-# Extrait de Vintiz (tests/test_receipt_refund.py), adapte au ticket PR2
+# Extrait de l'application source (tests/test_receipt_refund.py), adapte au ticket PR2
 # (§4.4 du contrat) — mention D14, pas de "conforme NF525", duplicate_count.
 import uuid
 

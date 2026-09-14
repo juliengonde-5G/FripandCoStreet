@@ -1,7 +1,7 @@
 # CI Frip & Co Street — s'active telle quelle une fois le dossier transféré
 # dans son propre dépôt. Tant que le code vit dans fripco-street/ du dépôt
-# Vintiz, c'est .github/workflows/fripco-street-ci.yml (à la racine de ce
-# dépôt-là) qui exécute les mêmes jobs avec un filtre de chemin.
+# de l'application source, c'est .github/workflows/fripco-street-ci.yml (à la
+# racine de ce dépôt-là) qui exécute les mêmes jobs avec un filtre de chemin.
 name: CI
 
 on:

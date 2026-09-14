@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/api/admin/router.py) — perimetre reduit a
+# Extrait de l'application source (apps/api/app/api/admin/router.py) — perimetre reduit a
 # la lecture du JET (compte unique : tout utilisateur authentifie a acces
 # admin, pas de RoleChecker). PR2 (docs/ARCHITECTURE_PR2.md §4.7) ajoute les
 # parametres boutique (`app_settings`) et le controle d'integrite fiscal.
@@ -91,7 +91,7 @@ async def journal_integrity(
 
 # ---------------------------------------------------------------------------
 # Parametrage boutique (PR2, D13, §4.7) — remplace `data/app_config.json` de
-# Vintiz : stocke en base, toute ecriture journalisee au JET.
+# l'application source : stocke en base, toute ecriture journalisee au JET.
 # ---------------------------------------------------------------------------
 
 _SIRET_RE = re.compile(r"^\d{14}$")

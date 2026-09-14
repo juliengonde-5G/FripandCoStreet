@@ -61,9 +61,9 @@ du VPS).
 ### 2.3 Code et secrets
 
 1. **Clone** : `git clone <dépôt fripco-street> /opt/fripco-street` (tant
-   que le code vit dans le dépôt Vintiz : `/opt/vintiz/fripco-street`
-   fonctionne aussi, `deploy.sh` est relatif à lui-même et ne touche pas à
-   git sans `--pull`).
+   que le code vit imbriqué dans le dépôt de l'application source, le
+   chemin équivalent sous ce dépôt-là fonctionne aussi, `deploy.sh` est
+   relatif à lui-même et ne touche pas à git sans `--pull`).
 2. **Secrets** : `cp .env.example .env` puis remplir toutes les valeurs
    `CHANGER_MOI` (`openssl rand -hex 32` pour `SECRET_KEY` et
    `FISCAL_SIGNING_KEY`, deux valeurs différentes). `FISCAL_SIGNING_KEY` est
@@ -71,7 +71,8 @@ du VPS).
 
 ### 2.4 Non-interférence avec l'autre application du VPS
 
-Le VPS héberge déjà une autre application (Vintiz). Frip & Co Street ne
+Le VPS héberge déjà une autre application (l'application source, boutique
+de Vernon). Frip & Co Street ne
 partage **que** le reverse-proxy avec elle :
 
 | Élément | Frip & Co Street | Partagé ? |
@@ -103,7 +104,8 @@ curl https://lloomi.fr/api/health
 curl -I https://www.lloomi.fr
 
 # 3. L'autre application du VPS répond toujours sur ses propres domaines
-#    (remplacer par le domaine réel de l'autre application, ex. Vintiz)
+#    (remplacer par le domaine réel de l'autre application, ex. celui de
+#    la boutique de Vernon)
 curl -I https://<domaine-de-l-autre-application>
 ```
 
@@ -213,7 +215,7 @@ Sans ces trois variables ou TPE hors ligne, la caisse n'accepte que les espèces
 
 ## 7. E-mail des tickets et newsletter (PR3)
 
-Compte Brevo **partagé** avec Vintiz Vernon : la caisse n'utilise que sa
+Compte Brevo **partagé** avec la boutique de Vernon : la caisse n'utilise que sa
 liste dédiée « Frip & Co Street ». Variables `.env` : `BREVO_API_KEY`,
 `BREVO_LIST_ID` (numéro de la liste dédiée, créée dans Brevo), `BREVO_WEBHOOK_TOKEN`
 (secret partagé ; côté Brevo, URL du webhook `https://lloomi.fr/api/brevo/webhook?token=<secret>`

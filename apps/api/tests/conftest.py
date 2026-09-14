@@ -1,4 +1,4 @@
-# Inspire de Vintiz (apps/api/tests/conftest.py) — adapte a un schema
+# Inspire du module équivalent de l'application source (apps/api/tests/conftest.py) — adapte a un schema
 # migration-owned et a PostgreSQL uniquement (pas de SQLite : le trigger
 # d'immuabilite du JET doit etre exerce pour de vrai, cf. test_jet.py).
 import os
@@ -149,8 +149,8 @@ async def client():
     """Client HTTP asynchrone monte directement sur l'app ASGI.
 
     `ASGITransport` ne declenche pas le lifespan de l'app (comme dans
-    Vintiz) : le schema est deja pret via `_prepare_database`, donc ce n'est
-    pas necessaire ici.
+    l'application source) : le schema est deja pret via `_prepare_database`,
+    donc ce n'est pas necessaire ici.
     """
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

@@ -1,4 +1,4 @@
-# Extrait de Vintiz (structure des triggers d'immuabilite inspiree de
+# Extrait de l'application source (structure des triggers d'immuabilite inspiree de
 # apps/api/alembic/versions/0072_security_loyalty_nf525.py L82-223) — noms de
 # fonctions/tables adaptes au schema reduit du contrat PR2
 # (docs/ARCHITECTURE_PR2.md §2). Chaque commande SQL est executee separement

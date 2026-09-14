@@ -1,4 +1,4 @@
-# Extrait de Vintiz (tests/test_fiscal.py + tests/test_nf525_chain.py),
+# Extrait de l'application source (tests/test_fiscal.py + tests/test_nf525_chain.py),
 # adapte a la signature v3 (D3, pas de branche legacy).
 import uuid
 from decimal import Decimal

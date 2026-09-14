@@ -1,4 +1,4 @@
-# Extrait de Vintiz (tests/test_drawer_open_guard.py), adapte a la caisse
+# Extrait de l'application source (tests/test_drawer_open_guard.py), adapte a la caisse
 # PR2 (§4.3 du contrat : mouvements especes, verrou partage vente/cloture D10).
 import uuid
 
@@ -119,8 +119,8 @@ async def test_sales_and_refunds_change_cash_expected_d11(client, auth_headers, 
     assert cancel.status_code == 201
 
     snapshot2 = await client.get("/api/pos/drawer/current", headers=auth_headers)
-    # 100 + 40 (vente) - 40 (remboursement) = 100 : Vintiz neutralisait ce
-    # remboursement (C-2) ; PR2 le prend en compte (D11).
+    # 100 + 40 (vente) - 40 (remboursement) = 100 : l'application source
+    # neutralisait ce remboursement (C-2) ; PR2 le prend en compte (D11).
     assert snapshot2.json()["today"]["cash_expected"] == 100.0
 
 

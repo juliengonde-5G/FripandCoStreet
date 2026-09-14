@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/models/payment_attempt.py), reduit au
+# Extrait de l'application source (apps/api/app/models/payment_attempt.py), reduit au
 # workflow CB SumUp du contrat PR2 (§2) — jamais source de verite fiscale
 # (la Transaction/Payment le sont). Table mutable : `status` transitionne
 # pending -> paid|failed|cancelled.

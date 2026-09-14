@@ -1,4 +1,4 @@
-# Extrait de Vintiz (jobs.py:648-652, test structure inspiree de
+# Extrait de l'application source (jobs.py:648-652, test structure inspiree de
 # test_z_regularization.py) — garde fiscale 23:59 (§4.3) : ferme toute caisse
 # oubliee, Z `counted=false`, `closing_amount=expected`, `closed_by_guard`.
 # Echec du job -> JET `system.job_failed` (jamais avale en silence, S-5).

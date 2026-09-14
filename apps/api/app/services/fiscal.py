@@ -1,7 +1,7 @@
-# Extrait de Vintiz (apps/api/app/services/fiscal.py) — signature v3 (D3) :
+# Extrait de l'application source (apps/api/app/services/fiscal.py) — signature v3 (D3) :
 # aucune branche legacy v1/v2, nouvelle installation. Verrou de caisse
 # partage entre vente et cloture (D10) : une seule cle avisory Postgres pour
-# les deux, contrairement a Vintiz qui en utilisait deux distinctes.
+# les deux, contrairement a l'application source qui en utilisait deux distinctes.
 from __future__ import annotations
 
 import hashlib

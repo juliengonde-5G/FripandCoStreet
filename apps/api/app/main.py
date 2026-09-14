@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/main.py) — perimetre PR1 (auth + JET) :
+# Extrait de l'application source (apps/api/app/main.py) — perimetre PR1 (auth + JET) :
 # pas d'APScheduler, pas de create_all en dev (schema migration-owned des
 # la premiere revision, y compris le trigger d'immuabilite NF525), pas de
 # handler AuditContextMiddleware (retire, cf. app/core/middleware.py).
