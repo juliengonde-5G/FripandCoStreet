@@ -161,6 +161,13 @@ export interface TransactionOut {
   /** id de la transaction `refund` qui a annulé celle-ci, quand
    * `cancelled` est vrai. */
   refund_transaction_id?: string | null;
+  /** Client rattaché (PR3, `POST /pos/transactions/{id}/client`) —
+   * absent/`null` tant qu'aucun client n'a été lié. Hypothèse de forme :
+   * le contrat §4 (ARCHITECTURE_PR3.md) ne détaille pas explicitement
+   * l'embarquement sur GET/POST vente, mais le prévoit implicitement pour
+   * « Tickets du jour → détail » (§5), qui doit préremplir l'e-mail du
+   * client lié et afficher son adresse partiellement masquée. */
+  client?: ClientRef | null;
 }
 
 /** Ligne allégée pour la liste « Tickets du jour ». */
@@ -227,6 +234,9 @@ export interface ShopSettings {
   vat_number: string;
   phone: string;
   email: string;
+  /** PR3 (E8) : e-mail affiché dans la mention RGPD pour l'exercice des
+   * droits (accès, suppression) — DPO ou responsable désigné. */
+  dpo_email?: string;
 }
 
 export interface FiscalSettings {
@@ -269,4 +279,126 @@ export interface JetEvent {
 export interface JetListResponse {
   events: JetEvent[];
   next_before_seq?: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Client, e-mail (Brevo), newsletter, RGPD — PR3 (docs/ARCHITECTURE_PR3.md §4)
+// ---------------------------------------------------------------------------
+
+/** Référence légère à un client, embarquée sur une vente. */
+export interface ClientRef {
+  id: string;
+  email: string;
+}
+
+export interface Client {
+  id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  newsletter_optin: boolean;
+  created_at: string;
+  /** Posée par la suppression RGPD (E4) — fiche anonymisée dès que non nul. */
+  anonymized_at?: string | null;
+}
+
+export interface ClientListResponse {
+  clients: Client[];
+}
+
+export type ConsentPurpose = "newsletter";
+export type ConsentSource = "pos" | "webhook" | "admin" | "rgpd";
+
+/** Ligne du journal de consentement — append-only côté backend (E5). */
+export interface ConsentEntry {
+  id: string;
+  purpose: ConsentPurpose;
+  granted: boolean;
+  source: ConsentSource;
+  policy_version: string;
+  note?: string | null;
+  created_at: string;
+}
+
+export type CommunicationProvider = "brevo" | "smtp" | "simulated";
+export type CommunicationStatus = "sent" | "failed" | "simulated";
+
+/** Ligne du journal des envois de ticket par e-mail. */
+export interface CommunicationEntry {
+  id: string;
+  kind: "receipt";
+  channel: "email";
+  recipient: string;
+  subject: string;
+  provider: CommunicationProvider;
+  status: CommunicationStatus;
+  provider_message_id?: string | null;
+  error?: string | null;
+  created_at: string;
+}
+
+/** Ticket lié à un client, tel qu'affiché dans sa fiche admin. */
+export interface ClientTransactionRef {
+  id: string;
+  transaction_number: number;
+  created_at: string;
+  total_ttc: number;
+}
+
+/** Réponse de `GET /admin/clients/{id}` (et de `POST …/anonymize`, qui
+ * renvoie la fiche à jour — §4). */
+export interface ClientFull {
+  client: Client;
+  consents: ConsentEntry[];
+  communications: CommunicationEntry[];
+  transactions: ClientTransactionRef[];
+}
+
+export interface AttachClientRequest {
+  email: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  newsletter_optin: boolean;
+  send_receipt?: boolean;
+}
+
+export interface AttachClientResponse {
+  client: Client;
+  receipt_email: { status: CommunicationStatus; provider: CommunicationProvider } | null;
+  /** `null` quand la case newsletter n'était pas cochée (E2 : pas de
+   * contact Brevo créé sans consentement). */
+  brevo: { status: "ok" | "failed" | "skipped" } | null;
+}
+
+export interface SendReceiptEmailRequest {
+  email?: string;
+}
+
+export interface SendReceiptEmailResponse {
+  status: CommunicationStatus;
+  provider: CommunicationProvider;
+}
+
+export interface ConsentUpdateRequest {
+  purpose: ConsentPurpose;
+  granted: boolean;
+  note?: string;
+}
+
+export interface AnonymizeRequest {
+  reason: string;
+}
+
+/** `GET /admin/messaging/status` — aucun secret, uniquement de l'état. */
+export interface MessagingStatus {
+  email: {
+    provider: CommunicationProvider;
+    anonymous_tracking: boolean;
+    from: string;
+  };
+  brevo_contacts: {
+    configured: boolean;
+    list_id_set: boolean;
+    webhook_token_set: boolean;
+  };
 }

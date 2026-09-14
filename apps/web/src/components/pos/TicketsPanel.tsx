@@ -15,8 +15,8 @@ import React, { useEffect, useState } from "react";
 
 import Modal from "@/components/ui/Modal";
 import { api, ApiError } from "@/lib/api";
-import { formatCurrency, formatDateTime } from "@/lib/format";
-import type { TransactionOut, TransactionSummary } from "@/lib/types";
+import { formatCurrency, formatDateTime, isValidEmail, maskEmail } from "@/lib/format";
+import type { SendReceiptEmailResponse, TransactionOut, TransactionSummary } from "@/lib/types";
 
 interface Props {
   open: boolean;
@@ -38,6 +38,12 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
    * remboursement par moyen de paiement. */
   const [cancelledResult, setCancelledResult] = useState<TransactionOut | null>(null);
 
+  // PR3 — renvoi du ticket par e-mail depuis le détail.
+  const [emailDraft, setEmailDraft] = useState("");
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [emailSentTo, setEmailSentTo] = useState<string | null>(null);
+
   const loadList = async (): Promise<TransactionSummary[]> => {
     const data = await api.get<{ transactions: TransactionSummary[] }>("/api/pos/transactions");
     setList(data.transactions);
@@ -50,6 +56,9 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
     setReason("");
     setCancelError(null);
     setCancelledResult(null);
+    setEmailDraft("");
+    setEmailError(null);
+    setEmailSentTo(null);
     setLoading(true);
     setError(null);
     loadList()
@@ -70,11 +79,30 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
   const openDetail = async (id: string): Promise<void> => {
     setCancelError(null);
     setReason("");
+    setEmailError(null);
+    setEmailSentTo(null);
     try {
       const tx = await api.get<TransactionOut>(`/api/pos/transactions/${id}`);
       setDetail(tx);
+      setEmailDraft(tx.client?.email ?? "");
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "Impossible de charger ce ticket.");
+    }
+  };
+
+  const handleSendEmail = async (): Promise<void> => {
+    if (!detail || !isValidEmail(emailDraft) || emailSending) return;
+    setEmailSending(true);
+    setEmailError(null);
+    try {
+      await api.post<SendReceiptEmailResponse>(`/api/pos/transactions/${detail.id}/receipt/email`, {
+        email: emailDraft.trim(),
+      });
+      setEmailSentTo(emailDraft.trim());
+    } catch (err) {
+      setEmailError(err instanceof ApiError ? err.detail : "Échec de l'envoi du ticket.");
+    } finally {
+      setEmailSending(false);
     }
   };
 
@@ -191,6 +219,47 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
                 </li>
               ))}
             </ul>
+          </div>
+
+          <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-4 space-y-2">
+            <p className="text-sm font-medium text-fc-ink">Ticket par e-mail</p>
+            {detail.client && (
+              <p className="text-xs text-fc-ink-mute">Client lié : {maskEmail(detail.client.email)}</p>
+            )}
+            {emailSentTo ? (
+              <p className="text-sm font-medium text-fc-primary-deep">Ticket envoyé à {emailSentTo}.</p>
+            ) : (
+              <>
+                {emailError && (
+                  <div role="alert" className="rounded-fc bg-red-50 border border-red-200 p-2 flex items-center justify-between gap-3">
+                    <span className="text-sm text-red-700">Envoi impossible : {emailError}</span>
+                    <button type="button" onClick={() => void handleSendEmail()} className="text-xs font-semibold text-red-700 underline flex-shrink-0">
+                      Réessayer
+                    </button>
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    inputMode="email"
+                    autoComplete="email"
+                    value={emailDraft}
+                    onChange={(e) => setEmailDraft(e.target.value)}
+                    placeholder="adresse@exemple.fr"
+                    aria-label="Adresse e-mail du ticket"
+                    className="flex-1 min-h-touch px-3 py-2 rounded-fc border border-fc-line bg-fc-surface text-fc-ink placeholder-fc-ink-mute text-sm focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
+                  />
+                  <button
+                    type="button"
+                    disabled={!isValidEmail(emailDraft) || emailSending}
+                    onClick={() => void handleSendEmail()}
+                    className="min-h-touch rounded-fc-lg bg-fc-primary px-4 text-sm font-semibold text-white hover:bg-fc-primary-deep disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {emailSending ? "Envoi…" : "Envoyer par e-mail"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           {detail.transaction_type === "refund" && (

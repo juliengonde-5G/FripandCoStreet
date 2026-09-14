@@ -29,6 +29,7 @@ import type {
   DiscountInput,
   DrawerCurrentResponse,
   PaymentInput,
+  ShopSettings,
   TransactionOut,
   ZReport,
 } from "@/lib/types";
@@ -69,6 +70,10 @@ export default function CaissePage() {
   const [successTx, setSuccessTx] = useState<TransactionOut | null>(null);
 
   const [cbConfig, setCbConfig] = useState<CbStatusConfig | null>(null);
+  // PR3 (E8) : e-mail affiché dans la mention RGPD du bloc « Envoyer le
+  // ticket par e-mail » — chargement non bloquant, un échec laisse
+  // simplement le bloc RGPD sans adresse plutôt que de casser la vente.
+  const [dpoEmail, setDpoEmail] = useState<string>("");
 
   const [ticketsOpen, setTicketsOpen] = useState(false);
   const [closeDrawerOpen, setCloseDrawerOpen] = useState(false);
@@ -118,9 +123,20 @@ export default function CaissePage() {
     }
   };
 
+  const loadShopSettings = async (): Promise<void> => {
+    try {
+      const data = await api.get<ShopSettings>("/api/admin/settings/shop");
+      setDpoEmail(data.dpo_email ?? "");
+    } catch {
+      // Non bloquant (voir déclaration de l'état) — mention RGPD affichée
+      // sans adresse plutôt que d'empêcher la vente.
+    }
+  };
+
   useEffect(() => {
     void loadDrawer();
     void loadCbConfig();
+    void loadShopSettings();
   }, []);
 
   const runGuarded = async (fn: () => Promise<void>): Promise<void> => {
@@ -312,9 +328,11 @@ export default function CaissePage() {
           <div className="flex-1 overflow-y-auto p-6 flex items-start justify-center">
             <div className="w-full max-w-md">
               <ReceiptPreviewCard
+                transactionId={successTx.id}
                 ticketNumber={successTx.transaction_number}
                 totalTtc={successTx.total_ttc}
                 receiptText={successTx.receipt_text}
+                dpoEmail={dpoEmail}
                 onNewSale={handleNewTicket}
               />
             </div>

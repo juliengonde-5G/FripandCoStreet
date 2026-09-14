@@ -111,3 +111,26 @@ export function formatDateTime(value: string | Date | null | undefined): string 
     minute: "2-digit",
   });
 }
+
+/**
+ * Validation simple d'un e-mail, pour activer/désactiver un bouton d'envoi
+ * côté front (PR3). La validation qui fait foi reste côté API (422 si
+ * invalide) — celle-ci n'a qu'un rôle d'ergonomie de saisie.
+ */
+export function isValidEmail(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim();
+  if (!v || v.length > 254) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+}
+
+/**
+ * Masque partiellement un e-mail pour un affichage sobre côté RGPD
+ * (minimisation visuelle) : "julie.dupont@exemple.fr" → "j***@exemple.fr".
+ */
+export function maskEmail(email: string | null | undefined): string {
+  if (!email) return "—";
+  const at = email.indexOf("@");
+  if (at <= 0) return "***";
+  return `${email[0]}***@${email.slice(at + 1)}`;
+}
