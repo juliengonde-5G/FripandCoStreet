@@ -1,0 +1,45 @@
+# Déploiement production Frip & Co Street — actif une fois le code dans son
+# propre dépôt (secrets VPS_HOST / VPS_USER / VPS_SSH_KEY / VPS_PORT à créer
+# dans ce dépôt ; ils peuvent pointer sur le même VPS que Vintiz, le clone
+# vivant dans /opt/fripco-street).
+name: Deploy Production
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production-fripco-street
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    environment: production
+    steps:
+      - name: Vérifier la configuration
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          if [ -z "${VPS_HOST}" ]; then
+            echo "::error title=Déploiement impossible::Secret VPS_HOST absent — la prod n'est PAS déployée."
+            exit 1
+          fi
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd /opt/fripco-street
+            ./scripts/deploy.sh --pull

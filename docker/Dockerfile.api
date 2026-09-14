@@ -1,0 +1,47 @@
+# ---------- build stage ----------
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+COPY apps/api/pyproject.toml apps/api/README.md* ./
+RUN pip install --no-cache-dir --prefix=/install .
+
+COPY apps/api/ ./
+
+# ---------- runtime stage ----------
+FROM python:3.11-slim AS runtime
+
+WORKDIR /app
+
+RUN python -m pip install --no-cache-dir --upgrade pip
+
+# postgresql-client : pg_dump pour la sauvegarde applicative (PR4) et le
+# diagnostic ; sans surcoût notable.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN addgroup --system app && adduser --system --ingroup app app
+
+COPY --from=builder /install /usr/local
+COPY --from=builder /build /app
+COPY scripts/ /app/scripts/
+
+# /app/data : réglages persistés hors image (volume fripco_data).
+RUN mkdir -p /app/data && chown -R app:app /app
+
+# Provenance du build, exposée par GET /api/health (build_sha / build_date).
+ARG FRIPCO_BUILD_SHA=unknown
+ARG FRIPCO_BUILD_DATE=unknown
+ENV FRIPCO_BUILD_SHA=$FRIPCO_BUILD_SHA \
+    FRIPCO_BUILD_DATE=$FRIPCO_BUILD_DATE
+
+USER app
+
+EXPOSE 8000
+
+# Un seul worker : caisse mono-poste, et la numérotation séquentielle
+# (JET, ventes) est sérialisée par verrou PostgreSQL de toute façon.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]

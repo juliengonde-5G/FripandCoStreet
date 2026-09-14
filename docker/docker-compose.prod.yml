@@ -1,0 +1,87 @@
+# Frip & Co Street — stack de production (isolée)
+#
+# Trois conteneurs sur un réseau dédié `fripco-network`. Le reverse-proxy
+# HTTPS n'est PAS dans cette stack : c'est le Caddy déjà présent sur le VPS
+# (stack voisine) qui publie 80/443 et qui est rattaché à `fripco-network`
+# (réseau externe, créé une fois par scripts/deploy.sh). Voir
+# docs/DEPLOIEMENT.md pour le bloc Caddyfile `street.fripco.fr`.
+#
+# Isolation : aucun service de cette stack ne rejoint un autre réseau, aucun
+# port n'est publié sur l'hôte, secrets et volumes sont propres à cette stack.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fripco-db
+    restart: unless-stopped
+    environment:
+      # Rôle PROPRIÉTAIRE de la base (migrations Alembic uniquement).
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Rôle APPLICATIF non propriétaire créé au premier démarrage par
+      # docker/db-init/01_roles.sh : il ne peut ni ALTER TABLE ni
+      # DISABLE TRIGGER — les triggers NF525 lui sont donc opposables.
+      FRIPCO_APP_USER: ${FRIPCO_APP_USER:-fripco_app}
+      FRIPCO_APP_PASSWORD: ${FRIPCO_APP_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - fripco-network
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+      args:
+        FRIPCO_BUILD_SHA: ${FRIPCO_BUILD_SHA:-unknown}
+        FRIPCO_BUILD_DATE: ${FRIPCO_BUILD_DATE:-unknown}
+    container_name: fripco-api
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      # Ce fichier est réservé à la production : on force le mode pour qu'un
+      # .env incomplet ne puisse jamais démarrer l'API avec des replis de dev.
+      ENVIRONMENT: production
+    volumes:
+      - fripco_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - fripco-network
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+      args:
+        # Même origine : l'API est servie sous /api par le reverse-proxy.
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+    container_name: fripco-web
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+    depends_on:
+      - api
+    networks:
+      - fripco-network
+
+networks:
+  fripco-network:
+    # Créé hors compose (`docker network create fripco-network`) pour que le
+    # reverse-proxy voisin puisse s'y rattacher sans dépendre de l'ordre de
+    # démarrage des deux stacks. scripts/deploy.sh le crée s'il manque.
+    external: true
+
+volumes:
+  postgres_data:
+  fripco_data:

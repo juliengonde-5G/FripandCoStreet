@@ -1,0 +1,20 @@
+# Frip & Co Street — stack de développement local (base seule).
+# L'API et le front tournent hors Docker (uvicorn --reload, npm run dev).
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fripco-db-dev
+    environment:
+      POSTGRES_USER: fripco
+      POSTGRES_PASSWORD: fripco
+      POSTGRES_DB: fripco
+      FRIPCO_APP_USER: fripco_app
+      FRIPCO_APP_PASSWORD: fripco_app
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+      - postgres_dev_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_dev_data:

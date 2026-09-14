@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Frip & Co Street — thème sobre, tactile, sans dépendance de police externe. */
+:root {
+  --fc-bg: #F5F5F3;
+  --fc-surface: #FFFFFF;
+  --fc-ink: #17181A;
+  --fc-ink-soft: #52544F;
+  --fc-line: #DAD9D3;
+  --fc-primary: #16433B;
+  --fc-primary-deep: #0C2D27;
+  --fc-danger: #B3261E;
+  --fc-success: #1E7B4D;
+
+  --background: var(--fc-bg);
+  --foreground: var(--fc-ink);
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer base {
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  input, button, select, textarea {
+    font-family: inherit;
+  }
+
+  /* Cibles tactiles larges — usage tablette/comptoir. */
+  button, [role="button"] {
+    min-height: 48px;
+    min-width: 48px;
+  }
+}

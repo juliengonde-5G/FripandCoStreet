@@ -1,0 +1,13 @@
+# Frip & Co Street — bloc à AJOUTER au Caddyfile du reverse-proxy du VPS.
+# Une seule origine : le front sur /, l'API sous /api/* (pas de CORS).
+# Pré-requis : le conteneur Caddy est rattaché au réseau externe
+# `fripco-network` (voir docs/DEPLOIEMENT.md).
+street.fripco.fr {
+	encode gzip
+	handle /api/* {
+		reverse_proxy fripco-api:8000
+	}
+	handle {
+		reverse_proxy fripco-web:3000
+	}
+}
