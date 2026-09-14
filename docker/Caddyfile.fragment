@@ -2,6 +2,9 @@
 # Une seule origine : le front sur /, l'API sous /api/* (pas de CORS).
 # Pré-requis : le conteneur Caddy est rattaché au réseau externe
 # `fripco-network` (voir docs/DEPLOIEMENT.md).
+# Caddy ≥ 2.5 remplace tout X-Forwarded-For entrant par l'IP réelle du client
+# (aucun `trusted_proxies` déclaré) : l'API peut donc utiliser sa première
+# valeur pour le rate-limit de connexion et le journal (JET).
 street.fripco.fr {
 	encode gzip
 	handle /api/* {

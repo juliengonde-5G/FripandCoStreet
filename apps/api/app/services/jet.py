@@ -1,0 +1,196 @@
+# Nouveau service — Journal des Evenements Techniques (JET).
+#
+# Modelise sur le chainage HMAC-SHA256 de app/services/fiscal.py de Vintiz
+# (methodes `_canonical`, `_hmac`, `_iso`, `_get_previous_*_hash`, genesis
+# "0") et sur le verrou `pg_advisory_xact_lock` utilise pour serialiser
+# l'attribution des numeros de sequence (voir app/services/pos.py:103-107
+# et app/services/fiscal.py:247-248 dans Vintiz). Contrairement a
+# `EventService` (Vintiz), ce service NE PIEGE JAMAIS les exceptions : un
+# echec d'ecriture du JET doit faire echouer la requete plutot que de laisser
+# passer un evenement de securite non journalise (pilier "securisation" de
+# l'auto-attestation NF525, cf. CDC Frip & Co Street §3.1).
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.models.jet import JournalEvent
+from app.version import JET_SIGNATURE_VERSION
+
+# Cle arbitraire du verrou consultatif Postgres, dediee au JET (distincte de
+# toute cle utilisee par un autre sous-systeme). Sa seule fonction est
+# d'empecher deux transactions concurrentes de lire le meme MAX(seq) et
+# d'ecrire deux evenements avec la meme sequence.
+_JET_ADVISORY_LOCK_KEY = 837_120_001
+
+GENESIS_HASH = "0"
+
+# ---------------------------------------------------------------------------
+# Constantes de type d'evenement
+# ---------------------------------------------------------------------------
+
+EVENT_LOGIN_SUCCESS = "auth.login_success"
+EVENT_LOGIN_FAILED = "auth.login_failed"
+EVENT_LOGIN_RATE_LIMITED = "auth.login_rate_limited"
+EVENT_LOGOUT = "auth.logout"
+EVENT_TOKEN_REFRESH = "auth.token_refresh"
+EVENT_SYSTEM_STARTUP = "system.startup"
+
+
+class JournalService:
+    """Ecrit et verifie la chaine d'evenements techniques (JET)."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    # ------------------------------------------------------------------
+    # Ecriture
+    # ------------------------------------------------------------------
+
+    async def record(
+        self,
+        event_type: str,
+        *,
+        user_id=None,
+        username: str | None = None,
+        ip: str | None = None,
+        request_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> JournalEvent:
+        """Enregistre un evenement immuable et retourne la ligne creee.
+
+        Aucune exception n'est interceptee : un appelant qui a besoin que
+        l'evenement soit ecrit (login, logout, demarrage...) doit laisser
+        cette methode echouer la requete en cas de probleme d'ecriture.
+        """
+        await self.db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _JET_ADVISORY_LOCK_KEY})
+
+        next_seq = (
+            await self.db.execute(select(func.coalesce(func.max(JournalEvent.seq), 0)))
+        ).scalar_one() + 1
+        previous_hash = await self._previous_hash()
+
+        # created_at est calcule cote application (et fourni explicitement a
+        # l'INSERT, ce qui court-circuite le server_default herite de Base)
+        # plutot que relu apres un premier flush : le trigger d'immuabilite
+        # de la migration 0001 interdit tout UPDATE sur journal_events, donc
+        # la ligne doit etre inseree scellee (hash calcule) en UNE seule
+        # ecriture — un flush-puis-UPDATE-du-hash serait rejete par la base.
+        created_at = datetime.now(timezone.utc)
+
+        event = JournalEvent(
+            seq=next_seq,
+            event_type=event_type,
+            user_id=user_id,
+            username=username,
+            ip=ip,
+            request_id=request_id,
+            payload=payload or {},
+            created_at=created_at,
+            previous_hash=previous_hash,
+            hash="",
+            signature_version=JET_SIGNATURE_VERSION,
+        )
+        event.hash = self._hmac(self._canonical_payload(event))
+
+        self.db.add(event)
+        await self.db.flush()
+        return event
+
+    async def _previous_hash(self) -> str:
+        row = (
+            await self.db.execute(
+                select(JournalEvent.hash).order_by(JournalEvent.seq.desc()).limit(1)
+            )
+        ).scalar_one_or_none()
+        return row if row else GENESIS_HASH
+
+    # ------------------------------------------------------------------
+    # Verification
+    # ------------------------------------------------------------------
+
+    async def verify_chain(self) -> dict:
+        """Recalcule chaque hash et verifie le chainage previous_hash.
+
+        Retourne ``{valid, count, first_invalid_seq, errors}``.
+        """
+        events = (
+            await self.db.execute(select(JournalEvent).order_by(JournalEvent.seq.asc()))
+        ).scalars().all()
+
+        previous_hash = GENESIS_HASH
+        errors: list[str] = []
+        first_invalid_seq: int | None = None
+
+        for event in events:
+            if event.previous_hash != previous_hash:
+                errors.append(
+                    f"seq={event.seq}: previous_hash mismatch "
+                    f"(attendu {previous_hash!r}, trouve {event.previous_hash!r})"
+                )
+                if first_invalid_seq is None:
+                    first_invalid_seq = event.seq
+            expected = self._hmac(self._canonical_payload(event))
+            if not hmac.compare_digest(event.hash, expected):
+                errors.append(f"seq={event.seq}: signature invalide")
+                if first_invalid_seq is None:
+                    first_invalid_seq = event.seq
+            previous_hash = event.hash
+
+        return {
+            "valid": not errors,
+            "count": len(events),
+            "first_invalid_seq": first_invalid_seq,
+            "errors": errors,
+        }
+
+    # ------------------------------------------------------------------
+    # Canonicalisation / HMAC
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _iso(value: datetime | None) -> str:
+        if value is None:
+            return ""
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+    @staticmethod
+    def _canonical(payload: dict) -> bytes:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    @classmethod
+    def _hmac(cls, payload: dict) -> str:
+        return hmac.new(
+            settings.FISCAL_SIGNING_KEY.encode("utf-8"),
+            cls._canonical(payload),
+            hashlib.sha256,
+        ).hexdigest()
+
+    @classmethod
+    def _canonical_payload(cls, event: JournalEvent) -> dict:
+        return {
+            "signature_version": event.signature_version,
+            "seq": event.seq,
+            "event_type": event.event_type,
+            "created_at": cls._iso(event.created_at),
+            "user_id": str(event.user_id) if event.user_id else None,
+            "username": event.username,
+            "ip": event.ip,
+            "request_id": event.request_id,
+            "payload": event.payload or {},
+            "previous_hash": event.previous_hash,
+        }
