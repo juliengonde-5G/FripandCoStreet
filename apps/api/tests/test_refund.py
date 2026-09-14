@@ -43,6 +43,56 @@ async def test_cancel_total_sale_creates_mirrored_refund(client, auth_headers, o
     assert "TICKET D'ANNULATION" in refund["receipt_text"]
 
 
+async def test_cancel_marks_original_cancelled_and_refund_linked(client, auth_headers, open_drawer):
+    """Passe d'integration : `cancelled`/`refund_transaction_id` (vente) et
+    `original_transaction_number` (annulation) doivent etre coherents en
+    liste ET en detail, sans requete supplementaire par ligne (§ helper
+    `_load_refund_links`)."""
+    sale = await _sell(client, auth_headers, "25.00")
+    untouched_sale = await _sell(client, auth_headers, "12.00")
+
+    refund = (
+        await client.post(
+            f"/api/pos/transactions/{sale['id']}/cancel",
+            json={"reason": "cliente insatisfaite"},
+            headers=auth_headers,
+        )
+    ).json()
+
+    # La reponse de l'annulation elle-meme : jamais "cancelled", et porte le
+    # n° de la vente d'origine pour l'affichage.
+    assert refund["cancelled"] is False
+    assert refund["refund_transaction_id"] is None
+    assert refund["original_transaction_number"] == sale["transaction_number"]
+
+    # GET détail — vente annulée.
+    r_sale = await client.get(f"/api/pos/transactions/{sale['id']}", headers=auth_headers)
+    body_sale = r_sale.json()
+    assert body_sale["cancelled"] is True
+    assert body_sale["refund_transaction_id"] == refund["id"]
+
+    # GET détail — annulation elle-même.
+    r_refund = await client.get(f"/api/pos/transactions/{refund['id']}", headers=auth_headers)
+    body_refund = r_refund.json()
+    assert body_refund["cancelled"] is False
+    assert body_refund["refund_transaction_id"] is None
+    assert body_refund["original_transaction_number"] == sale["transaction_number"]
+
+    # GET liste — les trois transactions (vente annulée, annulation, vente
+    # intacte) doivent toutes porter l'indicateur correct.
+    r_list = await client.get("/api/pos/transactions", headers=auth_headers)
+    by_id = {t["id"]: t for t in r_list.json()["transactions"]}
+
+    assert by_id[sale["id"]]["cancelled"] is True
+    assert by_id[sale["id"]]["refund_transaction_id"] == refund["id"]
+
+    assert by_id[refund["id"]]["cancelled"] is False
+    assert by_id[refund["id"]]["original_transaction_number"] == sale["transaction_number"]
+
+    assert by_id[untouched_sale["id"]]["cancelled"] is False
+    assert by_id[untouched_sale["id"]]["refund_transaction_id"] is None
+
+
 async def test_cancel_reason_too_short_rejected(client, auth_headers, open_drawer):
     sale = await _sell(client, auth_headers)
     r = await client.post(
@@ -61,7 +111,15 @@ async def test_cancel_already_refunded_rejected(client, auth_headers, open_drawe
         f"/api/pos/transactions/{sale['id']}/cancel", json={"reason": "deuxieme retour"}, headers=auth_headers
     )
     assert r2.status_code == 409
-    assert r2.json()["detail"]["code"] == "already_refunded"
+    body = r2.json()
+    # Regression : `detail` doit etre une phrase (str), jamais un objet
+    # imbrique — sinon le front affiche "[object Object]" (bug corrige,
+    # passe d'integration : `_raise`/`HTTPException(detail={...})` produisait
+    # {"detail": {"detail": ..., "code": ...}} au lieu du corps plat exige
+    # par le contrat §5).
+    assert isinstance(body["detail"], str)
+    assert body["detail"] == "Cette vente a déjà été annulée."
+    assert body["code"] == "already_refunded"
 
 
 async def test_cancel_a_refund_itself_rejected(client, auth_headers, open_drawer):
@@ -75,7 +133,7 @@ async def test_cancel_a_refund_itself_rejected(client, auth_headers, open_drawer
         f"/api/pos/transactions/{refund['id']}/cancel", json={"reason": "annuler l'annulation"}, headers=auth_headers
     )
     assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "not_a_sale"
+    assert r.json()["code"] == "not_a_sale"
 
 
 async def test_cancel_unknown_transaction_404(client, auth_headers, open_drawer):
@@ -92,7 +150,7 @@ async def test_cancel_requires_open_drawer(client, auth_headers, open_drawer):
         f"/api/pos/transactions/{sale['id']}/cancel", json={"reason": "caisse fermee"}, headers=auth_headers
     )
     assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "drawer_closed"
+    assert r.json()["code"] == "drawer_closed"
 
 
 async def test_cancel_card_sale_calls_sumup_refund_before_write(
@@ -175,7 +233,7 @@ async def test_cancel_card_sale_blocked_when_sumup_refund_fails(
         f"/api/pos/transactions/{sale['id']}/cancel", json={"reason": "sumup indisponible"}, headers=auth_headers
     )
     assert r.status_code == 502
-    assert r.json()["detail"]["code"] == "sumup_refund_failed"
+    assert r.json()["code"] == "sumup_refund_failed"
 
     async with async_session() as db:
         refunds = (

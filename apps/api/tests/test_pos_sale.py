@@ -74,7 +74,7 @@ async def test_sale_refused_when_drawer_closed(client, auth_headers):
         headers=auth_headers,
     )
     assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "drawer_closed"
+    assert r.json()["code"] == "drawer_closed"
 
     async with async_session() as db:
         rows = (await db.execute(select(Transaction))).scalars().all()
@@ -111,7 +111,7 @@ async def test_sale_payment_sum_mismatch_rejected(client, auth_headers, open_dra
         headers=auth_headers,
     )
     assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "payment_mismatch"
+    assert r.json()["code"] == "payment_mismatch"
 
     async with async_session() as db:
         rows = (await db.execute(select(Transaction))).scalars().all()
@@ -132,7 +132,7 @@ async def test_sale_rejects_two_payments_same_method(client, auth_headers, open_
         headers=auth_headers,
     )
     assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "payment_mismatch"
+    assert r.json()["code"] == "payment_mismatch"
 
 
 async def test_sale_cash_over_legal_cap_rejected(client, auth_headers, open_drawer):
@@ -146,7 +146,7 @@ async def test_sale_cash_over_legal_cap_rejected(client, auth_headers, open_draw
         headers=auth_headers,
     )
     assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "cash_cap_exceeded"
+    assert r.json()["code"] == "cash_cap_exceeded"
 
     async with async_session() as db:
         rows = (await db.execute(select(Transaction))).scalars().all()
@@ -200,7 +200,7 @@ async def test_sale_card_not_confirmed_rejected_and_nothing_written(
         headers=auth_headers,
     )
     assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "card_not_confirmed"
+    assert r.json()["code"] == "card_not_confirmed"
 
     async with async_session() as db:
         rows = (
@@ -220,7 +220,7 @@ async def test_sale_card_requires_checkout_id(client, auth_headers, open_drawer)
         headers=auth_headers,
     )
     assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "payment_mismatch"
+    assert r.json()["code"] == "payment_mismatch"
 
 
 async def test_sale_default_label_is_article(client, auth_headers, open_drawer):

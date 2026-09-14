@@ -58,7 +58,7 @@ async def test_put_shop_settings_rejects_bad_siret(client, auth_headers):
         "/api/admin/settings/shop", json={"name": "Boutique", "siret": "123"}, headers=auth_headers
     )
     assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "invalid_setting"
+    assert r.json()["code"] == "invalid_setting"
 
 
 async def test_put_fiscal_settings_rejects_unsupported_rate(client, auth_headers):

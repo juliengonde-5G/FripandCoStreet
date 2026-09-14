@@ -16,13 +16,13 @@ async def test_open_drawer_then_reopen_is_rejected(client, auth_headers):
     assert r1.status_code == 200
     r2 = await client.post("/api/pos/drawer/open", json={"opening_amount": "50.00"}, headers=auth_headers)
     assert r2.status_code == 409
-    assert r2.json()["detail"]["code"] == "drawer_already_open"
+    assert r2.json()["code"] == "drawer_already_open"
 
 
 async def test_close_drawer_without_open_one_is_rejected(client, auth_headers):
     r = await client.post("/api/pos/drawer/close", json={"closing_amount": "0.00"}, headers=auth_headers)
     assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "no_open_drawer"
+    assert r.json()["code"] == "no_open_drawer"
 
 
 async def test_drawer_current_reports_closed_state(client, auth_headers):
@@ -47,7 +47,7 @@ async def test_cash_movement_requires_open_drawer(client, auth_headers):
         headers=auth_headers,
     )
     assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "drawer_closed"
+    assert r.json()["code"] == "drawer_closed"
 
 
 async def test_cash_movement_other_reason_requires_note(client, auth_headers, open_drawer):

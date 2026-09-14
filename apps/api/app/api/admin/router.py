@@ -6,7 +6,7 @@ import re
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +15,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.jet import JournalEvent
 from app.models.user import User
-from app.services.fiscal import FiscalService
+from app.services.fiscal import FiscalService, PosServiceError
 from app.services.jet import EVENT_FISCAL_INTEGRITY_CHECKED, JournalService
 from app.services.settings_service import SettingsService
 from app.services.tva_service import SUPPORTED_TVA_RATES
@@ -146,10 +146,7 @@ async def get_settings(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     if key not in _SETTINGS_SCHEMAS:
-        raise HTTPException(
-            status_code=404,
-            detail={"detail": f"Paramètre inconnu : {key}", "code": "unknown_setting"},
-        )
+        raise PosServiceError(f"Paramètre inconnu : {key}", code="unknown_setting", status_code=404)
     return await SettingsService(db).get(key)
 
 
@@ -162,16 +159,12 @@ async def put_settings(
 ):
     schema = _SETTINGS_SCHEMAS.get(key)
     if schema is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"detail": f"Paramètre inconnu : {key}", "code": "unknown_setting"},
-        )
+        raise PosServiceError(f"Paramètre inconnu : {key}", code="unknown_setting", status_code=404)
     try:
         validated = schema(**body)
     except Exception as exc:  # noqa: BLE001 — erreurs Pydantic -> 422 lisible
-        raise HTTPException(
-            status_code=422,
-            detail={"detail": f"Paramètres invalides : {exc}", "code": "invalid_setting"},
+        raise PosServiceError(
+            f"Paramètres invalides : {exc}", code="invalid_setting", status_code=422
         )
     row = await SettingsService(db).set(key, _settings_to_json(validated), user_id=user.id)
     await db.commit()
@@ -224,10 +217,7 @@ async def list_payment_attempts(
         try:
             query = query.where(PaymentAttempt.status == PaymentAttemptStatus(status))
         except ValueError:
-            raise HTTPException(
-                status_code=422,
-                detail={"detail": f"Statut inconnu : {status}", "code": "invalid_status"},
-            )
+            raise PosServiceError(f"Statut inconnu : {status}", code="invalid_status", status_code=422)
     rows = (await db.execute(query.limit(limit))).scalars().all()
     return {
         "attempts": [

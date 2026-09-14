@@ -7,14 +7,15 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.cash_movement import CashMovementDirection, CashMovementReason
-from app.models.pos import CashDrawer, Transaction, ZReport
+from app.models.pos import CashDrawer, Transaction, TransactionType, ZReport
 from app.models.receipt import Receipt
 from app.models.user import User
 from app.services.fiscal import FiscalService, PosServiceError
@@ -35,7 +36,19 @@ router = APIRouter(prefix="/pos", tags=["pos"])
 
 
 def _raise(exc: PosServiceError):
-    raise HTTPException(status_code=exc.status_code, detail={"detail": str(exc), "code": exc.code})
+    """Re-leve l'erreur metier telle quelle.
+
+    Bug corrige (passe d'integration) : ce helper enveloppait auparavant
+    `exc` dans `HTTPException(detail={"detail":..., "code":...})`, ce qui
+    produit cote HTTP un corps IMBRIQUE `{"detail": {"detail":..., "code":
+    ...}}` — `body.detail` cote front devient alors un objet, pas la phrase
+    attendue (symptome observe : "[object Object]"). `PosServiceError` est
+    deja gere par `app.main::pos_exception_handler`, qui construit le corps
+    PLAT `{"detail": "phrase francaise", "code": "snake_case"}` exige par le
+    contrat (§5) — il suffit donc de laisser l'exception remonter telle
+    quelle jusqu'a lui, jamais de la reemballer dans une HTTPException ici.
+    """
+    raise exc
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +97,31 @@ def _serialize_payment(payment) -> dict:
     }
 
 
-def _serialize_transaction(transaction: Transaction, *, receipt_text: str | None = None) -> dict:
+def _serialize_transaction(
+    transaction: Transaction,
+    *,
+    receipt_text: str | None = None,
+    refund_of_sale: dict[str, str] | None = None,
+    original_number_by_refund_id: dict[str, int] | None = None,
+) -> dict:
+    """Serialise une transaction.
+
+    ``refund_of_sale``/``original_number_by_refund_id`` viennent de
+    `_load_refund_links` (une seule requete agregee pour toute la page
+    appelante, jamais une requete par transaction — voir ce helper) :
+    - pour une VENTE : ``cancelled`` = elle a une annulation (mapping
+      ``refund_of_sale``), ``refund_transaction_id`` = son id ou null.
+    - pour une ANNULATION : ``cancelled`` est toujours false (on n'annule
+      pas une annulation, D4/`not_a_sale`), ``original_transaction_number``
+      = le n° de la vente d'origine, pour l'affichage cote front.
+    """
+    refund_of_sale = refund_of_sale or {}
+    original_number_by_refund_id = original_number_by_refund_id or {}
+    tx_id = str(transaction.id)
+    is_refund = transaction.transaction_type == TransactionType.refund
+    refund_transaction_id = None if is_refund else refund_of_sale.get(tx_id)
     return {
-        "id": str(transaction.id),
+        "id": tx_id,
         "transaction_number": transaction.transaction_number,
         "transaction_type": transaction.transaction_type.value,
         "user_id": str(transaction.user_id),
@@ -94,6 +129,11 @@ def _serialize_transaction(transaction: Transaction, *, receipt_text: str | None
         "original_transaction_id": (
             str(transaction.original_transaction_id) if transaction.original_transaction_id else None
         ),
+        "original_transaction_number": (
+            original_number_by_refund_id.get(tx_id) if is_refund else None
+        ),
+        "cancelled": False if is_refund else refund_transaction_id is not None,
+        "refund_transaction_id": refund_transaction_id,
         "refund_reason": transaction.refund_reason,
         "discount_type": transaction.discount_type.value if transaction.discount_type else None,
         "discount_value": (
@@ -175,6 +215,47 @@ def _serialize_z_report(z: ZReport) -> dict:
         "previous_hash": z.previous_hash,
         "created_at": z.created_at.isoformat() if z.created_at else None,
     }
+
+
+async def _load_refund_links(
+    db: AsyncSession, transaction_ids: list[uuid.UUID]
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Charge, en UNE seule requete agregee (auto-jointure), les liens
+    annulation <-> vente pour toutes les transactions d'une page.
+
+    Sans ce helper, marquer `cancelled`/`refund_transaction_id` sur une
+    liste de N transactions couterait une requete par ligne (N+1) — ici un
+    seul `SELECT ... JOIN transactions AS original` couvre a la fois :
+    - les VENTES de la page (recherche d'une annulation dont
+      `original_transaction_id` pointe vers l'une d'elles) ;
+    - les ANNULATIONS de la page (recherche du numero de leur vente d'origine).
+
+    Retourne ``(refund_of_sale, original_number_by_refund_id)`` — voir
+    `_serialize_transaction`.
+    """
+    if not transaction_ids:
+        return {}, {}
+    refund = aliased(Transaction)
+    original = aliased(Transaction)
+    rows = (
+        await db.execute(
+            select(refund.id, refund.original_transaction_id, original.transaction_number)
+            .join(original, refund.original_transaction_id == original.id)
+            .where(
+                refund.transaction_type == TransactionType.refund,
+                or_(
+                    refund.original_transaction_id.in_(transaction_ids),
+                    refund.id.in_(transaction_ids),
+                ),
+            )
+        )
+    ).all()
+    refund_of_sale: dict[str, str] = {}
+    original_number_by_refund_id: dict[str, int] = {}
+    for refund_id, original_id, original_number in rows:
+        refund_of_sale[str(original_id)] = str(refund_id)
+        original_number_by_refund_id[str(refund_id)] = original_number
+    return refund_of_sale, original_number_by_refund_id
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +369,13 @@ async def create_transaction(
     receipt = await PosService(db).get_receipt(transaction.id)
     if not created:
         response.status_code = 200
-    return _serialize_transaction(transaction, receipt_text=receipt.content if receipt else None)
+    refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction.id])
+    return _serialize_transaction(
+        transaction,
+        receipt_text=receipt.content if receipt else None,
+        refund_of_sale=refund_of_sale,
+        original_number_by_refund_id=original_number_by_refund_id,
+    )
 
 
 @router.get("/transactions")
@@ -301,10 +388,22 @@ async def list_transactions(
     try:
         transactions = await PosService(db).list_transactions(date=date, limit=limit)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=422, detail={"detail": f"Date invalide : {exc}", "code": "invalid_date"}
-        )
-    return {"transactions": [_serialize_transaction(t) for t in transactions]}
+        raise PosServiceError(f"Date invalide : {exc}", code="invalid_date", status_code=422)
+    # Une seule requete agregee pour toute la page (pas de N+1) — voir
+    # `_load_refund_links`.
+    refund_of_sale, original_number_by_refund_id = await _load_refund_links(
+        db, [t.id for t in transactions]
+    )
+    return {
+        "transactions": [
+            _serialize_transaction(
+                t,
+                refund_of_sale=refund_of_sale,
+                original_number_by_refund_id=original_number_by_refund_id,
+            )
+            for t in transactions
+        ]
+    }
 
 
 @router.get("/transactions/{transaction_id}")
@@ -315,9 +414,15 @@ async def get_transaction(
 ):
     transaction = await PosService(db).get_transaction(transaction_id)
     if transaction is None:
-        raise HTTPException(status_code=404, detail={"detail": "Transaction introuvable.", "code": "not_found"})
+        raise PosServiceError("Transaction introuvable.", code="not_found", status_code=404)
     receipt = await PosService(db).get_receipt(transaction_id)
-    return _serialize_transaction(transaction, receipt_text=receipt.content if receipt else None)
+    refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
+    return _serialize_transaction(
+        transaction,
+        receipt_text=receipt.content if receipt else None,
+        refund_of_sale=refund_of_sale,
+        original_number_by_refund_id=original_number_by_refund_id,
+    )
 
 
 @router.post("/transactions/{transaction_id}/cancel", status_code=201)
@@ -338,7 +443,13 @@ async def cancel_transaction(
     receipt = await PosService(db).get_receipt(refund_tx.id)
     if not created:
         response.status_code = 200
-    return _serialize_transaction(refund_tx, receipt_text=receipt.content if receipt else None)
+    refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [refund_tx.id])
+    return _serialize_transaction(
+        refund_tx,
+        receipt_text=receipt.content if receipt else None,
+        refund_of_sale=refund_of_sale,
+        original_number_by_refund_id=original_number_by_refund_id,
+    )
 
 
 @router.get("/transactions/{transaction_id}/receipt")
@@ -361,7 +472,7 @@ async def get_receipt(
         await db.execute(select(Receipt).where(Receipt.transaction_id == transaction_id))
     ).scalar_one_or_none()
     if receipt is None:
-        raise HTTPException(status_code=404, detail={"detail": "Ticket introuvable.", "code": "not_found"})
+        raise PosServiceError("Ticket introuvable.", code="not_found", status_code=404)
     receipt.duplicate_count += 1
     await JournalService(db).record(
         EVENT_RECEIPT_DUPLICATE,
@@ -401,9 +512,7 @@ async def regularization_preview(
             datetime.fromisoformat(period_from), datetime.fromisoformat(period_to)
         )
     except ValueError as exc:
-        raise HTTPException(
-            status_code=422, detail={"detail": f"Dates invalides : {exc}", "code": "invalid_period"}
-        )
+        raise PosServiceError(f"Dates invalides : {exc}", code="invalid_period", status_code=422)
     return preview
 
 
@@ -417,9 +526,7 @@ async def create_regularization(
         period_from = datetime.fromisoformat(body.period_from)
         period_to = datetime.fromisoformat(body.period_to)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=422, detail={"detail": f"Dates invalides : {exc}", "code": "invalid_period"}
-        )
+        raise PosServiceError(f"Dates invalides : {exc}", code="invalid_period", status_code=422)
     try:
         z_report = await FiscalService(db).create_regularization_z(
             period_from, period_to, body.reason, user.id
@@ -443,5 +550,5 @@ async def get_z_report(
 ):
     z = (await db.execute(select(ZReport).where(ZReport.id == z_report_id))).scalar_one_or_none()
     if z is None:
-        raise HTTPException(status_code=404, detail={"detail": "Z introuvable.", "code": "not_found"})
+        raise PosServiceError("Z introuvable.", code="not_found", status_code=404)
     return _serialize_z_report(z)
