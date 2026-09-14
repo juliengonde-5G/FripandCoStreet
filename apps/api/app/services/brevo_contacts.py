@@ -89,7 +89,7 @@ async def push_contact(client: Client) -> SyncResult:
     updateEnabled:true}`` — 201 (cree) et 204 (mis a jour) sont des succes.
     N'ecrit JAMAIS `emailBlacklisted` (E1) : un client sans consentement
     newsletter n'est simplement jamais poussé (voir l'appelant,
-    `PosService._sync_brevo_contact`).
+    `ClientService.sync_brevo`).
     """
     if not _api_key():
         return SyncResult(ok=False, detail="BREVO_API_KEY non configurée")

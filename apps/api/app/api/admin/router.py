@@ -307,16 +307,23 @@ async def add_client_consent(
     client = await ClientService(db).get_by_id(client_id)
     if client is None:
         raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
-    await ClientService(db).record_consent(
+    clients = ClientService(db)
+    purpose = ConsentPurpose(body.purpose)
+    await clients.record_consent(
         client=client,
-        purpose=ConsentPurpose(body.purpose),
+        purpose=purpose,
         granted=body.granted,
         source=ConsentSource.admin,
         user_id=user.id,
         note=body.note,
     )
+    if purpose == ConsentPurpose.newsletter:
+        # Revue RGPD : « Retirer de la newsletter »/« Inscrire (demande
+        # orale) » doit refléter l'état sur la liste Brevo dédiée (push si
+        # opt-in, retrait sinon) — best-effort, jamais bloquant.
+        await clients.sync_brevo(client, user_id=user.id)
     await db.commit()
-    return await ClientService(db).get_full(client)
+    return await clients.get_full(client)
 
 
 @router.post("/clients/{client_id}/anonymize")

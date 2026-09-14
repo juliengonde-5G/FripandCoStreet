@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import uuid
 
+import httpx
 import pytest
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.database import async_session
 from app.models.client import Client, Consent
 from app.models.communication import Communication
 from app.models.jet import JournalEvent
+from app.services import brevo_contacts
 
 pytestmark = pytest.mark.anyio
 
@@ -86,7 +89,14 @@ async def test_attach_client_creates_client_links_and_sends_receipt(client, auth
         assert {"receipt.emailed", "receipt.email_failed"} & jet_types
 
 
-async def test_attach_client_without_newsletter_optin_skips_brevo(client, auth_headers, open_drawer):
+async def test_attach_client_without_newsletter_optin_still_syncs_brevo_removal(
+    client, auth_headers, open_drawer
+):
+    """Revue RGPD : un opt-out (ou un client jamais opt-in) déclenche quand
+    même une tentative de retrait de la liste Brevo (best-effort, jamais
+    bloquant) — `ClientService.sync_brevo` retire si `newsletter_optin` est
+    faux, plutôt que de sauter la synchro. Sans `BREVO_API_KEY` en test, le
+    résultat est `status: failed`, jamais `None`."""
     sale = await _sell(client, auth_headers)
     r = await client.post(
         f"/api/pos/transactions/{sale['id']}/client",
@@ -94,7 +104,7 @@ async def test_attach_client_without_newsletter_optin_skips_brevo(client, auth_h
         headers=auth_headers,
     )
     assert r.status_code == 200, r.text
-    assert r.json()["brevo"] is None
+    assert r.json()["brevo"] == {"status": "failed"}
 
 
 async def test_attach_client_send_receipt_false_skips_email(client, auth_headers, open_drawer):
@@ -171,6 +181,47 @@ async def test_attach_client_same_client_again_is_idempotent(client, auth_header
         # Idempotence POS (§3) : un seul consentement newsletter=True écrit,
         # pas un par appel.
         assert len(consents) == 1
+
+
+async def test_pos_opt_out_after_opt_in_removes_contact_from_brevo_list(
+    client, auth_headers, open_drawer, monkeypatch
+):
+    """Revue RGPD (3) — un consentement newsletter qui passe à `False`
+    (source `pos`) doit retirer le contact de la liste Brevo dédiée, pas
+    seulement le pousser à l'inscription. Point unique :
+    `ClientService.sync_brevo`, appelé après chaque `record_consent` de
+    source `pos`/`admin` (jamais `webhook` — voir `test_brevo_webhook.py`).
+    """
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "ak-test")
+    monkeypatch.setattr(settings, "BREVO_LIST_ID", "55")
+
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"method": request.method, "url": str(request.url)})
+        if request.url.path.endswith("/remove"):
+            return httpx.Response(204)
+        return httpx.Response(201, json={"id": 1})
+
+    monkeypatch.setattr(brevo_contacts, "_transport", httpx.MockTransport(handler))
+
+    sale1 = await _sell(client, auth_headers)
+    r1 = await client.post(
+        f"/api/pos/transactions/{sale1['id']}/client",
+        json={"email": "opt-in-then-out@example.com", "newsletter_optin": True, "send_receipt": False},
+        headers=auth_headers,
+    )
+    assert r1.status_code == 200, r1.text
+    assert calls[-1]["url"] == "https://api.brevo.com/v3/contacts"
+
+    sale2 = await _sell(client, auth_headers)
+    r2 = await client.post(
+        f"/api/pos/transactions/{sale2['id']}/client",
+        json={"email": "opt-in-then-out@example.com", "newsletter_optin": False, "send_receipt": False},
+        headers=auth_headers,
+    )
+    assert r2.status_code == 200, r2.text
+    assert calls[-1]["url"] == "https://api.brevo.com/v3/contacts/lists/55/contacts/remove"
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +364,47 @@ async def test_admin_add_consent_source_is_admin(client, auth_headers, open_draw
     latest = body["consents"][0]
     assert latest["source"] == "admin"
     assert latest["granted"] is True
+
+
+async def test_admin_consent_granted_false_removes_contact_from_brevo_list(
+    client, auth_headers, open_drawer, monkeypatch
+):
+    """Revue RGPD (3) — bouton admin « Retirer de la newsletter »
+    (`POST /admin/clients/{id}/consents` source `admin`, `granted:false`)
+    retire aussi le contact de la liste Brevo dédiée."""
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "ak-test")
+    monkeypatch.setattr(settings, "BREVO_LIST_ID", "66")
+
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url)})
+        if request.url.path.endswith("/remove"):
+            return httpx.Response(204)
+        return httpx.Response(201, json={"id": 1})
+
+    monkeypatch.setattr(brevo_contacts, "_transport", httpx.MockTransport(handler))
+
+    sale = await _sell(client, auth_headers)
+    attach = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "admin-remove@example.com", "newsletter_optin": True, "send_receipt": False},
+        headers=auth_headers,
+    )
+    client_id = attach.json()["client"]["id"]
+    assert calls  # push effectué à l'attache (opt-in)
+    calls.clear()
+
+    r = await client.post(
+        f"/api/admin/clients/{client_id}/consents",
+        json={"purpose": "newsletter", "granted": False},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["client"]["newsletter_optin"] is False
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://api.brevo.com/v3/contacts/lists/66/contacts/remove"
 
 
 async def test_admin_export_client_returns_full_json(client, auth_headers, open_drawer):

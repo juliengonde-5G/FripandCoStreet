@@ -5,6 +5,7 @@
 # de fidelite, pas de profilage, pas de SMS (cf. CLAUDE.md).
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
@@ -18,6 +19,8 @@ from app.models.pos import Transaction
 from app.models.receipt import Receipt
 from app.services.fiscal import PosServiceError
 from app.services.jet import (
+    EVENT_BREVO_SYNC_FAILED,
+    EVENT_BREVO_SYNCED,
     EVENT_CLIENT_ANONYMIZED,
     EVENT_CLIENT_CREATED,
     EVENT_CLIENT_EXPORTED,
@@ -58,6 +61,28 @@ def normalize_email(raw: str) -> str:
     except EmailNotValidError as exc:
         raise InvalidEmail(f"Adresse e-mail invalide : {exc}") from exc
     return validated.normalized.lower()
+
+
+def _email_correlation_hash(email: str) -> str:
+    """Empreinte de corrélation NON réversible (8 hex = 32 bits) pour les
+    payloads JET (revue RGPD) : le journal des événements techniques est
+    IMMUABLE (aucun UPDATE/DELETE, migration 0001) — il ne doit donc JAMAIS
+    porter d'e-mail, prénom ou nom en clair, sous peine d'être impossible à
+    effacer lors d'une anonymisation (E4/art. 17). Suffisant pour recouper
+    « de quel événement s'agit-il » avec `client_id`, jamais pour retrouver
+    l'adresse elle-même.
+    """
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:8]
+
+
+def mask_email(email: str) -> str:
+    """Masque partiel `m***@exemple.fr` — helper commun (revue RGPD) utilisé
+    par `anonymize` pour les destinataires déjà tracés dans `communications`
+    (table mutable, contrairement au JET)."""
+    local, sep, domain = (email or "").partition("@")
+    if not sep or not local or not domain:
+        return "***"
+    return f"{local[0]}***@{domain}"
 
 
 class ClientService:
@@ -137,7 +162,7 @@ class ClientService:
         await JournalService(self.db).record(
             EVENT_CLIENT_CREATED,
             user_id=user_id,
-            payload={"client_id": str(client.id), "email": normalized},
+            payload={"client_id": str(client.id), "email_hash": _email_correlation_hash(normalized)},
         )
         await self.db.flush()
         return client, True
@@ -188,6 +213,41 @@ class ClientService:
         )
         await self.db.flush()
         return entry
+
+    async def sync_brevo(self, client: Client, *, user_id: uuid.UUID | None) -> dict:
+        """Point UNIQUE de synchro Brevo Contacts (E1/E2, revue RGPD) :
+        pousse le contact sur la liste dédiée si `newsletter_optin`, le
+        retire sinon (`brevo_contacts.push_contact`/`remove_from_list`).
+        Best-effort — n'est JAMAIS appelé pour un consentement de source
+        `webhook` (Brevo a déjà fait le retrait de son côté, voir
+        `brevo_contacts.apply_webhook_event`) ; appelé explicitement après
+        un `record_consent` de source `pos` ou `admin` par les appelants
+        (`PosService.attach_client_and_send_receipt`,
+        `api/admin/router.py::add_client_consent`). Un échec est tracé sur
+        `client.brevo_last_error` (mutable) et journalisé `brevo.sync_failed`
+        — SANS reproduire le détail de la réponse Brevo dans le JET
+        (immuable) : celui-ci peut échoïr l'adresse en clair.
+        """
+        from app.services import brevo_contacts
+
+        if client.newsletter_optin:
+            result = await brevo_contacts.push_contact(client)
+        else:
+            result = await brevo_contacts.remove_from_list(client.email)
+
+        if result.ok:
+            client.brevo_synced_at = datetime.now(timezone.utc)
+            client.brevo_last_error = None
+            await JournalService(self.db).record(
+                EVENT_BREVO_SYNCED, user_id=user_id, payload={"client_id": str(client.id)}
+            )
+        else:
+            client.brevo_last_error = result.detail
+            await JournalService(self.db).record(
+                EVENT_BREVO_SYNC_FAILED, user_id=user_id, payload={"client_id": str(client.id)}
+            )
+        await self.db.flush()
+        return {"status": "ok" if result.ok else "failed"}
 
     async def link_transaction(
         self, *, transaction: Transaction, client: Client, user_id: uuid.UUID | None
@@ -260,6 +320,18 @@ class ClientService:
         donnee personnelle."""
         if client.anonymized_at is not None:
             return client
+
+        # Destinataires déjà tracés dans `communications` (table mutable,
+        # contrairement au JET) — masqués, jamais supprimés (E7 : la preuve
+        # d'envoi doit rester, seule l'adresse en clair disparaît).
+        comms = (
+            await self.db.execute(
+                select(Communication).where(Communication.client_id == client.id)
+            )
+        ).scalars().all()
+        for comm in comms:
+            comm.recipient = mask_email(comm.recipient)
+
         client.email = f"supprime-{uuid.uuid4()}@anonyme.invalid"
         client.first_name = None
         client.last_name = None

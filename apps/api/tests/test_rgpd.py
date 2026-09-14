@@ -1,9 +1,12 @@
 # Nouveau test (PR3, §7 ARCHITECTURE_PR3.md, E4) — anonymisation RGPD :
 # PII effacées, AUCUNE ligne supprimée, AUCUNE vente modifiée (hors
 # `client_id`, deja inchange ici), `verify_chain_integrity` toujours
-# valide, contact retiré de la liste Brevo dédiée (appel vérifié par mock).
+# valide, contact retiré de la liste Brevo dédiée (appel vérifié par mock),
+# communications déjà tracées masquées, AUCUNE donnée personnelle dans le
+# JET (immuable) — revue RGPD.
 from __future__ import annotations
 
+import json
 import uuid
 
 import httpx
@@ -13,8 +16,10 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.database import async_session
 from app.models.client import Client, Consent, ConsentSource
+from app.models.communication import Communication
+from app.models.jet import JournalEvent
 from app.services import brevo_contacts
-from app.services.client_service import ClientService
+from app.services.client_service import ClientService, mask_email
 from app.services.fiscal import FiscalService
 
 pytestmark = pytest.mark.anyio
@@ -142,6 +147,10 @@ async def test_admin_anonymize_endpoint_removes_contact_from_brevo_list(
         headers=auth_headers,
     )
     client_id = attach.json()["client"]["id"]
+    # L'attache (newsletter_optin=False par défaut) a déjà déclenché une
+    # tentative de retrait best-effort côté `ClientService.sync_brevo` —
+    # on isole ci-dessous l'appel propre à l'anonymisation elle-même.
+    calls.clear()
 
     r = await client.post(
         f"/api/admin/clients/{client_id}/anonymize",
@@ -152,9 +161,7 @@ async def test_admin_anonymize_endpoint_removes_contact_from_brevo_list(
 
     assert len(calls) == 1
     assert calls[0]["url"] == "https://api.brevo.com/v3/contacts/lists/77/contacts/remove"
-    import json as _json
-
-    assert _json.loads(calls[0]["body"]) == {"emails": ["a-retirer@example.com"]}
+    assert json.loads(calls[0]["body"]) == {"emails": ["a-retirer@example.com"]}
 
     # Jamais de DELETE /v3/contacts ni de blocklist — un seul appel, celui
     # du retrait de liste.
@@ -179,3 +186,115 @@ async def test_export_client_data_contains_tickets_and_consents(client, auth_hea
     assert len(body["consents"]) == 1
     assert len(body["tickets"]) == 1
     assert "Ticket #" in body["tickets"][0]["content"] or str(sale["transaction_number"]) in body["tickets"][0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Revue RGPD (2) — anonymisation complète : `communications.recipient` est
+# une table MUTABLE (contrairement au JET) mais garde l'e-mail en clair tant
+# qu'elle n'est pas explicitement masquée par `anonymize`.
+# ---------------------------------------------------------------------------
+
+
+def test_mask_email_helper():
+    assert mask_email("alice@example.com") == "a***@example.com"
+    assert mask_email("") == "***"
+    assert mask_email("pas-un-email") == "***"
+
+
+async def test_anonymize_masks_communication_recipients(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    attach = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "masque-moi@example.com", "send_receipt": True},
+        headers=auth_headers,
+    )
+    assert attach.status_code == 200, attach.text
+    client_id = attach.json()["client"]["id"]
+
+    async with async_session() as db:
+        before = (
+            await db.execute(
+                select(Communication).where(Communication.client_id == uuid.UUID(client_id))
+            )
+        ).scalars().all()
+        assert len(before) == 1
+        assert before[0].recipient == "masque-moi@example.com"
+
+    r = await client.post(
+        f"/api/admin/clients/{client_id}/anonymize",
+        json={"reason": "Demande RGPD art. 17"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+
+    async with async_session() as db:
+        after = (
+            await db.execute(
+                select(Communication).where(Communication.client_id == uuid.UUID(client_id))
+            )
+        ).scalars().all()
+        assert len(after) == 1  # la ligne (preuve d'envoi) reste, seul le destinataire est masqué
+        assert after[0].recipient == "m***@example.com"
+        assert after[0].recipient != "masque-moi@example.com"
+
+
+# ---------------------------------------------------------------------------
+# Revue RGPD (1) — le JET est un journal IMMUABLE : aucune ligne ne doit
+# porter d'e-mail ni de nom en clair, sur tout le cycle de vie d'un client
+# (création, lien, envoi, webhook, anonymisation).
+# ---------------------------------------------------------------------------
+
+
+async def test_jet_payloads_never_contain_personal_data_across_full_scenario(
+    client, auth_headers, open_drawer, monkeypatch
+):
+    email = "jet-doit-rester-propre@example.com"
+    first_name = "PrenomSecretissime"
+    last_name = "NomSecretissime"
+    monkeypatch.setattr(settings, "BREVO_WEBHOOK_TOKEN", "wh-token-jeu-essai")
+
+    # 1. création + 2. lien + 3. envoi du ticket (une seule route).
+    sale = await _sell(client, auth_headers)
+    attach = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "newsletter_optin": True,
+            "send_receipt": True,
+        },
+        headers=auth_headers,
+    )
+    assert attach.status_code == 200, attach.text
+    client_id = attach.json()["client"]["id"]
+
+    # 4. webhook Brevo désabonne ce même e-mail (source `webhook`).
+    webhook = await client.post(
+        "/api/brevo/webhook",
+        params={"token": "wh-token-jeu-essai"},
+        json={"event": "unsubscribed", "email": email},
+    )
+    assert webhook.status_code == 200, webhook.text
+
+    # 5. anonymisation.
+    anonymize = await client.post(
+        f"/api/admin/clients/{client_id}/anonymize",
+        json={"reason": "Jeu d'essai RGPD — vérification JET"},
+        headers=auth_headers,
+    )
+    assert anonymize.status_code == 200, anonymize.text
+
+    async with async_session() as db:
+        events = (await db.execute(select(JournalEvent))).scalars().all()
+    assert len(events) >= 5  # au moins un évènement par étape ci-dessus
+
+    offenders: list[tuple[str, dict]] = []
+    for event in events:
+        blob = json.dumps(event.payload or {}, ensure_ascii=False).lower()
+        if email.lower() in blob or first_name.lower() in blob or last_name.lower() in blob:
+            offenders.append((event.event_type, event.payload))
+    assert not offenders, (
+        "Donnée personnelle trouvée dans un payload JET (journal immuable) : "
+        + repr(offenders)
+    )

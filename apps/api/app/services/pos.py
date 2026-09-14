@@ -33,8 +33,6 @@ from app.services.fiscal import (
     acquire_fiscal_write_lock,
 )
 from app.services.jet import (
-    EVENT_BREVO_SYNC_FAILED,
-    EVENT_BREVO_SYNCED,
     EVENT_CASH_MOVEMENT_CREATED,
     EVENT_DRAWER_CLOSED,
     EVENT_DRAWER_OPENED,
@@ -588,8 +586,10 @@ class PosService:
         """Orchestre `POST /pos/transactions/{id}/client` (§3) : upsert du
         client -> consentement newsletter (si coché ; si la cliente existait
         déjà avec opt-in et décoche, révocation source `pos`) -> lien vente
-        -> e-mail du ticket -> synchro Brevo si opt-in (best-effort, un
-        échec Brevo n'empêche ni la vente ni l'e-mail)."""
+        -> e-mail du ticket -> synchro Brevo (best-effort, un échec Brevo
+        n'empêche ni la vente ni l'e-mail) — `ClientService.sync_brevo` pousse
+        le contact si `newsletter_optin`, le retire sinon (revue RGPD :
+        point unique, cf. `client_service.py`)."""
         from app.models.client import ConsentPurpose, ConsentSource
         from app.services.client_service import ClientService
 
@@ -612,9 +612,7 @@ class PosService:
                 transaction=transaction, to=client.email, client_id=client.id, user_id=user_id
             )
 
-        brevo_result = None
-        if client.newsletter_optin:
-            brevo_result = await self._sync_brevo_contact(client, user_id=user_id)
+        brevo_result = await clients.sync_brevo(client, user_id=user_id)
 
         return {"client": client, "receipt_email": receipt_result, "brevo": brevo_result}
 
@@ -735,26 +733,3 @@ class PosService:
         )
         await self.db.flush()
         return {"status": result.status, "provider": result.provider}
-
-    async def _sync_brevo_contact(self, client, *, user_id: uuid.UUID | None) -> dict:
-        """Synchro Brevo best-effort (§3) : un échec est journalisé
-        (`brevo.sync_failed`) et tracé sur la fiche (`brevo_last_error`),
-        jamais propagé — la vente et l'e-mail du ticket ont déjà réussi."""
-        from app.services import brevo_contacts
-
-        result = await brevo_contacts.push_contact(client)
-        if result.ok:
-            client.brevo_synced_at = datetime.now(timezone.utc)
-            client.brevo_last_error = None
-            await JournalService(self.db).record(
-                EVENT_BREVO_SYNCED, user_id=user_id, payload={"client_id": str(client.id)}
-            )
-        else:
-            client.brevo_last_error = result.detail
-            await JournalService(self.db).record(
-                EVENT_BREVO_SYNC_FAILED,
-                user_id=user_id,
-                payload={"client_id": str(client.id), "detail": result.detail},
-            )
-        await self.db.flush()
-        return {"status": "ok" if result.ok else "failed", "detail": result.detail or None}

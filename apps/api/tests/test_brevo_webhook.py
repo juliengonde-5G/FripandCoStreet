@@ -4,6 +4,7 @@
 # token -> consentement revoque + evenement JET.
 from __future__ import annotations
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -11,6 +12,7 @@ from app.core.config import settings
 from app.core.database import async_session
 from app.models.client import Client
 from app.models.jet import JournalEvent
+from app.services import brevo_contacts
 
 pytestmark = pytest.mark.anyio
 
@@ -117,3 +119,31 @@ async def test_webhook_unknown_client_replayed_is_skipped_not_an_error(client, m
     )
     assert r.status_code == 200
     assert r.json() == {"applied": 0, "skipped": 1}
+
+
+async def test_webhook_never_calls_brevo_api(client, monkeypatch):
+    """Revue RGPD (3) — la révocation source `webhook` ne doit JAMAIS
+    rappeler l'API Brevo (Brevo a déjà retiré le contact de son côté ; un
+    rappel serait redondant et pourrait même échouer si Brevo l'a déjà
+    purgé). `ClientService.sync_brevo` n'est appelé que depuis les flux
+    `pos`/`admin`, jamais depuis `brevo_contacts.apply_webhook_event`."""
+    monkeypatch.setattr(settings, "BREVO_WEBHOOK_TOKEN", "expected-token")
+    # Brevo EST configuré ici (clé + liste) : si un appel partait quand
+    # même, il serait légitime aux yeux du code — ce test prouve qu'aucun
+    # appel n'est tenté, pas seulement qu'il serait no-op faute de config.
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "ak-test")
+    monkeypatch.setattr(settings, "BREVO_LIST_ID", "1")
+
+    def _fail_if_called(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Brevo appelé depuis le traitement du webhook — jamais attendu (E9)")
+
+    monkeypatch.setattr(brevo_contacts, "_transport", httpx.MockTransport(_fail_if_called))
+
+    await _create_client("no-api-call@example.com")
+    r = await client.post(
+        "/api/brevo/webhook",
+        params={"token": "expected-token"},
+        json={"event": "unsubscribed", "email": "no-api-call@example.com"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] == 1
