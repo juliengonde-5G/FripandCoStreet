@@ -124,6 +124,19 @@ async def test_refresh_returns_new_token(client, auth_headers):
     assert event.event_type == "auth.token_refresh"
 
 
+async def test_refresh_with_non_uuid_subject_is_401_not_500(client):
+    # Signe avec la bonne cle (settings.SECRET_KEY) mais un `sub` invalide :
+    # doit etre rejete proprement (401), jamais planter en 500 sur la
+    # comparaison DB `User.id == user_id`.
+    from app.core.security import create_access_token
+
+    bad_token = create_access_token(data={"sub": "pas-un-uuid"})
+    response = await client.post(
+        "/api/auth/refresh", headers={"Authorization": f"Bearer {bad_token}"}
+    )
+    assert response.status_code == 401
+
+
 async def test_logout_is_204_and_journals_event(client, auth_headers):
     response = await client.post("/api/auth/logout", headers=auth_headers)
     assert response.status_code == 204

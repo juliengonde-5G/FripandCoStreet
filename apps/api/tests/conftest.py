@@ -56,6 +56,13 @@ def _run_alembic_upgrade() -> None:
     """
     env = os.environ.copy()
     env["DATABASE_URL"] = TEST_DATABASE_URL
+    # `alembic/env.py` utilise MIGRATION_DATABASE_URL en priorite quand elle
+    # est definie. Un dev qui l'a exportee dans son shell (pour pointer les
+    # migrations sur le role proprietaire en local/prod) verrait sinon les
+    # tests migrer — et potentiellement modifier le schema de — une tout
+    # autre base que TEST_DATABASE_URL. Les tests pilotent explicitement
+    # DATABASE_URL ci-dessus ; on retire donc l'eventuel heritage.
+    env.pop("MIGRATION_DATABASE_URL", None)
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=str(API_DIR),

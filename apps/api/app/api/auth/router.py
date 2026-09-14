@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.rate_limit import login_rate_limit, reset_login_rate_limit
 from app.core.security import (
+    _uuid_subject,
     create_access_token,
     get_current_user,
     oauth2_scheme,
@@ -154,9 +155,10 @@ async def refresh_token(
 ):
     """Accepte un token valide et en retourne un nouveau avec une expiration fraiche."""
     payload = verify_token(token)
-    user_id = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    # `_uuid_subject` valide le format UUID et leve 401 (jamais 500) si `sub`
+    # est absent ou n'est pas un UUID valide — un `sub` non-UUID envoye tel
+    # quel a `User.id == user_id` remonterait une erreur DB brute (500).
+    user_id = _uuid_subject(payload)
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()

@@ -64,13 +64,15 @@ def main() -> None:
 
     if args.password is not None:
         password = args.password
+        if len(password) < 12:
+            parser.error("Le mot de passe doit contenir au moins 12 caracteres.")
     else:
         password = getpass.getpass("Mot de passe (12+ caracteres) : ")
+        if len(password) < 12:
+            parser.error("Le mot de passe doit contenir au moins 12 caracteres.")
         confirmation = getpass.getpass("Confirmer le mot de passe : ")
         if password != confirmation:
-            parser.error("passwords do not match")
-    if len(password) < 12:
-        parser.error("password must contain at least 12 characters")
+            parser.error("Les mots de passe ne correspondent pas.")
 
     asyncio.run(_create(username, email, password))
     print(f"Compte {username!r} cree ; aucun mot de passe par defaut n'a ete stocke")
