@@ -7,10 +7,11 @@
  * → comparaison → confirmation (le Z est affiché : attendu / compté /
  * écart, totaux par méthode, n° de Z).
  */
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 
 import NumPad from "@/components/ui/NumPad";
 import { formatCurrency } from "@/lib/format";
+import { useDialogA11y } from "@/lib/useDialogA11y";
 
 import DenominationGrid, { type DenominationLine, totalFromBreakdown } from "./DenominationGrid";
 
@@ -65,6 +66,17 @@ export default function CashDrawerCloseModal({
     else if (phase === "compare") void handleSubmit();
   };
 
+  const handleBack = (): void => {
+    if (submitting) return;
+    if (phase === "compare") setPhase("count");
+    else handleClose();
+  };
+
+  const titleId = useId();
+  // Échap reproduit l'action du bouton « Retour »/« Modifier » de l'en-tête
+  // (ou ferme l'écran final une fois la clôture faite).
+  const containerRef = useDialogA11y<HTMLDivElement>(open, phase === "done" ? handleClose : handleBack);
+
   const handleSubmit = async (): Promise<void> => {
     if (noteRequired && !closingNote.trim()) return;
     setSubmitting(true);
@@ -89,14 +101,16 @@ export default function CashDrawerCloseModal({
   const phaseLabel = phase === "count" ? "Décompte" : phase === "compare" ? "Comparaison" : "Caisse clôturée";
 
   return (
-    <div className="fixed inset-0 z-[58] bg-fc-bg flex flex-col">
+    <div
+      ref={containerRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="fixed inset-0 z-[58] bg-fc-bg flex flex-col"
+    >
       <header className="flex-shrink-0 h-14 bg-fc-primary-deep text-white flex items-center px-3 gap-3 shadow-lg">
         <button
-          onClick={() => {
-            if (submitting) return;
-            if (phase === "compare") setPhase("count");
-            else handleClose();
-          }}
+          onClick={handleBack}
           disabled={submitting || phase === "done"}
           className="flex items-center gap-2 px-3 py-2 rounded-fc hover:bg-white/10 transition-colors min-h-[44px] disabled:opacity-30"
           aria-label={phase === "compare" ? "Modifier le décompte" : "Annuler"}
@@ -108,7 +122,9 @@ export default function CashDrawerCloseModal({
           <span className="text-sm font-medium">{phase === "compare" ? "Modifier" : "Retour"}</span>
         </button>
         <div className="h-7 w-px bg-white/15" />
-        <h1 className="text-lg font-semibold">Clôture de caisse</h1>
+        <h1 id={titleId} className="text-lg font-semibold">
+          Clôture de caisse
+        </h1>
         <span className="text-xs opacity-70 px-2 py-1 rounded bg-white/10">{phaseLabel}</span>
         <div className="flex-1" />
         <div className="flex flex-col items-end leading-tight">
@@ -267,10 +283,7 @@ export default function CashDrawerCloseModal({
           <>
             <button
               type="button"
-              onClick={() => {
-                if (phase === "compare") setPhase("count");
-                else handleClose();
-              }}
+              onClick={handleBack}
               disabled={submitting}
               className="px-5 py-3 rounded-fc-lg text-sm font-medium text-fc-ink-soft bg-fc-bg-alt hover:bg-fc-line transition-colors min-h-[52px] disabled:opacity-50"
             >

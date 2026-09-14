@@ -34,7 +34,11 @@ export default function ReceiptPreviewCard({ ticketNumber, totalTtc, isCancellat
         </div>
       </div>
 
-      <pre className="max-h-72 overflow-auto rounded-fc-lg border border-fc-line bg-fc-bg-alt p-4 font-mono text-xs leading-tight text-fc-ink whitespace-pre-wrap" aria-label="Aperçu du ticket">
+      {/* max-h assez haut pour un petit ticket (3 lignes d'articles) sans
+          barre de défilement ; au-delà, ça défile ICI (dans la carte),
+          jamais en faisant défiler toute la page — correctif (mineur)
+          persona vendeuse. */}
+      <pre className="max-h-96 overflow-y-auto rounded-fc-lg border border-fc-line bg-fc-bg-alt p-4 font-mono text-xs leading-tight text-fc-ink whitespace-pre-wrap" aria-label="Aperçu du ticket">
         {receiptText}
       </pre>
 

@@ -21,3 +21,62 @@ export class ApiError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * Extrait un message d'erreur lisible d'un corps de réponse JSON — jamais
+ * `String(objet)` (qui produit « [object Object] », le bug remonté par le
+ * testeur sur une double annulation). Gère le `detail` texte simple du
+ * contrat §5, mais aussi les formes objet/tableau qu'un backend réel peut
+ * renvoyer (ex. erreurs de validation Pydantic `detail: [{msg, ...}]`, ou
+ * `detail: {message, code}`) — dans ces cas, on descend d'un niveau plutôt
+ * que d'accepter la structure telle quelle, avec un JSON.stringify en tout
+ * dernier recours pour ne jamais rien perdre.
+ */
+export function extractErrorDetail(data: unknown): string {
+  if (data === null || data === undefined) return "Erreur inconnue";
+  if (typeof data === "string") return data.trim() || "Erreur inconnue";
+  if (typeof data !== "object") return "Erreur inconnue";
+
+  const obj = data as Record<string, unknown>;
+  const detail = obj.detail;
+
+  if (typeof detail === "string") return detail.trim() || "Erreur inconnue";
+
+  if (Array.isArray(detail) && detail.length > 0) {
+    const first = detail[0];
+    if (first && typeof first === "object" && typeof (first as Record<string, unknown>).msg === "string") {
+      return String((first as Record<string, unknown>).msg);
+    }
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return "Erreur inconnue";
+    }
+  }
+
+  if (detail && typeof detail === "object") {
+    const inner = detail as Record<string, unknown>;
+    if (typeof inner.detail === "string") return inner.detail;
+    if (typeof inner.message === "string") return inner.message;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return "Erreur inconnue";
+    }
+  }
+
+  if (typeof obj.message === "string") return obj.message;
+
+  try {
+    return JSON.stringify(obj);
+  } catch {
+    return "Erreur inconnue";
+  }
+}
+
+/** Code métier snake_case (§5) — toujours une chaîne simple ou `undefined`. */
+export function extractErrorCode(data: unknown): string | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const code = (data as Record<string, unknown>).code;
+  return typeof code === "string" && code.length > 0 ? code : undefined;
+}

@@ -15,11 +15,28 @@ export function computeBrut(lines: { unitPrice: number; quantity: number }[]): n
 }
 
 export function computeDiscountAmount(brut: number, discount: DiscountInput | null): number {
-  if (!discount || brut <= 0) return 0;
+  if (!discount || brut <= 0 || discount.value <= 0) return 0;
   if (discount.type === "percent") {
-    if (discount.value <= 0 || discount.value > 100) return 0;
-    return round2((brut * discount.value) / 100);
+    // Défensif : une valeur >100 % ne doit jamais annuler la remise, elle
+    // est plafonnée à 100 % (remise totale) — voir clampDiscountValue,
+    // qui plafonne déjà la valeur SAISIE avant stockage ; ce garde-fou
+    // couvre toute autre origine (ex. état restauré, valeur non passée
+    // par l'éditeur).
+    const rate = Math.min(discount.value, 100);
+    return round2((brut * rate) / 100);
   }
-  if (discount.value <= 0) return 0;
   return round2(Math.min(discount.value, brut));
+}
+
+/**
+ * Plafonne une valeur de remise SAISIE avant de la stocker/afficher — un
+ * pourcentage > 100 est ramené à 100, un montant € supérieur au total du
+ * panier est ramené à ce total (ex. 200 € tapés sur un panier à 40 € →
+ * remise réellement appliquée 40,00 €). Le chip de remise affiche ensuite
+ * toujours la valeur stockée (donc déjà plafonnée), jamais le nombre tapé.
+ */
+export function clampDiscountValue(type: "percent" | "amount", value: number, brut: number): number {
+  const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+  if (type === "percent") return round2(Math.min(safeValue, 100));
+  return round2(Math.min(safeValue, Math.max(0, brut)));
 }

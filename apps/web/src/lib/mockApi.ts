@@ -57,7 +57,10 @@ let zSeq = 0;
 let jetSeq = 0;
 
 let transactions: TransactionOut[] = [];
-const cancelledTransactionIds = new Set<string>();
+// vente annulée (id) -> id de la transaction `refund` qui l'a annulée.
+// Alimente `cancelled`/`refund_transaction_id` (attendus par TicketsPanel,
+// cf. correctif testeur/persona) sur chaque vente lue depuis le mock.
+const cancelledToRefund = new Map<string, string>();
 let cashMovements: CashMovement[] = [];
 let zReports: ZReport[] = [];
 let jetEvents: JetEvent[] = [];
@@ -102,7 +105,7 @@ let settings: {
 function reset(): void {
   drawer = null;
   transactions = [];
-  cancelledTransactionIds.clear();
+  cancelledToRefund.clear();
   cashMovements = [];
   zReports = [];
   jetEvents = [];
@@ -180,12 +183,15 @@ function buildTransaction(
   const rate = tvaRateNumber();
   const brut = round2(items.reduce((s, i) => s + i.unit_price * i.quantity, 0));
 
+  // Défensif (correctif persona vendeuse) : une remise > 100 % ou > au
+  // total du panier ne doit jamais produire un total négatif — plafonnée
+  // ici même si le front est censé déjà avoir clampé la valeur affichée.
   let discountAmount = 0;
-  if (discount) {
+  if (discount && discount.value > 0) {
     if (discount.type === "percent") {
-      discountAmount = round2((brut * discount.value) / 100);
+      discountAmount = round2((brut * Math.min(discount.value, 100)) / 100);
     } else {
-      discountAmount = round2(discount.value);
+      discountAmount = round2(Math.min(discount.value, brut));
     }
   }
   const discountAmountCents = Math.round(discountAmount * 100);
@@ -354,7 +360,21 @@ function summarize(tx: TransactionOut): TransactionSummary {
     created_at: tx.created_at,
     total_ttc: tx.total_ttc,
     methods: tx.payments.map((p) => p.method),
-    cancelled: cancelledTransactionIds.has(tx.id),
+    cancelled: cancelledToRefund.has(tx.id),
+    refund_transaction_id: cancelledToRefund.get(tx.id) ?? null,
+    original_transaction_id: tx.original_transaction_id ?? null,
+  };
+}
+
+/** Attache `cancelled`/`refund_transaction_id` à une transaction complète
+ * (GET détail, réponses de création/annulation) — même logique que
+ * `summarize`, dérivée de `cancelledToRefund` plutôt que stockée sur
+ * l'objet (une vente peut être annulée après sa création). */
+function attachCancelInfo(tx: TransactionOut): TransactionOut {
+  return {
+    ...tx,
+    cancelled: cancelledToRefund.has(tx.id),
+    refund_transaction_id: cancelledToRefund.get(tx.id) ?? null,
   };
 }
 
@@ -479,7 +499,7 @@ export async function mockFetchAPI<T = unknown>(
     const body = parseBody<CreateTransactionRequest>(options);
 
     const existing = transactions.find((t) => t.id === body.client_uuid || (t as unknown as { client_uuid?: string }).client_uuid === body.client_uuid);
-    if (existing) return existing as unknown as T;
+    if (existing) return attachCancelInfo(existing) as unknown as T;
 
     if (!body.items || body.items.length === 0 || body.items.length > 50) {
       fail(422, "Le panier doit contenir entre 1 et 50 lignes.", "invalid_items");
@@ -492,9 +512,11 @@ export async function mockFetchAPI<T = unknown>(
     const totalPayments = round2((body.payments ?? []).reduce((s, p) => s + p.amount, 0));
     const brut = round2(body.items.reduce((s, i) => s + i.unit_price * i.quantity, 0));
     let expectedDiscount = 0;
-    if (body.discount) {
+    if (body.discount && body.discount.value > 0) {
       expectedDiscount =
-        body.discount.type === "percent" ? round2((brut * body.discount.value) / 100) : round2(body.discount.value);
+        body.discount.type === "percent"
+          ? round2((brut * Math.min(body.discount.value, 100)) / 100)
+          : round2(Math.min(body.discount.value, brut));
     }
     const expectedTotal = round2(brut - expectedDiscount);
     if (Math.abs(totalPayments - expectedTotal) > 0.01) {
@@ -523,7 +545,7 @@ export async function mockFetchAPI<T = unknown>(
     (tx as unknown as { client_uuid?: string }).client_uuid = body.client_uuid;
     transactions.unshift(tx);
     logJet("sale.created", { number: tx.transaction_number, total_ttc: tx.total_ttc, methods: Array.from(methods) });
-    return tx as unknown as T;
+    return attachCancelInfo(tx) as unknown as T;
   }
 
   if (path === "/api/pos/transactions" && method === "GET") {
@@ -548,7 +570,7 @@ export async function mockFetchAPI<T = unknown>(
     if (!tx) fail(404, "Ticket introuvable.", "not_found");
     if (!drawer) fail(409, "Caisse fermée : ouvrez la caisse avant d'annuler un ticket.", "drawer_closed");
     if (tx!.transaction_type === "refund") fail(409, "Ce ticket est déjà une annulation.", "already_refund");
-    if (cancelledTransactionIds.has(tx!.id)) fail(409, "Ce ticket a déjà été annulé.", "already_cancelled");
+    if (cancelledToRefund.has(tx!.id)) fail(409, "Ce ticket a déjà été annulé.", "already_cancelled");
     const body = parseBody<{ reason: string }>(options);
     if (!body.reason || body.reason.trim().length < 3) {
       fail(422, "Le motif d'annulation doit contenir au moins 3 caractères.", "invalid_reason");
@@ -563,9 +585,9 @@ export async function mockFetchAPI<T = unknown>(
     // Un remboursement carte n'a pas besoin d'un nouveau checkout confirmé —
     // les lignes de paiement sont un miroir de la vente d'origine (§4.2).
     transactions.unshift(refund);
-    cancelledTransactionIds.add(tx!.id);
+    cancelledToRefund.set(tx!.id, refund.id);
     logJet("sale.cancelled", { number: refund.transaction_number, original_number: tx!.transaction_number, reason: body.reason.trim() });
-    return refund as unknown as T;
+    return attachCancelInfo(refund) as unknown as T;
   }
 
   if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/receipt$/)) && method === "GET") {
@@ -580,7 +602,7 @@ export async function mockFetchAPI<T = unknown>(
   if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)$/)) && method === "GET") {
     const tx = transactions.find((t) => t.id === m![1]);
     if (!tx) fail(404, "Ticket introuvable.", "not_found");
-    return tx as unknown as T;
+    return attachCancelInfo(tx!) as unknown as T;
   }
 
   // --- Z-reports ----------------------------------------------------------

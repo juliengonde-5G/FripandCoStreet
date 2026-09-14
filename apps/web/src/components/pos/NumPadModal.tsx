@@ -40,10 +40,10 @@ export default function NumPadModal({ open, onClose, method, title, remainingAmo
   const change = method === "cash" && mode === "full" ? amount - remainingAmount : 0;
   const isCovering = mode === "full" ? amount >= remainingAmount - 0.001 : amount > 0 && amount < remainingAmount - 0.001;
 
-  const defaultPresets =
-    mode === "full"
-      ? [remainingAmount, 5, 10, 20, 50, 100].filter((n, i, arr) => n > 0 && arr.indexOf(n) === i).slice(0, 6)
-      : [5, 10, 20, 50].filter((n) => n < remainingAmount);
+  // Raccourcis sur une seule ligne (§6 PR2 : 5/10/20/50/100) — pas de
+  // sixième bouton "reste dû" qui forcerait un retour à la ligne et
+  // pousserait le bloc "Monnaie à rendre" hors de l'écran à 1024×768.
+  const defaultPresets = mode === "full" ? [5, 10, 20, 50, 100] : [5, 10, 20, 50].filter((n) => n < remainingAmount);
 
   return (
     <Modal
@@ -71,12 +71,17 @@ export default function NumPadModal({ open, onClose, method, title, remainingAmo
         </>
       }
     >
-      <div className="space-y-4">
-        <NumPad value={amount} onChange={setAmount} presets={presets ?? defaultPresets} />
+      {/* Contenu compact (correctif persona vendeuse) : le bloc "Monnaie à
+          rendre" doit rester entièrement visible sans défilement à
+          1024×768, avant même de valider. `overflow-y-auto` reste en
+          filet de sécurité (posé par Modal.tsx) si une tablette plus
+          petite le nécessite malgré tout. */}
+      <div className="space-y-2">
+        <NumPad value={amount} onChange={setAmount} presets={presets ?? defaultPresets} compact />
 
         {method === "cash" && mode === "full" && amount > 0 && (
           <div
-            className={`rounded-fc-lg px-4 py-4 transition-colors ${
+            className={`rounded-fc-lg px-3 py-2.5 transition-colors ${
               isCovering ? "bg-fc-primary-soft ring-2 ring-fc-primary/40 shadow-sm" : "bg-fc-warn-soft"
             }`}
           >
@@ -84,7 +89,7 @@ export default function NumPadModal({ open, onClose, method, title, remainingAmo
               <span
                 className={
                   isCovering
-                    ? "text-base font-semibold uppercase tracking-wide text-fc-primary-deep"
+                    ? "text-sm font-semibold uppercase tracking-wide text-fc-primary-deep"
                     : "text-sm font-medium uppercase tracking-wide text-fc-ink-soft"
                 }
               >
@@ -93,8 +98,8 @@ export default function NumPadModal({ open, onClose, method, title, remainingAmo
               <span
                 className={
                   isCovering
-                    ? "font-mono font-bold tabular-nums leading-none text-5xl md:text-6xl text-fc-primary-deep mt-1"
-                    : "font-mono font-bold tabular-nums leading-none text-2xl text-fc-ink"
+                    ? "font-mono font-bold tabular-nums leading-none text-3xl md:text-4xl text-fc-primary-deep mt-0.5"
+                    : "font-mono font-bold tabular-nums leading-none text-xl text-fc-ink"
                 }
               >
                 {formatCurrency(Math.abs(change))}
@@ -104,13 +109,13 @@ export default function NumPadModal({ open, onClose, method, title, remainingAmo
         )}
 
         {mode === "partial" && (
-          <p className="rounded-fc-lg bg-fc-bg-alt px-4 py-3 text-sm text-fc-ink-soft">
+          <p className="rounded-fc-lg bg-fc-bg-alt px-3 py-2 text-sm text-fc-ink-soft">
             Ce montant doit rester inférieur au total : le reste sera demandé à la carte bancaire.
           </p>
         )}
 
         {method !== "cash" && mode === "full" && amount > 0 && !isCovering && (
-          <p className="rounded-fc-lg bg-fc-warn-soft px-4 py-3 text-sm text-fc-ink-soft">
+          <p className="rounded-fc-lg bg-fc-warn-soft px-3 py-2 text-sm text-fc-ink-soft">
             Le montant saisi est inférieur au reste à encaisser.
           </p>
         )}

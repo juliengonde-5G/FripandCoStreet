@@ -7,7 +7,7 @@
  * l'API locale (http://localhost:8000 par défaut).
  */
 
-import { ApiError } from "./apiError";
+import { ApiError, extractErrorCode, extractErrorDetail } from "./apiError";
 import { mockFetchAPI, isMockEnabled } from "./mockApi";
 
 export { ApiError };
@@ -102,14 +102,11 @@ export async function fetchAPI<T = unknown>(
     : await res.text().catch(() => null);
 
   if (!res.ok) {
-    const detail =
-      data && typeof data === "object" && "detail" in data
-        ? String((data as { detail?: unknown }).detail ?? "Erreur inconnue")
-        : "Erreur inconnue";
-    const code =
-      data && typeof data === "object" && "code" in data
-        ? String((data as { code?: unknown }).code ?? "") || undefined
-        : undefined;
+    // Jamais String(objet) : voir extractErrorDetail (apiError.ts) — un
+    // detail objet/tableau (validation Pydantic, backend qui imbrique
+    // {message,code}…) ne doit jamais s'afficher « [object Object] ».
+    const detail = extractErrorDetail(data);
+    const code = extractErrorCode(data);
     const error = new ApiError(res.status, detail, code);
     // Retry-After est utilisé par la page de connexion pour le rate-limit.
     const retryAfter = res.headers.get("Retry-After");

@@ -12,9 +12,14 @@ interface NumPadProps {
   value: number;
   onChange: (value: number) => void;
   presets?: number[];
+  /** Gabarit resserré (marges/tailles réduites, boutons toujours ≥48px
+   * via `min-h-touch`) — utilisé dans les modales de paiement pour que le
+   * bloc « Monnaie à rendre » reste entièrement visible sans défilement
+   * sur une tablette 1024×768 (correctif persona vendeuse). */
+  compact?: boolean;
 }
 
-export default function NumPad({ value, onChange, presets }: NumPadProps) {
+export default function NumPad({ value, onChange, presets, compact = false }: NumPadProps) {
   const [raw, setRaw] = useState(value > 0 ? value.toFixed(2) : "");
 
   useEffect(() => {
@@ -47,15 +52,15 @@ export default function NumPad({ value, onChange, presets }: NumPadProps) {
   const display = raw.replace(".", ",");
 
   return (
-    <div className="space-y-2">
-      <div className="text-right px-4 py-3 bg-fc-bg-alt rounded-fc-lg">
-        <span className="text-3xl font-bold text-fc-ink tabular-nums">
-          {display || "0"} <span className="text-xl font-normal text-fc-ink-mute">€</span>
+    <div className={compact ? "space-y-1.5" : "space-y-2"}>
+      <div className={`text-right bg-fc-bg-alt rounded-fc-lg ${compact ? "px-3 py-1.5" : "px-4 py-3"}`}>
+        <span className={`font-bold text-fc-ink tabular-nums ${compact ? "text-2xl" : "text-3xl"}`}>
+          {display || "0"} <span className={`font-normal text-fc-ink-mute ${compact ? "text-lg" : "text-xl"}`}>€</span>
         </span>
       </div>
 
       {presets && presets.length > 0 && (
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex gap-1.5 flex-wrap">
           {presets.map((p, i) => (
             <button
               key={i}
@@ -64,7 +69,9 @@ export default function NumPad({ value, onChange, presets }: NumPadProps) {
                 setRaw(p.toFixed(2));
                 onChange(p);
               }}
-              className="flex-1 min-w-[56px] min-h-touch py-2.5 bg-fc-primary-soft hover:opacity-90 active:opacity-80 text-fc-primary-deep rounded-fc text-sm font-bold transition-colors"
+              className={`flex-1 min-w-[52px] min-h-touch bg-fc-primary-soft hover:opacity-90 active:opacity-80 text-fc-primary-deep rounded-fc text-sm font-bold transition-colors ${
+                compact ? "py-1.5" : "py-2.5"
+              }`}
             >
               {Number.isInteger(p) ? `${p} €` : `${p.toFixed(2).replace(".", ",")} €`}
             </button>
@@ -72,13 +79,15 @@ export default function NumPad({ value, onChange, presets }: NumPadProps) {
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className={`grid grid-cols-3 ${compact ? "gap-1.5" : "gap-2"}`}>
         {["7", "8", "9", "4", "5", "6", "1", "2", "3", ",", "0", "⌫"].map((k) => (
           <button
             key={k}
             type="button"
             onClick={() => press(k)}
-            className={`min-h-touch py-4 rounded-fc text-2xl font-bold select-none transition-all active:scale-95 ${
+            className={`min-h-touch rounded-fc font-bold select-none transition-all active:scale-95 ${
+              compact ? "py-2 text-xl" : "py-4 text-2xl"
+            } ${
               k === "⌫"
                 ? "bg-red-50 text-fc-danger hover:bg-red-100 active:bg-red-200"
                 : "bg-fc-surface border border-fc-line text-fc-ink hover:bg-fc-primary-soft shadow-sm"

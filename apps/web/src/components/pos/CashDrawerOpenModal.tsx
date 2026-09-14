@@ -5,10 +5,11 @@
  * jetons `vz-*` → `fc-*`. Écran plein « Ouvrir la caisse » (§6 PR2) :
  * rien d'autre n'est cliquable tant que la caisse est fermée.
  */
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 
 import NumPad from "@/components/ui/NumPad";
 import { formatCurrency } from "@/lib/format";
+import { useDialogA11y } from "@/lib/useDialogA11y";
 
 import DenominationGrid, { type DenominationLine, totalFromBreakdown } from "./DenominationGrid";
 
@@ -26,6 +27,11 @@ export default function CashDrawerOpenModal({ onSubmit, error }: Props) {
   const [breakdown, setBreakdown] = useState<DenominationLine[]>([]);
   const [quickAmount, setQuickAmount] = useState<number>(0);
   const [submitting, setSubmitting] = useState(false);
+  const titleId = useId();
+  // Toujours monté seul (rien d'autre n'est cliquable tant que la caisse
+  // est fermée, voir /caisse) : pas de fermeture au clavier, donc pas de
+  // callback ESC — seul le piège de focus + la sémantique dialog importent.
+  const containerRef = useDialogA11y<HTMLDivElement>(true);
 
   const total = detailMode ? totalFromBreakdown(breakdown) : quickAmount;
   const valid = total > 0;
@@ -44,9 +50,17 @@ export default function CashDrawerOpenModal({ onSubmit, error }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-[58] bg-fc-bg flex flex-col">
+    <div
+      ref={containerRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="fixed inset-0 z-[58] bg-fc-bg flex flex-col"
+    >
       <header className="flex-shrink-0 h-14 bg-fc-primary-deep text-white flex items-center px-4 gap-3 shadow-lg">
-        <h1 className="text-lg font-semibold">Ouverture de caisse</h1>
+        <h1 id={titleId} className="text-lg font-semibold">
+          Ouverture de caisse
+        </h1>
         <div className="flex-1" />
         <div className="flex flex-col items-end leading-tight">
           <span className="text-[10px] opacity-70 uppercase tracking-wider">Fond de caisse</span>

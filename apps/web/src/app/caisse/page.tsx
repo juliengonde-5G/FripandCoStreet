@@ -23,7 +23,7 @@ import ReceiptPreviewCard from "@/components/pos/ReceiptPreviewCard";
 import TicketsPanel from "@/components/pos/TicketsPanel";
 import { api, ApiError } from "@/lib/api";
 import { formatCurrency } from "@/lib/format";
-import { computeBrut, computeDiscountAmount } from "@/lib/posCalc";
+import { clampDiscountValue, computeBrut, computeDiscountAmount } from "@/lib/posCalc";
 import type {
   CbStatusConfig,
   DiscountInput,
@@ -75,6 +75,28 @@ export default function CaissePage() {
   const [lastZ, setLastZ] = useState<ZReport | null>(null);
 
   const clientUuidRef = useRef<string>(newUuid());
+
+  // Rend le contenu de la page sous-jacente inert (non interactif, hors
+  // piège de focus) tant qu'un panneau plein écran ou une modale est
+  // ouvert par-dessus — corrige l'ambiguïté remontée par le testeur (deux
+  // boutons « 1 » trouvables : celui de la clôture de caisse ET celui,
+  // caché derrière, du pavé numérique de saisie). `inert` est typé sur
+  // `HTMLElement` (lib.dom) même s'il ne l'est pas encore comme prop JSX
+  // dans les types React stables utilisés ici — d'où la pose impérative
+  // plutôt qu'un attribut sur le JSX. `aria-hidden` est posé EN PLUS :
+  // Chromium honore bien `inert` pour bloquer clic/clavier, mais l'arbre
+  // d'accessibilité que Playwright interroge (`getByRole`) ne l'a pas
+  // exclu dans nos tests — `aria-hidden="true"`, lui, est le mécanisme
+  // que les moteurs de requête par rôle respectent de façon fiable.
+  const mainContentRef = useRef<HTMLDivElement | null>(null);
+  const anyOverlayOpen = discountEditorOpen || paymentOpen || ticketsOpen || closeDrawerOpen;
+  useEffect(() => {
+    const el = mainContentRef.current;
+    if (!el) return;
+    el.inert = anyOverlayOpen;
+    if (anyOverlayOpen) el.setAttribute("aria-hidden", "true");
+    else el.removeAttribute("aria-hidden");
+  }, [anyOverlayOpen]);
 
   const loadDrawer = async (): Promise<void> => {
     try {
@@ -236,7 +258,7 @@ export default function CaissePage() {
 
   return (
     <RequireAuth>
-      <div className="h-screen flex flex-col bg-fc-bg overflow-hidden">
+      <div ref={mainContentRef} className="h-screen flex flex-col bg-fc-bg overflow-hidden">
         {/* Barre haute */}
         <header className="flex-shrink-0 bg-fc-surface border-b border-fc-line px-4 py-2 flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2 min-w-0">
@@ -385,7 +407,7 @@ export default function CaissePage() {
                     }`}
                   >
                     {discount
-                      ? `Remise : ${discount.type === "percent" ? `${discount.value}%` : formatCurrency(discount.value)}`
+                      ? `Remise : ${discount.type === "percent" ? `${String(discount.value).replace(".", ",")} %` : formatCurrency(discount.value)}`
                       : "Remise"}
                   </button>
                   {discountAmount > 0 && (
@@ -450,7 +472,13 @@ export default function CaissePage() {
               type="button"
               disabled={discountDraftValue <= 0}
               onClick={() => {
-                setDiscount({ type: discountDraftType, value: discountDraftValue });
+                // Le nombre tapé n'est jamais stocké tel quel : une remise
+                // trop grande (200 % ou 200 € sur un panier à 40 €) est
+                // plafonnée ici avant d'être appliquée, donc le chip et le
+                // montant remisé affichent toujours la valeur réellement
+                // appliquée, jamais le nombre saisi.
+                const clamped = clampDiscountValue(discountDraftType, discountDraftValue, brut);
+                setDiscount(clamped > 0 ? { type: discountDraftType, value: clamped } : null);
                 setDiscountEditorOpen(false);
               }}
               className="flex-1 min-h-touch rounded-fc-lg bg-fc-primary text-white px-4 py-3 text-sm font-semibold hover:bg-fc-primary-deep disabled:opacity-50 disabled:cursor-not-allowed"

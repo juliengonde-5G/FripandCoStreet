@@ -153,6 +153,14 @@ export interface TransactionOut {
   receipt_text: string;
   original_transaction_id?: string | null;
   refund_reason?: string | null;
+  /** true si cette vente a déjà été annulée (side-effect de PUT/POST
+   * /transactions/{id}/cancel côté backend). Absent/`undefined` sur un
+   * backend qui ne le fournit pas encore — toujours traiter comme
+   * `false` dans ce cas (voir TicketsPanel). */
+  cancelled?: boolean;
+  /** id de la transaction `refund` qui a annulé celle-ci, quand
+   * `cancelled` est vrai. */
+  refund_transaction_id?: string | null;
 }
 
 /** Ligne allégée pour la liste « Tickets du jour ». */
@@ -164,6 +172,8 @@ export interface TransactionSummary {
   total_ttc: number;
   methods: PaymentMethod[];
   cancelled?: boolean;
+  refund_transaction_id?: string | null;
+  original_transaction_id?: string | null;
 }
 
 export interface TransactionListResponse {
