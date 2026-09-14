@@ -14,6 +14,7 @@ from sqlalchemy import text
 from app.api.admin.router import router as admin_router
 from app.api.auth.router import router as auth_router
 from app.api.health import router as health_router
+from app.api.pos.router import router as pos_router
 from app.core.config import settings
 from app.core.database import async_session, engine
 from app.core.exceptions import (
@@ -25,8 +26,23 @@ from app.core.exceptions import (
 )
 from app.core.logging_config import setup_logging
 from app.core.middleware import RequestIdMiddleware, SecurityHeadersMiddleware
+from app.jobs import register_all_jobs
+from app.services.fiscal import PosServiceError
 from app.services.jet import EVENT_SYSTEM_STARTUP, JournalService
 from app.version import APP_VERSION, EXPECTED_DB_REVISION
+
+# `cb_router.py` (agent B, §4.5/§7) : import protege — retire par
+# l'orchestrateur en fin de PR2 une fois le fichier definitivement livre.
+# Tant qu'il n'existe pas (parallelisation A/B), l'API demarre quand meme
+# sans les routes /pos/payments/cb/*.
+try:
+    from app.api.pos.cb_router import router as cb_router
+except ImportError:
+    cb_router = None
+    logging.getLogger("fripco").warning(
+        "app.api.pos.cb_router introuvable — routes CB SumUp non montees "
+        "(normal tant que l'agent B n'a pas livre le fichier)."
+    )
 
 setup_logging()
 logger = logging.getLogger("fripco")
@@ -100,7 +116,27 @@ async def lifespan(app: FastAPI):
         APP_VERSION,
         db_revision,
     )
+
+    # Garde fiscale 23:59 (§4.3) — seul cron du perimetre PR2. Fuseau
+    # Europe/Paris explicite (la boutique, pas le serveur, peut tourner en
+    # UTC). Import protege : `apscheduler` est une dependance obligatoire
+    # (pyproject.toml) mais un environnement de dev incomplet ne doit pas
+    # empecher de demarrer l'API pour autre chose que la caisse.
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+        scheduler = AsyncIOScheduler(timezone="Europe/Paris")
+        register_all_jobs(scheduler)
+        scheduler.start()
+        logger.info("Ordonnanceur demarre (garde fiscale 23:59 Europe/Paris)")
+    except ImportError:
+        scheduler = None
+        logger.warning("APScheduler non installe — la garde fiscale 23:59 est desactivee")
+
     yield
+
+    if scheduler is not None:
+        scheduler.shutdown(wait=False)
     logger.info("fripco-street API shutting down")
 
 
@@ -154,6 +190,26 @@ async def domain_exception_handler(request: Request, exc: FripcoError):
     return JSONResponse(status_code=status_code, content={"detail": str(exc)})
 
 
+@app.exception_handler(PosServiceError)
+async def pos_exception_handler(request: Request, exc: PosServiceError):
+    """Filet de securite pour les erreurs metier POS/fiscal (§5 : `detail` +
+    `code`) — chaque route les convertit deja explicitement, ce handler ne
+    couvre qu'un appel qui aurait echappe a cette conversion."""
+    logger.warning(
+        "[%s] %s %s %s refuse (%d %s): %s",
+        getattr(request.state, "request_id", "-"),
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+        exc.status_code,
+        exc.code,
+        exc,
+    )
+    return JSONResponse(
+        status_code=exc.status_code, content={"detail": str(exc), "code": exc.code}
+    )
+
+
 # Filet de securite : la plupart des exceptions non gerees sont deja
 # capturees par RequestIdMiddleware (la frontiere d'erreur 500 principale) ;
 # ce handler global couvre uniquement ce qui serait leve en dehors d'elle.
@@ -178,3 +234,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(health_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
+app.include_router(pos_router, prefix="/api")
+if cb_router is not None:
+    app.include_router(cb_router, prefix="/api")

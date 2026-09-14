@@ -43,6 +43,23 @@ EVENT_LOGOUT = "auth.logout"
 EVENT_TOKEN_REFRESH = "auth.token_refresh"
 EVENT_SYSTEM_STARTUP = "system.startup"
 
+# PR2 — vente, caisse espèces, Z, SumUp, paramétrage (docs/ARCHITECTURE_PR2.md §4.6)
+EVENT_SALE_CREATED = "sale.created"
+EVENT_SALE_CANCELLED = "sale.cancelled"
+EVENT_DRAWER_OPENED = "drawer.opened"
+EVENT_DRAWER_CLOSED = "drawer.closed"
+EVENT_DRAWER_AUTO_CLOSED = "drawer.auto_closed"
+EVENT_CASH_MOVEMENT_CREATED = "cash_movement.created"
+EVENT_Z_REGULARIZATION = "z.regularization"
+EVENT_PAYMENT_CB_INITIATED = "payment.cb_initiated"
+EVENT_PAYMENT_CB_PAID = "payment.cb_paid"
+EVENT_PAYMENT_CB_FAILED = "payment.cb_failed"
+EVENT_PAYMENT_CB_CANCELLED = "payment.cb_cancelled"
+EVENT_RECEIPT_DUPLICATE = "receipt.duplicate"
+EVENT_CONFIG_CHANGED = "config.changed"
+EVENT_SYSTEM_JOB_FAILED = "system.job_failed"
+EVENT_FISCAL_INTEGRITY_CHECKED = "fiscal.integrity_checked"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""
