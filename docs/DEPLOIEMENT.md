@@ -227,7 +227,27 @@ La caisse ne touche jamais à la blocklist globale d'un contact ni ne supprime
 un contact Brevo : un désabonnement ou une suppression RGPD retire le contact
 de la liste dédiée et anonymise la fiche locale.
 
-## 8. Déploiement automatique
+## 8. Imprimante ticket et tiroir-caisse (PR3b)
+
+Matériel : imprimante ticket ESC/POS 80 mm **MUNBYN 047P** et tiroir-caisse
+**Safescan SD-4141** branché sur l'imprimante (RJ-12, impulsion). Deux modes,
+réglés dans Administration → Matériel (aucune variable d'environnement) :
+
+- **Réseau (Wi-Fi)** : l'imprimante est sur le réseau de la boutique avec une IP
+  fixe (réservation DHCP) et écoute en TCP 9100. L'API du VPS doit pouvoir
+  joindre cette IP : ce n'est possible que si la boutique est accessible depuis
+  le VPS (VPN, IP publique + NAT) — sinon utiliser le mode USB.
+- **USB (tablette)** : imprimante branchée en USB-OTG sur la tablette Android ;
+  Chrome envoie les octets ESC/POS directement (WebUSB, HTTPS obligatoire).
+  Association une fois depuis Administration → Matériel → « Associer
+  l'imprimante USB ».
+
+Impression automatique à chaque vente et ouverture automatique du tiroir sur
+les ventes en espèces sont des options du même écran. Chaque impression et
+chaque ouverture de tiroir sont journalisées (JET `receipt.printed`,
+`drawer.kicked`) ; les réimpressions sont comptées sur le ticket.
+
+## 9. Déploiement automatique
 
 `.github/workflows/deploy.yml` (actif dans le dépôt dédié) : après une CI verte
 sur `main`, connexion SSH et `./scripts/deploy.sh --pull`. Secrets à créer dans

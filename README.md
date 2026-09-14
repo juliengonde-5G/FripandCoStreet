@@ -7,7 +7,7 @@ NF525 par auto-attestation. Cahier des charges : `CDC_Caisse_FripCo_Street.md`.
 
 ```
 apps/api/    FastAPI (Python 3.11) — auth, JET chaîné, ventes/Z signés (HMAC v3), SumUp, migrations Alembic
-apps/web/    Next.js 15 — connexion, caisse, administration
+apps/web/    Next.js 15 — connexion, caisse, administration (charte : docs/CHARTE_GRAPHIQUE.md)
 docker/      Compose prod/dev, Dockerfiles, init des rôles PostgreSQL, fragment Caddy
 scripts/     deploy.sh, backup.sh
 docs/        DEPLOIEMENT.md, ARCHITECTURE_PR{2,3}.md (contrats), JEU_ESSAI_PR{2,3}.md (valeurs attendues)
@@ -53,5 +53,6 @@ cd ../web && npm run lint && npx tsc --noEmit && npm run build
 | PR0 | Audit d'extraction + écarts NF525 | livré |
 | PR1 | Squelette : auth mono-compte, JET chaîné, migration initiale, Docker, proxy, backup | livré |
 | PR2 | Vente en saisie libre, remise globale, espèces, tickets, Z journalier, annulation, TPE SumUp (push API) | livré |
-| PR3 | Client, ticket par e-mail (Brevo), liste newsletter dédiée, consentement, RGPD | **cette PR** |
+| PR3 | Client, ticket par e-mail (Brevo), liste newsletter dédiée, consentement, RGPD | livré |
+| PR3b | Charte graphique de l'affiche, logo, domaine lloomi.fr (OVH), impression des tickets (imprimante ticket réseau/USB + tiroir-caisse), purge des références à l'application source | **cette PR** |
 | PR4 | Exports, archive fiscale, clôtures, attestation | à venir |
