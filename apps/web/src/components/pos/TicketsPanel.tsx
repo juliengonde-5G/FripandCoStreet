@@ -233,27 +233,38 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
                 {emailError && (
                   <div role="alert" className="rounded-fc bg-red-50 border border-red-200 p-2 flex items-center justify-between gap-3">
                     <span className="text-sm text-red-700">Envoi impossible : {emailError}</span>
-                    <button type="button" onClick={() => void handleSendEmail()} className="text-xs font-semibold text-red-700 underline flex-shrink-0">
-                      Réessayer
+                    <button
+                      type="button"
+                      onClick={() => void handleSendEmail()}
+                      disabled={emailSending}
+                      className="text-xs font-semibold text-red-700 underline flex-shrink-0 disabled:opacity-50 disabled:no-underline"
+                    >
+                      {emailSending ? "Envoi…" : "Réessayer"}
                     </button>
                   </div>
                 )}
                 <div className="flex gap-2">
-                  <input
-                    type="email"
-                    inputMode="email"
-                    autoComplete="email"
-                    value={emailDraft}
-                    onChange={(e) => setEmailDraft(e.target.value)}
-                    placeholder="adresse@exemple.fr"
-                    aria-label="Adresse e-mail du ticket"
-                    className="flex-1 min-h-touch px-3 py-2 rounded-fc border border-fc-line bg-fc-surface text-fc-ink placeholder-fc-ink-mute text-sm focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
-                  />
+                  <div className="flex-1">
+                    <input
+                      type="email"
+                      inputMode="email"
+                      autoComplete="email"
+                      value={emailDraft}
+                      onChange={(e) => setEmailDraft(e.target.value)}
+                      placeholder="adresse@exemple.fr"
+                      aria-label="Adresse e-mail du ticket"
+                      aria-invalid={emailDraft.length > 0 && !isValidEmail(emailDraft)}
+                      className="w-full min-h-touch px-3 py-2 rounded-fc border border-fc-line bg-fc-surface text-fc-ink placeholder-fc-ink-mute text-sm focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
+                    />
+                    {emailDraft.length > 0 && !isValidEmail(emailDraft) && (
+                      <p className="mt-1 text-xs text-fc-danger">Adresse e-mail incomplète</p>
+                    )}
+                  </div>
                   <button
                     type="button"
                     disabled={!isValidEmail(emailDraft) || emailSending}
                     onClick={() => void handleSendEmail()}
-                    className="min-h-touch rounded-fc-lg bg-fc-primary px-4 text-sm font-semibold text-white hover:bg-fc-primary-deep disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="min-h-touch flex-shrink-0 rounded-fc-lg bg-fc-primary px-4 text-sm font-semibold text-white hover:bg-fc-primary-deep disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {emailSending ? "Envoi…" : "Envoyer par e-mail"}
                   </button>

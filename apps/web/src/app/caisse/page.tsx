@@ -10,6 +10,7 @@
  * panier défile. Aucun jargon technique visible (§3.2 CDC).
  */
 import React, { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 
 import RequireAuth from "@/components/layout/RequireAuth";
 import Modal from "@/components/ui/Modal";
@@ -312,6 +313,15 @@ export default function CaissePage() {
           >
             Clôturer la caisse
           </button>
+          {/* Correctif persona vendeuse : la navigation vers /admin avait
+              disparu de l'en-tête caisse depuis PR1 — /admin, lui, propose
+              déjà un lien « Caisse » (AppShell). */}
+          <Link
+            href="/admin"
+            className="min-h-touch inline-flex items-center rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
+          >
+            Administration
+          </Link>
         </header>
 
         {banner && (
@@ -325,8 +335,13 @@ export default function CaissePage() {
 
         {/* Corps */}
         {successTx ? (
-          <div className="flex-1 overflow-y-auto p-6 flex items-start justify-center">
-            <div className="w-full max-w-md">
+          // Correctif persona vendeuse : `items-stretch` (au lieu de
+          // `items-start`) + `max-w-5xl` donnent au wrapper une hauteur
+          // pleine sur laquelle `ReceiptPreviewCard` (grid `h-full`,
+          // 2 colonnes) peut s'appuyer — sans quoi le bloc e-mail + le
+          // bouton « Nouveau ticket » finissaient hors écran à 1024×768.
+          <div className="flex-1 min-h-0 overflow-hidden p-4 md:p-6 flex items-stretch justify-center">
+            <div className="w-full max-w-5xl">
               <ReceiptPreviewCard
                 transactionId={successTx.id}
                 ticketNumber={successTx.transaction_number}
