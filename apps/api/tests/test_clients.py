@@ -6,6 +6,7 @@
 # `test_brevo_contacts.py` couvrent deja les appels HTTP mockes en detail.
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import httpx
@@ -181,6 +182,123 @@ async def test_attach_client_same_client_again_is_idempotent(client, auth_header
         # Idempotence POS (§3) : un seul consentement newsletter=True écrit,
         # pas un par appel.
         assert len(consents) == 1
+
+
+async def test_attach_client_sequential_repeat_is_fully_idempotent(client, auth_headers, open_drawer):
+    """Revue robustesse (double-tap séquentiel) — un second
+    `POST /pos/transactions/{id}/client` pour la MÊME vente et le MÊME
+    client (email inchangé) ne doit ni renvoyer, ni journaliser, ni
+    resynchroniser Brevo une seconde fois : `receipt_email` de la réponse
+    reflète la communication déjà existante, sans en créer une nouvelle."""
+    sale = await _sell(client, auth_headers)
+    r1 = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "sequentiel@example.com", "newsletter_optin": True, "send_receipt": True},
+        headers=auth_headers,
+    )
+    assert r1.status_code == 200, r1.text
+    client_id = r1.json()["client"]["id"]
+    first_receipt_email = r1.json()["receipt_email"]
+    assert first_receipt_email is not None
+
+    r2 = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={"email": "sequentiel@example.com", "newsletter_optin": True, "send_receipt": True},
+        headers=auth_headers,
+    )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["client"]["id"] == client_id
+    # Idempotent : la réponse reflète l'envoi déjà fait, elle n'en déclenche
+    # pas un second — et `brevo` n'est pas re-tenté (revue robustesse §2).
+    assert r2.json()["receipt_email"] == first_receipt_email
+    assert r2.json()["brevo"] is None
+
+    async with async_session() as db:
+        comms = (
+            await db.execute(
+                select(Communication).where(Communication.transaction_id == uuid.UUID(sale["id"]))
+            )
+        ).scalars().all()
+        assert len(comms) == 1  # un seul envoi malgré les deux appels
+
+        linked_events = (
+            await db.execute(select(JournalEvent).where(JournalEvent.event_type == "client.linked"))
+        ).scalars().all()
+        assert len(linked_events) == 1  # pas de second `client.linked`
+
+        emailed_events = (
+            await db.execute(select(JournalEvent).where(JournalEvent.event_type == "receipt.emailed"))
+        ).scalars().all()
+        assert len(emailed_events) == 1  # pas de second `receipt.emailed`
+
+
+async def test_concurrent_attach_client_same_transaction_same_email_no_duplicate_no_500(
+    client, auth_headers, open_drawer
+):
+    """Revue robustesse — reproduit le double-tap sur « Envoyer le ticket » :
+    deux `POST /pos/transactions/{id}/client` CONCURRENTS (même vente, même
+    e-mail, deux requêtes HTTP donc deux sessions DB distinctes via
+    `asyncio.gather`) ne doivent jamais se solder par un 500 (course sur la
+    contrainte unique `clients.email`) ; un seul client est créé, un seul
+    e-mail est effectivement envoyé."""
+    sale = await _sell(client, auth_headers)
+    email = "double-tap@example.com"
+
+    async def _attach():
+        return await client.post(
+            f"/api/pos/transactions/{sale['id']}/client",
+            json={"email": email, "newsletter_optin": True, "send_receipt": True},
+            headers=auth_headers,
+        )
+
+    r1, r2 = await asyncio.gather(_attach(), _attach())
+
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+    assert r1.json()["client"]["id"] == r2.json()["client"]["id"]
+
+    async with async_session() as db:
+        client_rows = (
+            await db.execute(select(Client).where(Client.email == email))
+        ).scalars().all()
+        assert len(client_rows) == 1  # un seul client — pas de course sur l'INSERT
+
+        comms = (
+            await db.execute(
+                select(Communication).where(Communication.transaction_id == uuid.UUID(sale["id"]))
+            )
+        ).scalars().all()
+        assert len(comms) == 1  # un seul e-mail effectivement envoyé
+
+
+async def test_concurrent_attach_client_same_email_different_transactions_no_500(
+    client, auth_headers, open_drawer
+):
+    """Variante : deux ventes DIFFÉRENTES rattachées concurremment à la
+    MÊME adresse (ex. deux caissières servent la même cliente sur deux
+    tickets en même temps) — toujours un seul client, jamais de 500."""
+    sale1 = await _sell(client, auth_headers)
+    sale2 = await _sell(client, auth_headers)
+    email = "meme-cliente-deux-ventes@example.com"
+
+    async def _attach(sale_id: str):
+        return await client.post(
+            f"/api/pos/transactions/{sale_id}/client",
+            json={"email": email, "send_receipt": False},
+            headers=auth_headers,
+        )
+
+    r1, r2 = await asyncio.gather(_attach(sale1["id"]), _attach(sale2["id"]))
+
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+    assert r1.json()["client"]["id"] == r2.json()["client"]["id"]
+
+    async with async_session() as db:
+        client_rows = (
+            await db.execute(select(Client).where(Client.email == email))
+        ).scalars().all()
+        assert len(client_rows) == 1
 
 
 async def test_pos_opt_out_after_opt_in_removes_contact_from_brevo_list(

@@ -589,7 +589,19 @@ class PosService:
         -> e-mail du ticket -> synchro Brevo (best-effort, un échec Brevo
         n'empêche ni la vente ni l'e-mail) — `ClientService.sync_brevo` pousse
         le contact si `newsletter_optin`, le retire sinon (revue RGPD :
-        point unique, cf. `client_service.py`)."""
+        point unique, cf. `client_service.py`).
+
+        Revue robustesse (double-tap « Envoyer le ticket ») :
+        `upsert_by_email` sérialise par e-mail normalisé (verrou avisory,
+        tenu jusqu'au COMMIT de CETTE requête) avant toute lecture/écriture
+        sur `clients` — deux appels concurrents pour la même adresse ne
+        courent donc plus sur la contrainte unique `clients.email`. Une
+        fois le verrou acquis, la vente est RELUE (l'objet `transaction`
+        passé en paramètre a pu devenir périmé pendant l'attente) : si elle
+        est déjà liée à CE client (deuxième appel, concurrent ou
+        séquentiel), la réponse est idempotente — aucun nouvel envoi,
+        aucun nouvel évènement JET, aucune nouvelle synchro Brevo.
+        """
         from app.models.client import ConsentPurpose, ConsentSource
         from app.services.client_service import ClientService
 
@@ -597,6 +609,21 @@ class PosService:
         client, _created = await clients.upsert_by_email(
             email=email, first_name=first_name, last_name=last_name, user_id=user_id
         )
+
+        # Sous le verrou (acquis par `upsert_by_email` ci-dessus) : RELIT la
+        # vente plutôt que de faire confiance à l'objet reçu en paramètre.
+        # `db.refresh()` — et non un second `select()` — est indispensable
+        # ici : `transaction` est déjà dans l'identity map de CETTE session
+        # (chargé plus haut par le routeur), donc un simple `select()`
+        # renverrait l'objet Python déjà en mémoire SANS relire ses
+        # colonnes depuis la base (SQLAlchemy ne rafraîchit pas un objet
+        # déjà identifié à partir d'un résultat de requête), et manquerait
+        # donc le `client_id` qu'une requête concurrente vient de committer
+        # pendant l'attente du verrou.
+        await self.db.refresh(transaction)
+        if transaction.client_id is not None and transaction.client_id == client.id:
+            return await self._idempotent_attach_response(transaction, client)
+
         await clients.record_consent(
             client=client,
             purpose=ConsentPurpose.newsletter,
@@ -615,6 +642,30 @@ class PosService:
         brevo_result = await clients.sync_brevo(client, user_id=user_id)
 
         return {"client": client, "receipt_email": receipt_result, "brevo": brevo_result}
+
+    async def _idempotent_attach_response(self, transaction: Transaction, client) -> dict:
+        """Réponse d'un double-tap déjà traité (`attach_client_and_send_receipt`,
+        vente déjà liée à CE client) : renvoie l'état déjà produit par le
+        tout premier appel — `receipt_email` reflète la DERNIÈRE
+        communication existante pour cette vente/ce client (`None` si le
+        premier appel avait `send_receipt=False`) — sans rien rejouer."""
+        from app.models.communication import Communication
+
+        comm = (
+            await self.db.execute(
+                select(Communication)
+                .where(
+                    Communication.transaction_id == transaction.id,
+                    Communication.client_id == client.id,
+                )
+                .order_by(Communication.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        receipt_result = (
+            {"status": comm.status.value, "provider": comm.provider.value} if comm is not None else None
+        )
+        return {"client": client, "receipt_email": receipt_result, "brevo": None}
 
     async def resend_receipt_email(
         self,

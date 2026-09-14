@@ -10,7 +10,8 @@ import uuid
 from datetime import datetime, timezone
 
 from email_validator import EmailNotValidError, validate_email
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.client import Client, Consent, ConsentPurpose, ConsentSource
@@ -130,8 +131,27 @@ class ClientService:
 
         Un nom/prenom fourni remplace une valeur vide, jamais l'inverse
         (ne jamais effacer une donnee deja saisie faute de la re-saisir).
+
+        Revue robustesse (double-tap POS) : serialise par un verrou avisory
+        Postgres scope sur l'e-mail normalise AVANT toute lecture/ecriture
+        (`_acquire_client_write_lock`) — deux appels concurrents pour la
+        MEME adresse ne courent donc jamais sur l'INSERT de `clients`
+        (contrainte unique `clients.email`) ; le second attend que le
+        premier ait commite (le verrou est tenu jusqu'au COMMIT de CETTE
+        transaction SQL), puis retrouve la ligne deja creee via
+        `get_by_email` au lieu d'en tenter une seconde. Filet
+        supplementaire : si une course residuelle leve quand meme une
+        violation d'unicite (chemin qui contournerait le verrou), l'INSERT
+        est tente dans un SAVEPOINT (`db.begin_nested()`) — l'`IntegrityError`
+        est rattrapee, le savepoint annule juste l'INSERT rate (pas toute la
+        transaction), et la ligne est relue : Postgres bloque un INSERT
+        concurrent tant que la premiere transaction n'a pas fini, donc si
+        l'erreur survient c'est que l'autre a deja commite — la relecture la
+        trouve forcement.
         """
         normalized = normalize_email(email)
+        await self._acquire_client_write_lock(normalized)
+
         existing = await self.get_by_email(normalized)
         if existing is not None:
             changed = False
@@ -157,8 +177,17 @@ class ClientService:
             last_name=(last_name or "").strip() or None,
             created_by_user_id=user_id,
         )
-        self.db.add(client)
-        await self.db.flush()
+        try:
+            async with self.db.begin_nested():
+                self.db.add(client)
+                await self.db.flush()
+        except IntegrityError:
+            self.db.expunge(client)
+            existing = await self.get_by_email(normalized)
+            if existing is None:
+                raise
+            return existing, False
+
         await JournalService(self.db).record(
             EVENT_CLIENT_CREATED,
             user_id=user_id,
@@ -166,6 +195,17 @@ class ClientService:
         )
         await self.db.flush()
         return client, True
+
+    async def _acquire_client_write_lock(self, normalized_email: str) -> None:
+        """Verrou avisory Postgres scope par e-mail normalise (revue
+        robustesse, double-tap POS) — tenu jusqu'au COMMIT de la
+        transaction SQL en cours ; reentrant (un meme appelant peut
+        l'acquerir plusieurs fois sans se bloquer lui-meme, cf. doc
+        Postgres sur `pg_advisory_xact_lock`)."""
+        await self.db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext('client:' || :email))"),
+            {"email": normalized_email},
+        )
 
     async def record_consent(
         self,
