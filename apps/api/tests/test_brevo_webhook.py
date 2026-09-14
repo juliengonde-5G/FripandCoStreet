@@ -29,6 +29,9 @@ async def test_webhook_refuses_without_configured_token(client, monkeypatch):
         json={"event": "unsubscribed", "email": "x@y.fr"},
     )
     assert r.status_code == 403
+    # Corps plat {detail, code} (comme le reste de l'API, cf. CLAUDE.md) —
+    # `_check_token` leve `PosServiceError`, pas `HTTPException`.
+    assert r.json()["code"] == "webhook_forbidden"
 
 
 async def test_webhook_refuses_wrong_token(client, monkeypatch):
@@ -39,6 +42,7 @@ async def test_webhook_refuses_wrong_token(client, monkeypatch):
         json={"event": "unsubscribed", "email": "x@y.fr"},
     )
     assert r.status_code == 403
+    assert r.json()["code"] == "webhook_forbidden"
 
 
 async def test_webhook_accepts_query_token_and_revokes_consent(client, monkeypatch):
