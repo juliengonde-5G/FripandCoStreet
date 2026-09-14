@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
@@ -64,12 +65,14 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-fc-bg px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div
-            aria-hidden
-            className="h-20 w-20 rounded-fc-lg bg-fc-primary text-white flex items-center justify-center text-2xl font-bold mx-auto mb-4 select-none"
-          >
-            F&amp;C
-          </div>
+          <Image
+            src="/brand/logo-fripco-street.png"
+            alt="Frip & Co Street"
+            width={220}
+            height={112}
+            priority
+            className="mx-auto mb-4 h-auto w-[220px]"
+          />
           <h1 className="text-2xl font-bold text-fc-ink">Frip &amp; Co Street</h1>
           <p className="text-sm text-fc-ink-soft mt-1 uppercase tracking-[0.12em]">
             Connexion à la caisse

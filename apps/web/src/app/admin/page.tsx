@@ -495,12 +495,12 @@ function ZReportsCard() {
                 <tbody>
                   {list.map((z) => (
                     <tr key={z.id} className="border-t border-fc-line">
-                      <td className="py-2 pr-4 font-mono">{z.report_number}</td>
+                      <td className="py-2 pr-4 font-mono tabular-nums">{z.report_number}</td>
                       <td className="py-2 pr-4">{formatDateTime(z.closed_at)}</td>
-                      <td className="py-2 pr-4 font-mono">{formatCurrency(z.total_net)}</td>
-                      <td className="py-2 pr-4 font-mono">{formatCurrency(z.expected_amount)}</td>
-                      <td className="py-2 pr-4 font-mono">{formatCurrency(z.closing_amount)}</td>
-                      <td className={`py-2 pr-4 font-mono ${Math.abs(z.discrepancy) > 2 ? "text-fc-warn" : ""}`}>
+                      <td className="py-2 pr-4 font-mono tabular-nums">{formatCurrency(z.total_net)}</td>
+                      <td className="py-2 pr-4 font-mono tabular-nums">{formatCurrency(z.expected_amount)}</td>
+                      <td className="py-2 pr-4 font-mono tabular-nums">{formatCurrency(z.closing_amount)}</td>
+                      <td className={`py-2 pr-4 font-mono tabular-nums ${Math.abs(z.discrepancy) > 2 ? "text-fc-warn" : ""}`}>
                         {z.discrepancy > 0 ? "+" : ""}
                         {formatCurrency(z.discrepancy)}
                       </td>

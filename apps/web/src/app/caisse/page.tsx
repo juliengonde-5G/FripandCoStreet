@@ -10,6 +10,7 @@
  * panier défile. Aucun jargon technique visible (§3.2 CDC).
  */
 import React, { useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 
 import RequireAuth from "@/components/layout/RequireAuth";
@@ -279,9 +280,14 @@ export default function CaissePage() {
         {/* Barre haute */}
         <header className="flex-shrink-0 bg-fc-surface border-b border-fc-line px-4 py-2 flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2 min-w-0">
-            <div aria-hidden className="h-8 w-8 rounded-fc bg-fc-primary text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
-              F&amp;C
-            </div>
+            <Image
+              src="/brand/logo-mark.png"
+              alt=""
+              aria-hidden
+              width={40}
+              height={40}
+              className="h-10 w-10 rounded-fc flex-shrink-0"
+            />
             <span className="font-semibold text-fc-ink truncate">Frip &amp; Co Street</span>
           </div>
 
@@ -386,7 +392,7 @@ export default function CaissePage() {
                   <div key={l.id} className="flex items-center gap-2 rounded-fc-lg border border-fc-line bg-fc-surface px-3 py-2">
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium text-fc-ink truncate">{l.label}</div>
-                      <div className="text-xs text-fc-ink-mute font-mono">{formatCurrency(l.unitPrice)} / pièce</div>
+                      <div className="text-xs text-fc-ink-mute font-mono tabular-nums">{formatCurrency(l.unitPrice)} / pièce</div>
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
                       <button
