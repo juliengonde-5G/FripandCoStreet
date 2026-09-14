@@ -34,7 +34,7 @@ def _make_service(handler, *, configured: bool = True) -> SumUpService:
     s.api_key = "sup_sk_live_abc123" if configured else ""
     s.merchant_code = "MTEST" if configured else ""
     s.reader_id = "reader-1" if configured else ""
-    s._api_base = "https://api.sumup.com/v0.1"
+    s._api_base = "https://api.sumup.com"  # racine — voir SumUpService._url
     s._transport = httpx.MockTransport(handler)
     return s
 
@@ -60,6 +60,65 @@ def test_is_test_api_key():
     assert is_test_api_key("sup_sk_test_abc123") is True
     assert is_test_api_key("sup_sk_live_abc123") is False
     assert is_test_api_key("") is False
+
+
+# ---------------------------------------------------------------------------
+# SUMUP_API_BASE pilote l'hôte de TOUTES les familles d'appels (v0.1 readers/
+# checkouts, v2.1 transactions, v1.0 refunds) — condition nécessaire pour
+# rejouer le flux complet (push → poll → PAID → refund) contre un faux
+# serveur local en test de bout en bout (persona comptable). Avant ce
+# correctif, `_reader_checkout_status`, `refund_transaction` et
+# `get_transaction` câblaient `https://api.sumup.com` en dur.
+# ---------------------------------------------------------------------------
+
+
+async def test_all_call_families_target_configured_api_base(monkeypatch):
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        path = request.url.path
+        if path.endswith("/status") and "/readers/" in path:
+            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
+        if path.endswith("/checkout"):
+            return httpx.Response(202, json={"data": {"client_transaction_id": "ctid-fake"}})
+        if path.endswith("/terminate"):
+            return httpx.Response(202)
+        if path.endswith("/refunds"):
+            return httpx.Response(204)
+        if path.endswith("/transactions"):
+            return httpx.Response(200, json={"id": "txn-fake", "status": "SUCCESSFUL"})
+        if "/readers/" in path:
+            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
+        return httpx.Response(404, json={})
+
+    monkeypatch.setattr(svc_mod.settings, "SUMUP_API_BASE", "http://fake.local")
+    s = SumUpService()  # construit APRÈS le monkeypatch : lit settings dans __init__
+    assert s._api_base == "http://fake.local"
+    s.api_key = "sup_sk_live_abc123"
+    s.merchant_code = "MTEST"
+    s.reader_id = "reader-1"
+    s._transport = httpx.MockTransport(handler)
+
+    # 1) pré-vol (v0.1 readers/{id} + /status)
+    await s.ping_reader()
+    # 2) push (v0.1 readers/{id}/checkout)
+    await s._push_to_reader(amount=Decimal("5.00"), client_transaction_id="ctid-fake")
+    # 3) poll statut (v2.1 transactions)
+    status = await s.get_checkout_status("ctid-fake")
+    assert status["status"] == "PAID"
+    # 4) annulation (v0.1 readers/{id}/terminate)
+    await s.cancel_checkout("ctid-fake")
+    # 5) remboursement (v1.0 payments/{id}/refunds)
+    await s.refund_transaction("txn-fake", amount=Decimal("5.00"))
+    # lookup transaction (v2.1 transactions, même famille que le poll)
+    await s.get_transaction(transaction_id="txn-fake")
+
+    assert len(seen_urls) >= 6
+    assert all(url.startswith("http://fake.local/") for url in seen_urls), seen_urls
+    assert any(u.startswith("http://fake.local/v0.1/") for u in seen_urls)
+    assert any(u.startswith("http://fake.local/v2.1/") for u in seen_urls)
+    assert any(u.startswith("http://fake.local/v1.0/") for u in seen_urls)
 
 
 # ---------------------------------------------------------------------------

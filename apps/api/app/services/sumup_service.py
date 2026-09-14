@@ -163,10 +163,26 @@ class SumUpService:
         self.api_key = (settings.SUMUP_API_KEY or "").strip()
         self.merchant_code = (settings.SUMUP_MERCHANT_CODE or "").strip()
         self.reader_id = (settings.SUMUP_READER_ID or "").strip()
+        # Racine de l'hôte SumUp (ex. ``https://api.sumup.com``, SANS
+        # suffixe de version) — TOUTES les URL de ce service en dérivent via
+        # :meth:`_url`, y compris les versions v2.1 (transactions) et v1.0
+        # (refunds) qui étaient auparavant câblées en dur sur
+        # ``https://api.sumup.com``. Ça permet de rejouer le flux complet
+        # (push → poll → PAID → refund) contre un faux serveur local en test
+        # (``SUMUP_API_BASE=http://fake.local``) — sinon impossible d'avoir
+        # un test de bout en bout crédible.
         self._api_base = (settings.SUMUP_API_BASE or "").strip().rstrip("/")
         # Override de transport httpx — ``None`` = réseau réel. Les tests
         # injectent un ``httpx.MockTransport`` ici (comme Vintiz).
         self._transport = None
+
+    def _url(self, path: str) -> str:
+        """Construit une URL absolue depuis la racine ``SUMUP_API_BASE``.
+
+        ``path`` inclut toujours son segment de version (``/v0.1/...``,
+        ``/v2.1/...``, ``/v1.0/...``) — seul l'hôte varie.
+        """
+        return f"{self._api_base}{path}"
 
     @property
     def is_configured(self) -> bool:
@@ -324,7 +340,7 @@ class SumUpService:
                 "message": f"Non configuré ({', '.join(missing)} manquant(s))",
             }
 
-        reader_url = f"{self._api_base}/merchants/{self.merchant_code}/readers/{self.reader_id}"
+        reader_url = self._url(f"/v0.1/merchants/{self.merchant_code}/readers/{self.reader_id}")
         status_url = f"{reader_url}/status"
 
         async with self._client(PING_TIMEOUT) as client:
@@ -422,7 +438,7 @@ class SumUpService:
         réessai) — devient le ``checkout_id`` retourné, unique par
         ``PaymentAttempt``.
         """
-        url = f"{self._api_base}/merchants/{self.merchant_code}/readers/{self.reader_id}/checkout"
+        url = self._url(f"/v0.1/merchants/{self.merchant_code}/readers/{self.reader_id}/checkout")
         minor_units = int(
             (amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         )
@@ -495,7 +511,7 @@ class SumUpService:
         base = {"checkout_id": client_transaction_id}
         if not self.merchant_code:
             return {**base, "status": "FAILED", "error": "SUMUP_MERCHANT_CODE manquant"}
-        url = f"https://api.sumup.com/v2.1/merchants/{self.merchant_code}/transactions"
+        url = self._url(f"/v2.1/merchants/{self.merchant_code}/transactions")
         try:
             async with self._client(STATUS_TIMEOUT) as client:
                 resp = await self._send(
@@ -575,7 +591,7 @@ class SumUpService:
         if not self.is_configured:
             return {"ok": False, "status": "unconfigured", "message": "SumUp non configuré"}
 
-        url = f"{self._api_base}/merchants/{self.merchant_code}/readers/{self.reader_id}/terminate"
+        url = self._url(f"/v0.1/merchants/{self.merchant_code}/readers/{self.reader_id}/terminate")
         try:
             async with self._client(STATUS_TIMEOUT) as client:
                 resp = await self._send(client, "terminate", "POST", url)
@@ -619,7 +635,7 @@ class SumUpService:
         if not transaction_id:
             return {"ok": False, "status": "invalid_id", "message": "ID transaction SumUp invalide"}
 
-        url = f"https://api.sumup.com/v1.0/merchants/{self.merchant_code}/payments/{transaction_id}/refunds"
+        url = self._url(f"/v1.0/merchants/{self.merchant_code}/payments/{transaction_id}/refunds")
         body: dict = {}
         if amount is not None:
             body["amount"] = round(float(amount), 2)
@@ -681,7 +697,7 @@ class SumUpService:
             params["foreign_transaction_id"] = foreign_transaction_id
         else:
             return None
-        url = f"https://api.sumup.com/v2.1/merchants/{self.merchant_code}/transactions"
+        url = self._url(f"/v2.1/merchants/{self.merchant_code}/transactions")
         try:
             async with self._client(STATUS_TIMEOUT) as client:
                 resp = await self._send(client, "get_transaction", "GET", url, params=params)

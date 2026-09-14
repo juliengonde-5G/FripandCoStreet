@@ -228,7 +228,7 @@ async def test_initiate_test_key_refused_in_production(client, auth_headers, mon
         self.api_key = "sup_sk_test_abc123"
         self.merchant_code = "MTEST"
         self.reader_id = "reader-1"
-        self._api_base = "https://api.sumup.com/v0.1"
+        self._api_base = "https://api.sumup.com"  # racine — voir SumUpService._url
         self._transport = httpx.MockTransport(_online_reader_handler())
 
     monkeypatch.setattr(SumUpService, "__init__", patched_init)
