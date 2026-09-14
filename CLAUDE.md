@@ -36,6 +36,13 @@ PostgreSQL) et toute modification de ces mécanismes est une évolution fiscale.
   `{"detail": "…", "code": "snake_case"}` ; le front affiche `detail` tel quel.
 - Secrets (SumUp, Brevo) : variables d'environnement uniquement, jamais en base ni en
   réponse d'API (`describe()` masque tout).
+- **Données personnelles (PR3)** : le compte Brevo est partagé avec Vintiz → la caisse
+  n'écrit que sur sa liste dédiée (`BREVO_LIST_ID`), jamais sur la blocklist globale,
+  jamais `DELETE /v3/contacts`. Contact poussé uniquement si consentement newsletter.
+  Consentements append-only (trigger). Suppression RGPD = anonymisation de la fiche
+  (jamais de suppression de ligne, jamais de modification d'une vente hors `client_id`).
+  **Aucun e-mail ni nom dans les payloads JET** (journal immuable). E-mail du ticket
+  sans image ni lien de suivi ; envoi Brevo conditionné à `BREVO_ANONYMOUS_TRACKING=true`.
 
 ## Stack
 
