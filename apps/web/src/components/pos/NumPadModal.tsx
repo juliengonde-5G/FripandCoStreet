@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/pos/NumPadModal.tsx`, jetons
+ * Extrait de l'application source `apps/web/src/components/pos/NumPadModal.tsx`, jetons
  * `vz-*` → `fc-*`, réduit aux méthodes espèces/carte. Ajout de
  * `mode: "partial"` pour la part « espèces » du paiement Mixte (§6 PR2) :
  * le montant saisi doit rester strictement inférieur au reste à encaisser

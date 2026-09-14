@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/pos/CashDrawerOpenModal.tsx`,
+ * Extrait de l'application source `apps/web/src/components/pos/CashDrawerOpenModal.tsx`,
  * jetons `vz-*` → `fc-*`. Écran plein « Ouvrir la caisse » (§6 PR2) :
  * rien d'autre n'est cliquable tant que la caisse est fermée.
  */

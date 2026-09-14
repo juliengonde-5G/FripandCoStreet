@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/ui/NumPad.tsx`, jetons
+ * Extrait de l'application source `apps/web/src/components/ui/NumPad.tsx`, jetons
  * `vz-*` → `fc-*`. Virgule décimale FR (saisie affichée avec virgule, la
  * valeur interne reste un nombre à point décimal — `parseFloat` accepte
  * les deux à l'affichage près) — voir la conversion `.` → `,` ci-dessous.

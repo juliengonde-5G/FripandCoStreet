@@ -13,6 +13,7 @@ import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/api";
 import { formatCurrency, formatDateTime } from "@/lib/format";
+import { kickDrawer } from "@/lib/printing";
 import {
   TVA_RATES,
   type AnonymizeRequest,
@@ -22,15 +23,20 @@ import {
   type ConsentUpdateRequest,
   type FiscalIntegrityResponse,
   type FiscalSettings,
+  type HardwareSettings,
   type JetEvent,
   type MessagingStatus,
+  type PrinterMode,
+  type PrinterStatus,
   type ReceiptSettings,
+  type ReceiptTestResponse,
   type ShopSettings,
   type ZReport,
 } from "@/lib/types";
+import { findPairedUsbDevice, getStoredPrinter, isWebUsbSupported, pairUsbPrinter, sendBytes } from "@/lib/webusb-printer";
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<"settings" | "clients">("settings");
+  const [tab, setTab] = useState<"settings" | "hardware" | "clients">("settings");
 
   return (
     <AppShell>
@@ -40,13 +46,16 @@ export default function AdminPage() {
           <TabButton active={tab === "settings"} onClick={() => setTab("settings")}>
             Réglages
           </TabButton>
+          <TabButton active={tab === "hardware"} onClick={() => setTab("hardware")}>
+            Matériel
+          </TabButton>
           <TabButton active={tab === "clients"} onClick={() => setTab("clients")}>
             Clients
           </TabButton>
         </div>
       </div>
 
-      {tab === "settings" ? (
+      {tab === "settings" && (
         <div className="space-y-6">
           <ShopSettingsCard />
           <FiscalSettingsCard />
@@ -57,9 +66,15 @@ export default function AdminPage() {
           <IntegrityCard />
           <EventLogCard />
         </div>
-      ) : (
-        <ClientsSection />
       )}
+
+      {tab === "hardware" && (
+        <div className="space-y-6">
+          <HardwareSettingsCard />
+        </div>
+      )}
+
+      {tab === "clients" && <ClientsSection />}
     </AppShell>
   );
 }
@@ -91,7 +106,7 @@ function SavedNotice({ show }: { show: boolean }) {
 function ErrorNotice({ message }: { message: string | null }) {
   if (!message) return null;
   return (
-    <div role="alert" className="rounded-fc bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+    <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
       {message}
     </div>
   );
@@ -451,6 +466,286 @@ function StatusPill({ ok, okLabel, koLabel }: { ok: boolean; okLabel: string; ko
       <span className={`h-1.5 w-1.5 rounded-full ${ok ? "bg-fc-primary" : "bg-fc-warn"}`} aria-hidden />
       {ok ? okLabel : koLabel}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Matériel — imprimante ticket MUNBYN + tiroir-caisse Safescan (PR3b).
+// Aucun jargon technique : « Imprimante ticket », « Tiroir-caisse »,
+// « USB (tablette) », « Réseau (Wi-Fi) » — jamais ESC/POS, WebUSB, MUNBYN
+// ou Safescan dans les libellés visibles.
+// ---------------------------------------------------------------------------
+
+const EMPTY_HARDWARE: HardwareSettings = {
+  printer_mode: "none",
+  printer_host: "",
+  printer_port: 9100,
+  drawer_enabled: false,
+  drawer_pin: 0,
+  auto_print_on_sale: false,
+  auto_kick_on_cash: false,
+};
+
+function HardwareSettingsCard() {
+  const [form, setForm] = useState<HardwareSettings>(EMPTY_HARDWARE);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [status, setStatus] = useState<PrinterStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(false);
+
+  const [testMessage, setTestMessage] = useState<string | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  const [kickMessage, setKickMessage] = useState<string | null>(null);
+  const [kickError, setKickError] = useState<string | null>(null);
+  const [kicking, setKicking] = useState(false);
+
+  const [pairedLabel, setPairedLabel] = useState<string | null>(null);
+  const [pairing, setPairing] = useState(false);
+  const [pairError, setPairError] = useState<string | null>(null);
+
+  const loadStatus = (): void => {
+    setStatusLoading(true);
+    api
+      .get<PrinterStatus>("/api/hardware/printer/status")
+      .then(setStatus)
+      .catch(() => setStatus(null))
+      .finally(() => setStatusLoading(false));
+  };
+
+  useEffect(() => {
+    api
+      .get<HardwareSettings>("/api/admin/settings/hardware")
+      .then((data) => setForm({ ...EMPTY_HARDWARE, ...data }))
+      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les réglages matériel."))
+      .finally(() => setLoading(false));
+    loadStatus();
+    setPairedLabel(getStoredPrinter()?.label ?? null);
+  }, []);
+
+  const set = <K extends keyof HardwareSettings>(field: K, value: HardwareSettings[K]): void => {
+    setForm((f) => ({ ...f, [field]: value }));
+    setSaved(false);
+  };
+
+  const handleSave = async (): Promise<void> => {
+    setSaving(true);
+    setError(null);
+    try {
+      const data = await api.put<HardwareSettings>("/api/admin/settings/hardware", form);
+      setForm({ ...EMPTY_HARDWARE, ...data });
+      setSaved(true);
+      loadStatus();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleTestPrint = async (): Promise<void> => {
+    setTesting(true);
+    setTestError(null);
+    setTestMessage(null);
+    try {
+      if (form.printer_mode === "network") {
+        const res = await api.post<ReceiptTestResponse>("/api/hardware/receipt/test", {});
+        setTestMessage(`Ticket de test envoyé à l'imprimante (${res.host}:${res.port}).`);
+      } else if (form.printer_mode === "webusb") {
+        if (!isWebUsbSupported()) throw new Error("Impression USB non disponible sur cet appareil/navigateur.");
+        const device = await findPairedUsbDevice();
+        if (!device) throw new Error("Aucune imprimante USB couplée — associez-la d'abord.");
+        const bytes = await api.getBytes("/api/hardware/receipt/test-escpos");
+        await sendBytes(device, bytes);
+        setTestMessage("Ticket de test envoyé à l'imprimante (USB).");
+      }
+    } catch (err) {
+      setTestError(err instanceof ApiError ? err.detail : err instanceof Error ? err.message : "Échec du test.");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleTestKick = async (): Promise<void> => {
+    setKicking(true);
+    setKickError(null);
+    setKickMessage(null);
+    const result = await kickDrawer(form, "manual");
+    setKicking(false);
+    if (result.ok) setKickMessage(result.message);
+    else setKickError(result.message);
+  };
+
+  const handlePair = async (): Promise<void> => {
+    setPairing(true);
+    setPairError(null);
+    try {
+      const info = await pairUsbPrinter();
+      setPairedLabel(info.label);
+    } catch (err) {
+      setPairError(err instanceof Error ? err.message : "Échec du couplage.");
+    } finally {
+      setPairing(false);
+    }
+  };
+
+  return (
+    <Card title="Imprimante ticket" subtitle="Connexion, tiroir-caisse et comportement à la vente.">
+      {loading ? (
+        <p className="text-sm text-fc-ink-soft">Chargement…</p>
+      ) : (
+        <div className="space-y-5">
+          <ErrorNotice message={error} />
+
+          <label className="block max-w-xs">
+            <span className="block text-[11px] uppercase tracking-[0.12em] font-medium text-fc-ink-soft mb-1.5">Connexion</span>
+            <select
+              value={form.printer_mode}
+              onChange={(e) => set("printer_mode", e.target.value as PrinterMode)}
+              className="w-full min-h-touch px-4 py-2.5 rounded-fc border border-fc-line bg-fc-surface text-fc-ink focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
+            >
+              <option value="network">Réseau (Wi-Fi)</option>
+              <option value="webusb">USB (tablette)</option>
+              <option value="none">Désactivée</option>
+            </select>
+          </label>
+
+          {form.printer_mode === "network" && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Input
+                label="Adresse IP de l'imprimante"
+                value={form.printer_host}
+                onChange={(e) => set("printer_host", e.target.value)}
+                placeholder="192.168.1.50"
+              />
+              <Input
+                label="Port"
+                type="number"
+                value={String(form.printer_port)}
+                onChange={(e) => set("printer_port", Number(e.target.value) || 9100)}
+              />
+            </div>
+          )}
+
+          {form.printer_mode === "network" && (
+            <div className="flex flex-wrap items-center gap-3">
+              {statusLoading ? (
+                <span className="text-sm text-fc-ink-soft">Vérification…</span>
+              ) : (
+                status && (
+                  <StatusPill
+                    ok={!!status.online}
+                    okLabel={status.latency_ms !== null ? `En ligne (${status.latency_ms} ms)` : "En ligne"}
+                    koLabel="Hors ligne"
+                  />
+                )
+              )}
+              <Button variant="outline" size="sm" onClick={loadStatus} disabled={statusLoading}>
+                Actualiser l&apos;état
+              </Button>
+            </div>
+          )}
+
+          {form.printer_mode === "webusb" && (
+            <div className="rounded-fc-lg bg-fc-bg-alt p-3 text-sm text-fc-ink-soft">
+              {pairedLabel ? (
+                <>
+                  Imprimante couplée : <strong className="font-mono text-fc-ink">{pairedLabel}</strong>
+                </>
+              ) : (
+                "Aucune imprimante USB couplée sur cette tablette."
+              )}
+            </div>
+          )}
+
+          <div className="space-y-3 border-t border-fc-line pt-4">
+            <label className="flex items-center gap-2 text-sm font-medium text-fc-ink">
+              <input
+                type="checkbox"
+                checked={form.drawer_enabled}
+                onChange={(e) => set("drawer_enabled", e.target.checked)}
+                className="h-5 w-5 rounded border-fc-line text-fc-primary focus:ring-fc-primary"
+              />
+              Activer le tiroir-caisse
+            </label>
+            {form.drawer_enabled && (
+              <label className="block max-w-[200px]">
+                <span className="block text-[11px] uppercase tracking-[0.12em] font-medium text-fc-ink-soft mb-1.5">
+                  Broche d&apos;impulsion
+                </span>
+                <select
+                  value={form.drawer_pin}
+                  onChange={(e) => set("drawer_pin", (Number(e.target.value) === 1 ? 1 : 0) as 0 | 1)}
+                  className="w-full min-h-touch px-4 py-2.5 rounded-fc border border-fc-line bg-fc-surface text-fc-ink focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
+                >
+                  <option value={0}>0</option>
+                  <option value={1}>1</option>
+                </select>
+                <span className="mt-1 block text-xs text-fc-ink-mute">Laissez 0 si vous ne savez pas.</span>
+              </label>
+            )}
+          </div>
+
+          <div className="space-y-3 border-t border-fc-line pt-4">
+            <label className="flex items-center gap-2 text-sm text-fc-ink">
+              <input
+                type="checkbox"
+                checked={form.auto_print_on_sale}
+                onChange={(e) => set("auto_print_on_sale", e.target.checked)}
+                className="h-5 w-5 rounded border-fc-line text-fc-primary focus:ring-fc-primary"
+              />
+              Imprimer automatiquement le ticket à chaque vente
+            </label>
+            <label className="flex items-center gap-2 text-sm text-fc-ink">
+              <input
+                type="checkbox"
+                checked={form.auto_kick_on_cash}
+                onChange={(e) => set("auto_kick_on_cash", e.target.checked)}
+                className="h-5 w-5 rounded border-fc-line text-fc-primary focus:ring-fc-primary"
+              />
+              Ouvrir automatiquement le tiroir pour un paiement en espèces
+            </label>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Button onClick={() => void handleSave()} disabled={saving}>
+              {saving ? "Enregistrement…" : "Enregistrer"}
+            </Button>
+            <SavedNotice show={saved} />
+          </div>
+
+          {form.printer_mode !== "none" && (
+            <div className="space-y-3 border-t border-fc-line pt-4">
+              <p className="text-sm font-medium text-fc-ink">Tester le matériel</p>
+              <ErrorNotice message={testError} />
+              {testMessage && !testError && <p className="text-sm text-fc-primary-deep">{testMessage}</p>}
+              <ErrorNotice message={pairError} />
+              <div className="flex flex-wrap gap-3">
+                {form.printer_mode === "webusb" && (
+                  <Button variant="outline" size="sm" onClick={() => void handlePair()} disabled={pairing}>
+                    {pairing ? "Association…" : "Associer l'imprimante USB"}
+                  </Button>
+                )}
+                <Button variant="outline" size="sm" onClick={() => void handleTestPrint()} disabled={testing}>
+                  {testing ? "Envoi…" : form.printer_mode === "webusb" ? "Test USB" : "Imprimer un ticket de test"}
+                </Button>
+                {form.drawer_enabled && (
+                  <Button variant="outline" size="sm" onClick={() => void handleTestKick()} disabled={kicking}>
+                    {kicking ? "Ouverture…" : "Ouvrir le tiroir"}
+                  </Button>
+                )}
+              </div>
+              <ErrorNotice message={kickError} />
+              {kickMessage && !kickError && <p className="text-sm text-fc-primary-deep">{kickMessage}</p>}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -961,11 +1256,11 @@ function RgpdCard({ clientId, onAnonymized }: { clientId: string; onAnonymized: 
               Supprimer les données (RGPD)
             </Button>
           ) : (
-            <div className="space-y-3 rounded-fc-lg border border-fc-danger/40 bg-red-50 p-4">
-              <p className="text-sm font-semibold text-red-700">
+            <div className="space-y-3 rounded-fc-lg border border-fc-danger/40 bg-fc-danger-soft p-4">
+              <p className="text-sm font-semibold text-fc-danger">
                 Cette action est irréversible : les coordonnées seront effacées, les tickets conservés anonymisés.
               </p>
-              <p className="text-sm text-red-700">Confirmez-vous la suppression définitive des coordonnées de ce client ?</p>
+              <p className="text-sm text-fc-danger">Confirmez-vous la suppression définitive des coordonnées de ce client ?</p>
               <div className="flex gap-3">
                 <Button variant="outline" size="sm" onClick={() => setConfirmStep(false)} disabled={anonymizing}>
                   Annuler

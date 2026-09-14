@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/pos/PaymentStatusBanner.tsx`,
+ * Extrait de l'application source `apps/web/src/components/pos/PaymentStatusBanner.tsx`,
  * jetons `vz-*` → `fc-*`. Statuts alignés sur le contrat §4.5 :
  * pending|paid|failed|cancelled (le "timeout" client reste possible côté
  * front — même rendu que "failed").

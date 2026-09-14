@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/pos/CashDrawerCloseModal.tsx`,
+ * Extrait de l'application source `apps/web/src/components/pos/CashDrawerCloseModal.tsx`,
  * jetons `vz-*` → `fc-*`, mentions techniques (NF525, chemins internes)
  * retirées (CDC §3.2 : aucun jargon visible). Assistant 3 phases : décompte
  * → comparaison → confirmation (le Z est affiché : attendu / compté /
@@ -228,12 +228,12 @@ export default function CashDrawerCloseModal({
               )}
 
               {submitError && (
-                <section role="alert" className="rounded-fc-lg bg-red-50 border border-red-200 p-4">
-                  <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-red-700">
+                <section role="alert" className="rounded-fc-lg bg-fc-danger-soft border border-fc-danger/30 p-4">
+                  <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-fc-danger">
                     <span aria-hidden>⚠</span>
                     Échec de la clôture
                   </div>
-                  <p className="text-xs text-red-700">{submitError}</p>
+                  <p className="text-xs text-fc-danger">{submitError}</p>
                 </section>
               )}
 

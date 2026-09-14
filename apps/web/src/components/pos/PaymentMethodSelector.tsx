@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/pos/PaymentMethodSelector.tsx`,
+ * Extrait de l'application source `apps/web/src/components/pos/PaymentMethodSelector.tsx`,
  * jetons `vz-*` → `fc-*`, réduit à 3 gestes (§6 PR2) : Espèces / Carte
  * bancaire / Mixte. Chèque, chèque CDC, avoir : retirés (hors périmètre
  * PR2 — pas dans le modèle `payments.method`).

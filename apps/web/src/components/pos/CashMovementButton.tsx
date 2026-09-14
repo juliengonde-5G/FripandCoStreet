@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/pos/CashMovementButton.tsx`,
+ * Extrait de l'application source `apps/web/src/components/pos/CashMovementButton.tsx`,
  * jetons `vz-*` → `fc-*`. Motif `personal_withdrawal` retiré (§2 modèle de
  * données PR2 : `reason` enum réduit à `bank_deposit|supplier_payment|
  * float_top_up|other`).
