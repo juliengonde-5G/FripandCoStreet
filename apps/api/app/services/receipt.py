@@ -37,6 +37,8 @@ class ReceiptService:
             lines.append(address.center(_WIDTH))
         if shop.get("siret"):
             lines.append(f"SIRET {shop['siret']}".center(_WIDTH))
+        if shop.get("vat_number"):
+            lines.append(f"N° TVA : {shop['vat_number']}".center(_WIDTH))
         lines.append("=" * _WIDTH)
         return lines
 

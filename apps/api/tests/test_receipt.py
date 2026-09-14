@@ -60,6 +60,23 @@ async def test_refund_receipt_mentions_original_ticket(client, auth_headers, ope
     assert "essai" in refund_text
 
 
+async def test_receipt_shows_vat_number_when_set(client, auth_headers, open_drawer):
+    r = await client.put(
+        "/api/admin/settings/shop",
+        json={"name": "Frip & Co Street", "siret": "12345678901234", "vat_number": "FR12345678901"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+
+    sale = await _sell(client, auth_headers)
+    assert "N° TVA : FR12345678901" in sale["receipt_text"]
+
+
+async def test_receipt_omits_vat_number_line_when_not_set(client, auth_headers, open_drawer):
+    sale = await _sell(client, auth_headers)
+    assert "N° TVA" not in sale["receipt_text"]
+
+
 async def test_discount_appears_on_receipt(client, auth_headers, open_drawer):
     r = await client.post(
         "/api/pos/transactions",
