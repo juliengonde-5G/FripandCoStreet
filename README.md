@@ -26,8 +26,12 @@ python -m alembic upgrade head
 python scripts/create_manager.py --username admin --email admin@example.org
 uvicorn app.main:app --reload --port 8000
 
-# Front
-cd apps/web && npm install && npm run dev   # http://localhost:3000
+# Front — API_PROXY_TARGET fait relayer /api/* par Next vers l'API
+# (reproduit le same-origin de la prod ; évite CORS et le piège
+# localhost -> IPv6 avec uvicorn qui écoute en 127.0.0.1). Voir
+# apps/web/next.config.ts et apps/web/.env.local.example.
+cd apps/web && npm install
+API_PROXY_TARGET=http://127.0.0.1:8000 npm run dev   # http://localhost:3000
 ```
 
 ## Tests
