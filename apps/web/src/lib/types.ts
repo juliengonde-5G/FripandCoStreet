@@ -111,6 +111,12 @@ export interface CreateTransactionRequest {
   items: CartItemInput[];
   discount: DiscountInput | null;
   payments: PaymentInput[];
+  /** PR7 (I3) — fiche cliente choisie EN CAISSE avant l'encaissement. À ne
+   * pas confondre avec `client_uuid`, qui est la clé d'idempotence générée
+   * par le navigateur : `client_id` désigne une fiche de la base clients,
+   * il est posé dès la création de la vente et reste hors signature (comme
+   * le rattachement a posteriori de PR3). Absent/`null` = vente anonyme. */
+  client_id?: string | null;
 }
 
 export interface TransactionItemOut {
@@ -290,15 +296,25 @@ export interface JetListResponse {
 // Client, e-mail (Brevo), newsletter, RGPD — PR3 (docs/ARCHITECTURE_PR3.md §4)
 // ---------------------------------------------------------------------------
 
-/** Référence légère à un client, embarquée sur une vente. */
+/** Référence légère à un client, embarquée sur une vente.
+ *
+ * PR7 (I3) : `email` peut être `null` — une fiche créée en caisse peut
+ * n'avoir qu'un téléphone. `first_name`/`last_name` sont embarqués par
+ * `_serialize_transaction` côté backend et servent à l'écran de fin de
+ * vente (« Ticket pour Prénom Nom ») ainsi qu'au détail d'un ticket. */
 export interface ClientRef {
   id: string;
-  email: string;
+  email: string | null;
+  first_name: string | null;
+  last_name: string | null;
 }
 
 export interface Client {
   id: string;
-  email: string;
+  /** PR7 (I3) : nullable — une fiche peut n'avoir qu'un téléphone. */
+  email: string | null;
+  /** PR7 (I3) : numéro normalisé (`+33…`), `null` si la fiche n'en a pas. */
+  phone: string | null;
   first_name: string | null;
   last_name: string | null;
   newsletter_optin: boolean;
@@ -715,4 +731,53 @@ export interface DashboardResponse {
   today: DashboardToday;
   month: DashboardMonth;
   last_7_days: DashboardDay[];
+}
+
+// ---------------------------------------------------------------------------
+// PR7 — client en caisse, sans fidélité (docs/ARCHITECTURE_PR7.md §1, I3)
+//
+// Deux vues distinctes d'une même fiche, à ne jamais confondre :
+//   - `PosClient` (caisse) : coordonnées MASQUÉES, plus « N visites » et la
+//     date de la dernière visite. La vendeuse doit reconnaître la bonne
+//     cliente, pas lire son adresse ni son numéro devant la file d'attente.
+//   - `Client` (back-office) : coordonnées en clair, fiche complète.
+// ---------------------------------------------------------------------------
+
+/** Une fiche cliente telle que la caisse l'affiche
+ * (`GET /api/pos/clients/search`, `POST /api/pos/clients`). */
+export interface PosClient {
+  id: string;
+  first_name: string | null;
+  last_name: string | null;
+  /** `j***@exemple.fr`, ou `null` si la fiche n'a pas d'e-mail. */
+  email_masked: string | null;
+  /** `•••••••66`, ou `null` si la fiche n'a pas de téléphone. */
+  phone_masked: string | null;
+  newsletter_optin: boolean;
+  /** Dernière VENTE rattachée (une annulation n'est pas une visite). */
+  last_visit_at: string | null;
+  visits_count: number;
+}
+
+/** `GET /api/pos/clients/search?q=` — `q` fait au moins 2 caractères. */
+export interface PosClientSearchResponse {
+  clients: PosClient[];
+}
+
+/** `POST /api/pos/clients` — au moins un des deux moyens de contact est
+ * exigé côté serveur (422 `contact_required`), jamais les deux. */
+export interface CreatePosClientRequest {
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  phone?: string;
+  newsletter_optin: boolean;
+}
+
+/** `POST /api/pos/clients` → 201. `created` vaut `false` quand une fiche
+ * existait déjà pour cet e-mail ou ce téléphone (« Fiche existante
+ * reprise ») : la caisse enchaîne pareil dans les deux cas. */
+export interface CreatePosClientResponse {
+  client: PosClient;
+  created: boolean;
 }
