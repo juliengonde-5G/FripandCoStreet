@@ -263,6 +263,11 @@ export interface FiscalIntegrityResponse {
   transactions: FiscalIntegrityCheck;
   z_reports: FiscalIntegrityCheck;
   jet: FiscalIntegrityCheck;
+  /** PR4 (F5/F6) : `/admin/fiscal/integrity` est étendu aux clôtures
+   * fiscales et aux écritures comptables — absent sur un backend qui ne le
+   * fournit pas encore (compatibilité ascendante, cf. IntegrityCard). */
+  closures?: FiscalIntegrityCheck;
+  accounting_exports?: FiscalIntegrityCheck;
 }
 
 /** Une ligne du journal des événements (JET) — jargon interne « JET »,
@@ -453,3 +458,123 @@ export type DrawerKickReason = "cash_sale" | "manual";
 export interface DrawerKickResponse {
   kicked: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// PR4 — exports comptables, archives fiscales (docs/ARCHITECTURE_PR4.md §4)
+// ---------------------------------------------------------------------------
+
+/** `GET/PUT /admin/settings/accounting` (F1) — comptes comptables et code
+ * journal utilisés pour générer une écriture par clôture Z. Valeurs par
+ * défaut du contrat : journal `VTE`, comptes `707100` / `44571` / `531000` /
+ * `512000` / `658000` / `758000`. Les libellés de compte affichés dans le
+ * formulaire (« Ventes marchandises », « TVA collectée »…) sont un texte fixe
+ * du contrat, pas un champ éditable séparé — hypothèse de forme retenue en
+ * l'absence de détail explicite du contrat sur un champ libellé par compte
+ * (voir rapport de livraison). */
+export interface AccountingSettings {
+  journal_code: string;
+  account_sales: string; // 707 — ventes de marchandises
+  account_tva: string; // 44571 — TVA collectée
+  account_cash: string; // 531 — caisse
+  account_card: string; // 512 — carte bancaire (CB SumUp)
+  account_rounding_expense: string; // 658 — charges diverses (ajustement d'arrondi)
+  account_rounding_income: string; // 758 — produits divers (ajustement d'arrondi)
+}
+
+/** Liste blanche des tables exportables (F4) — jamais de table client/PII. */
+export const EXPORTABLE_TABLES = [
+  { value: "transactions", label: "Ventes" },
+  { value: "transaction_items", label: "Lignes de vente" },
+  { value: "payments", label: "Paiements" },
+  { value: "z_reports", label: "Clôtures de caisse (Z)" },
+  { value: "cash_movements", label: "Mouvements de caisse" },
+  { value: "cash_drawers", label: "Sessions de caisse" },
+  { value: "journal_events", label: "Journal des événements" },
+] as const;
+
+export type ExportableTable = (typeof EXPORTABLE_TABLES)[number]["value"];
+
+/** Ligne du détail d'une écriture comptable (F2, §2 `accounting_export_lines`). */
+export interface AccountingExportLine {
+  line_number: number;
+  account_number: string;
+  account_label: string;
+  label: string;
+  debit: number;
+  credit: number;
+  piece_reference: string;
+}
+
+/** Une écriture comptable par clôture Z (§2 `accounting_exports`) — ligne de
+ * la liste du mois (`GET /admin/accounting/exports`). */
+export interface AccountingExportSummary {
+  id: string;
+  z_report_id: string;
+  z_number: number;
+  export_date: string;
+  total_sales_ht: number;
+  total_tva: number;
+  total_ttc: number;
+  total_debit: number;
+  total_credit: number;
+  rounding_adjustment: number;
+  /** `true` si Σdébit == Σcrédit (à l'arrondi près) — pastille ✔/⚠. */
+  balanced: boolean;
+}
+
+export interface AccountingExportsMonthResponse {
+  exports: AccountingExportSummary[];
+}
+
+/** `GET /admin/accounting/exports/{z_id}` — écriture détaillée avec lignes. */
+export interface AccountingExportDetail extends AccountingExportSummary {
+  lines: AccountingExportLine[];
+}
+
+export type FiscalClosureType = "manual" | "monthly" | "annual";
+
+export const FISCAL_CLOSURE_TYPE_LABELS: Record<FiscalClosureType, string> = {
+  manual: "Manuelle",
+  monthly: "Mensuelle",
+  annual: "Annuelle",
+};
+
+/** `GET /admin/fiscal-closures` (§2 `fiscal_closures`, F5) — une ligne = une
+ * clôture scellée, immuable (trigger UPDATE/DELETE interdits côté base). */
+export interface FiscalClosure {
+  id: string;
+  sequence_number: number;
+  closure_type: FiscalClosureType;
+  period_start: string;
+  period_end: string;
+  transaction_count: number;
+  grand_total_sales: number;
+  grand_total_refunds: number;
+  grand_total_net: number;
+  perpetual_sales: number;
+  perpetual_refunds: number;
+  perpetual_net: number;
+  perpetual_transaction_count: number;
+  archive_sha256: string;
+  archive_size: number;
+  hash: string;
+  previous_hash: string | null;
+  signature_version: number;
+  created_at: string;
+}
+
+export interface FiscalClosureListResponse {
+  closures: FiscalClosure[];
+}
+
+export interface CreateFiscalClosureRequest {
+  closure_type: FiscalClosureType;
+  period_start: string;
+  period_end: string;
+}
+
+/** `GET /admin/fiscal-closures/integrity` — agrégat unique sur la chaîne des
+ * clôtures (même forme que `FiscalIntegrityCheck`, réutilisée telle quelle). */
+export type ClosuresIntegrityResponse = FiscalIntegrityCheck;
+
+export type FiscalExportFormat = "json" | "xml";

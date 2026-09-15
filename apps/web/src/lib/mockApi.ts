@@ -17,8 +17,12 @@
  */
 import { ApiError } from "./apiError";
 import { isValidEmail } from "./format";
-import { TVA_RATES } from "./types";
+import { EXPORTABLE_TABLES, TVA_RATES } from "./types";
 import type {
+  AccountingExportDetail,
+  AccountingExportLine,
+  AccountingExportSummary,
+  AccountingSettings,
   AnonymizeRequest,
   AttachClientRequest,
   AttachClientResponse,
@@ -28,13 +32,18 @@ import type {
   Client,
   ClientFull,
   ClientTransactionRef,
+  ClosuresIntegrityResponse,
   CommunicationEntry,
   CommunicationProvider,
   ConsentEntry,
   ConsentUpdateRequest,
+  CreateFiscalClosureRequest,
   CreateTransactionRequest,
   DrawerCurrentResponse,
   DrawerKickResponse,
+  ExportableTable,
+  FiscalClosure,
+  FiscalClosureType,
   FiscalSettings,
   HardwareSettings,
   JetEvent,
@@ -52,7 +61,7 @@ import type {
   TransactionSummary,
   ZReport,
 } from "./types";
-import type { FetchAPIOptions } from "./api";
+import type { BytesWithHeaders, FetchAPIOptions } from "./api";
 
 /** Version de la politique de consentement (E8) — même constante que le
  * backend (`CONSENT_POLICY_VERSION`), horodate chaque ligne du journal. */
@@ -98,6 +107,24 @@ let cashMovements: CashMovement[] = [];
 let zReports: ZReport[] = [];
 let jetEvents: JetEvent[] = [];
 
+// --- PR4 : comptabilité, archives fiscales --------------------------------
+
+/** Historique des sessions de caisse (ouverture/fermeture) — non modélisé
+ * avant PR4 (le mock ne gardait que le tiroir courant). Alimente
+ * l'export brut de la table `cash_drawers` (F4). */
+interface DrawerHistoryEntry {
+  id: string;
+  opened_at: string;
+  opening_amount: number;
+  closed_at: string | null;
+  closing_amount: number | null;
+}
+let drawerHistory: DrawerHistoryEntry[] = [];
+
+let accountingExports: AccountingExportDetail[] = [];
+let fiscalClosures: FiscalClosure[] = [];
+let closureSeq = 0;
+
 // --- PR3 : clients, consentements, envois de ticket -----------------------
 let clients: Client[] = [];
 let consents: MockConsent[] = [];
@@ -137,6 +164,7 @@ let settings: {
   fiscal: FiscalSettings;
   receipt: ReceiptSettings;
   hardware: HardwareSettings;
+  accounting: AccountingSettings;
 } = {
   shop: {
     name: "Frip & Co Street",
@@ -168,6 +196,17 @@ let settings: {
     auto_print_on_sale: true,
     auto_kick_on_cash: true,
   },
+  // Défauts F1 (docs/ARCHITECTURE_PR4.md) — identiques à l'application
+  // source : journal des ventes, comptes 707/44571/531/512/658/758.
+  accounting: {
+    journal_code: "VTE",
+    account_sales: "707100",
+    account_tva: "44571",
+    account_cash: "531000",
+    account_card: "512000",
+    account_rounding_expense: "658000",
+    account_rounding_income: "758000",
+  },
 };
 
 function reset(): void {
@@ -182,6 +221,10 @@ function reset(): void {
   clients = [];
   consents = [];
   communications = [];
+  drawerHistory = [];
+  accountingExports = [];
+  fiscalClosures = [];
+  closureSeq = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +248,32 @@ function nowIso(): string {
 
 function fail(status: number, detail: string, code?: string): never {
   throw new ApiError(status, detail, code);
+}
+
+// --- PR4 : empreinte factice ------------------------------------------
+// Le mock n'a pas de vrai SHA-256 (pas de dépendance crypto ajoutée pour
+// une démo) : ce hash déterministe (FNV-1a, étendu à 64 caractères
+// hexadécimaux par ré-application successive) tient lieu d'empreinte
+// affichée/copiable dans l'écran Archives fiscales. Jamais une vraie
+// empreinte cryptographique — voir le rapport de livraison (écart assumé).
+function fnv1a(input: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function pseudoHash(input: string): string {
+  let out = "";
+  let seed = input;
+  while (out.length < 64) {
+    const h = fnv1a(seed).toString(16).padStart(8, "0");
+    out += h;
+    seed = h + seed;
+  }
+  return out.slice(0, 64);
 }
 
 function logJet(event_type: string, payload?: Record<string, unknown>): void {
@@ -500,6 +569,117 @@ function attachCancelInfo(tx: TransactionOut): TransactionOut {
   };
 }
 
+// --- PR4 : écriture comptable par Z (F2) ------------------------------
+
+/** Construit et enregistre l'écriture comptable d'un Z, dans le même
+ * esprit que `create_export_for_z` (F2, même transaction que la clôture) :
+ * débit encaissements nets par mode, crédit ventes HT nettes (707) et TVA
+ * collectée nette (44571), ligne d'ajustement d'arrondi 658/758 si
+ * Σdébit ≠ Σcrédit. Idempotent comme le contrat (un seul export par Z). */
+function createAccountingExportForZ(z: ZReport): AccountingExportDetail {
+  const existing = accountingExports.find((e) => e.z_report_id === z.id);
+  if (existing) return existing;
+
+  const cfg = settings.accounting;
+  const piece = `Z${String(z.report_number).padStart(4, "0")}`;
+  const cashNet = z.payment_totals.cash?.net ?? 0;
+  const cardNet = z.payment_totals.card?.net ?? 0;
+
+  const lines: AccountingExportLine[] = [];
+  let n = 0;
+  if (cashNet !== 0) {
+    lines.push({
+      line_number: ++n,
+      account_number: cfg.account_cash,
+      account_label: "Caisse",
+      label: `Encaissements espèces ${piece}`,
+      debit: round2(cashNet),
+      credit: 0,
+      piece_reference: piece,
+    });
+  }
+  if (cardNet !== 0) {
+    lines.push({
+      line_number: ++n,
+      account_number: cfg.account_card,
+      account_label: "Carte bancaire",
+      label: `Encaissements carte ${piece}`,
+      debit: round2(cardNet),
+      credit: 0,
+      piece_reference: piece,
+    });
+  }
+  lines.push({
+    line_number: ++n,
+    account_number: cfg.account_sales,
+    account_label: "Ventes de marchandises",
+    label: `Ventes nettes ${piece}`,
+    debit: 0,
+    credit: round2(z.total_ht),
+    piece_reference: piece,
+  });
+  lines.push({
+    line_number: ++n,
+    account_number: cfg.account_tva,
+    account_label: "TVA collectée",
+    label: `TVA collectée ${piece}`,
+    debit: 0,
+    credit: round2(z.total_tva),
+    piece_reference: piece,
+  });
+
+  let totalDebit = round2(lines.reduce((s, l) => s + l.debit, 0));
+  let totalCredit = round2(lines.reduce((s, l) => s + l.credit, 0));
+  const diffCents = Math.round((totalDebit - totalCredit) * 100);
+  let roundingAdjustment = 0;
+  if (diffCents !== 0) {
+    roundingAdjustment = round2(diffCents / 100);
+    if (diffCents > 0) {
+      // Débit > crédit : ajustement en produit (758) pour équilibrer.
+      lines.push({
+        line_number: ++n,
+        account_number: cfg.account_rounding_income,
+        account_label: "Produits divers (ajustement d'arrondi)",
+        label: `Ajustement d'arrondi ${piece}`,
+        debit: 0,
+        credit: Math.abs(roundingAdjustment),
+        piece_reference: piece,
+      });
+      totalCredit = round2(totalCredit + Math.abs(roundingAdjustment));
+    } else {
+      // Crédit > débit : ajustement en charge (658) pour équilibrer.
+      lines.push({
+        line_number: ++n,
+        account_number: cfg.account_rounding_expense,
+        account_label: "Charges diverses (ajustement d'arrondi)",
+        label: `Ajustement d'arrondi ${piece}`,
+        debit: Math.abs(roundingAdjustment),
+        credit: 0,
+        piece_reference: piece,
+      });
+      totalDebit = round2(totalDebit + Math.abs(roundingAdjustment));
+    }
+  }
+
+  const exportRecord: AccountingExportDetail = {
+    id: uuid(),
+    z_report_id: z.id,
+    z_number: z.report_number,
+    export_date: z.closed_at.slice(0, 10),
+    total_sales_ht: z.total_ht,
+    total_tva: z.total_tva,
+    total_ttc: round2(z.total_ht + z.total_tva),
+    total_debit: totalDebit,
+    total_credit: totalCredit,
+    rounding_adjustment: roundingAdjustment,
+    balanced: Math.abs(round2(totalDebit - totalCredit)) < 0.01,
+    lines,
+  };
+  accountingExports.unshift(exportRecord);
+  logJet("accounting.export_created", { z_number: z.report_number, total_debit: totalDebit, total_credit: totalCredit });
+  return exportRecord;
+}
+
 // ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
@@ -540,6 +720,7 @@ export async function mockFetchAPI<T = unknown>(
     if (drawer) fail(409, "Caisse déjà ouverte.", "drawer_already_open");
     const body = parseBody<{ opening_amount: number }>(options);
     drawer = { id: `drawer-${++drawerSeq}`, opened_at: nowIso(), opening_amount: round2(body.opening_amount || 0) };
+    drawerHistory.unshift({ id: drawer.id, opened_at: drawer.opened_at, opening_amount: drawer.opening_amount, closed_at: null, closing_amount: null });
     logJet("drawer.opened", { opening_amount: drawer.opening_amount });
     return drawer as unknown as T;
   }
@@ -588,6 +769,14 @@ export async function mockFetchAPI<T = unknown>(
     };
     zReports.unshift(z);
     logJet("drawer.closed", { z_number: z.report_number, discrepancy });
+    const historyEntry = drawerHistory.find((d) => d.id === drawer!.id);
+    if (historyEntry) {
+      historyEntry.closed_at = z.closed_at;
+      historyEntry.closing_amount = closing;
+    }
+    // F2 : une écriture comptable est générée à la clôture, dans le même
+    // mouvement que le Z (ici : juste après, en mémoire).
+    createAccountingExportForZ(z);
     drawer = null;
     return z as unknown as T;
   }
@@ -809,8 +998,8 @@ export async function mockFetchAPI<T = unknown>(
   }
 
   // --- Administration ---------------------------------------------------
-  if ((m = path.match(/^\/api\/admin\/settings\/(shop|fiscal|receipt|hardware)$/))) {
-    const key = m[1] as "shop" | "fiscal" | "receipt" | "hardware";
+  if ((m = path.match(/^\/api\/admin\/settings\/(shop|fiscal|receipt|hardware|accounting)$/))) {
+    const key = m[1] as "shop" | "fiscal" | "receipt" | "hardware" | "accounting";
     if (method === "GET") return settings[key] as unknown as T;
     if (method === "PUT") {
       const body = parseBody<Record<string, unknown>>(options);
@@ -819,6 +1008,29 @@ export async function mockFetchAPI<T = unknown>(
       }
       if (key === "fiscal" && typeof body.tva_rate === "string" && !(TVA_RATES as readonly string[]).includes(body.tva_rate)) {
         fail(422, "Taux de TVA non autorisé.", "invalid_tva_rate");
+      }
+      if (key === "accounting") {
+        // Validation F1 : journal 1-5 caractères, comptes numériques 6-8
+        // chiffres.
+        const merged = { ...settings.accounting, ...body } as AccountingSettings;
+        const journal = (merged.journal_code || "").trim();
+        if (journal.length < 1 || journal.length > 5) {
+          fail(422, "Le code journal doit contenir entre 1 et 5 caractères.", "invalid_journal_code");
+        }
+        const accountFields: (keyof AccountingSettings)[] = [
+          "account_sales",
+          "account_tva",
+          "account_cash",
+          "account_card",
+          "account_rounding_expense",
+          "account_rounding_income",
+        ];
+        for (const field of accountFields) {
+          const value = String(merged[field] ?? "").trim();
+          if (!/^\d{6,8}$/.test(value)) {
+            fail(422, "Chaque numéro de compte doit contenir de 6 à 8 chiffres.", "invalid_account_number");
+          }
+        }
       }
       if (key === "hardware") {
         const merged = { ...settings.hardware, ...body } as HardwareSettings;
@@ -915,7 +1127,163 @@ export async function mockFetchAPI<T = unknown>(
       transactions: { ok: true, count: transactions.length, message: "Chaîne de ventes cohérente." },
       z_reports: { ok: true, count: zReports.length, message: "Chaîne des rapports Z cohérente." },
       jet: { ok: true, count: jetEvents.length, message: "Journal des événements complet." },
+      // PR4 (F5/F6) : extension aux clôtures et aux écritures comptables.
+      closures: { ok: true, count: fiscalClosures.length, message: "Chaîne des clôtures fiscales cohérente." },
+      accounting_exports: {
+        ok: accountingExports.every((e) => e.balanced),
+        count: accountingExports.length,
+        message: accountingExports.every((e) => e.balanced)
+          ? "Toutes les écritures comptables sont équilibrées."
+          : "Au moins une écriture comptable n'est pas équilibrée.",
+      },
     } as unknown as T;
+  }
+
+  // --- PR4 : comptabilité (écritures, exports bruts) ---------------------
+
+  if (path === "/api/admin/accounting/exports" && method === "GET") {
+    const year = query.get("year") ? parseInt(query.get("year")!, 10) : new Date().getFullYear();
+    const month = query.get("month") ? parseInt(query.get("month")!, 10) : new Date().getMonth() + 1;
+    const prefix = `${year}-${String(month).padStart(2, "0")}`;
+    const list: AccountingExportSummary[] = accountingExports
+      .filter((e) => e.export_date.startsWith(prefix))
+      .sort((a, b) => b.z_number - a.z_number)
+      .map((exp) => {
+        const summary: AccountingExportSummary = {
+          id: exp.id,
+          z_report_id: exp.z_report_id,
+          z_number: exp.z_number,
+          export_date: exp.export_date,
+          total_sales_ht: exp.total_sales_ht,
+          total_tva: exp.total_tva,
+          total_ttc: exp.total_ttc,
+          total_debit: exp.total_debit,
+          total_credit: exp.total_credit,
+          rounding_adjustment: exp.rounding_adjustment,
+          balanced: exp.balanced,
+        };
+        return summary;
+      });
+    return { exports: list } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/accounting\/exports\/([^/]+)$/)) && method === "GET") {
+    const exp = accountingExports.find((e) => e.z_report_id === m![1]);
+    if (!exp) fail(404, "Écriture comptable introuvable pour ce Z.", "not_found");
+    return exp as unknown as T;
+  }
+
+  // --- PR4 : clôtures fiscales (archives) ---------------------------------
+
+  if (path === "/api/admin/fiscal-closures" && method === "GET") {
+    return { closures: fiscalClosures } as unknown as T;
+  }
+
+  // Route fixe avant le motif générique `/fiscal-closures/{id}` ci-dessous
+  // (sinon « integrity » serait pris pour un identifiant de clôture).
+  if (path === "/api/admin/fiscal-closures/integrity" && method === "GET") {
+    logJet("fiscal.integrity_checked", { scope: "closures", count: fiscalClosures.length });
+    const response: ClosuresIntegrityResponse = {
+      ok: true,
+      count: fiscalClosures.length,
+      message:
+        fiscalClosures.length > 0
+          ? "Chaîne des clôtures fiscales cohérente (empreintes vérifiées du plus ancien au plus récent)."
+          : "Aucune clôture fiscale enregistrée pour l'instant.",
+    };
+    return response as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/fiscal-closures\/([^/]+)$/)) && method === "GET") {
+    const closure = fiscalClosures.find((c) => c.id === m![1]);
+    if (!closure) fail(404, "Clôture fiscale introuvable.", "not_found");
+    return closure as unknown as T;
+  }
+
+  if (path === "/api/admin/fiscal-closures" && method === "POST") {
+    if (drawer) {
+      fail(409, "Fermez la caisse avant de clôturer.", "drawer_open");
+    }
+    const body = parseBody<CreateFiscalClosureRequest>(options);
+    const validTypes: FiscalClosureType[] = ["manual", "monthly", "annual"];
+    if (!validTypes.includes(body.closure_type)) {
+      fail(422, "Type de clôture invalide.", "invalid_closure_type");
+    }
+    const start = new Date(body.period_start);
+    const end = new Date(body.period_end);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start.getTime() > end.getTime()) {
+      fail(422, "Période invalide : la date de fin doit suivre la date de début.", "invalid_period");
+    }
+    if (end.getTime() > Date.now()) {
+      fail(409, "La période doit être entièrement passée pour être clôturée.", "period_not_past");
+    }
+    const overlap = fiscalClosures.some(
+      (c) => new Date(c.period_start).getTime() === start.getTime() && new Date(c.period_end).getTime() === end.getTime(),
+    );
+    if (overlap) {
+      fail(409, "Cette période a déjà été clôturée.", "already_closed");
+    }
+
+    const periodTx = transactions.filter((tx) => {
+      const ts = new Date(tx.created_at).getTime();
+      return ts >= start.getTime() && ts <= end.getTime();
+    });
+    const periodSales = round2(
+      periodTx.filter((t) => t.transaction_type === "sale").reduce((s, t) => s + t.total_ttc, 0),
+    );
+    const periodRefunds = round2(
+      periodTx.filter((t) => t.transaction_type === "refund").reduce((s, t) => s + t.total_ttc, 0),
+    );
+    const periodNet = round2(periodSales - periodRefunds);
+
+    const previous = fiscalClosures[0]; // plus récente en tête (unshift)
+    const perpetualSales = round2((previous?.perpetual_sales ?? 0) + periodSales);
+    const perpetualRefunds = round2((previous?.perpetual_refunds ?? 0) + periodRefunds);
+    const perpetualNet = round2((previous?.perpetual_net ?? 0) + periodNet);
+    const perpetualCount = (previous?.perpetual_transaction_count ?? 0) + periodTx.length;
+
+    const manifestSeed = JSON.stringify({
+      sequence: closureSeq + 1,
+      closure_type: body.closure_type,
+      period_start: start.toISOString(),
+      period_end: end.toISOString(),
+      transaction_count: periodTx.length,
+      period_net: periodNet,
+      perpetual_net: perpetualNet,
+    });
+    const archiveSha256 = pseudoHash(`archive:${manifestSeed}`);
+    const previousHash = previous?.hash ?? null;
+    const hash = pseudoHash(`closure:${previousHash ?? "genesis"}:${archiveSha256}`);
+
+    const closure: FiscalClosure = {
+      id: uuid(),
+      sequence_number: ++closureSeq,
+      closure_type: body.closure_type,
+      period_start: start.toISOString(),
+      period_end: end.toISOString(),
+      transaction_count: periodTx.length,
+      grand_total_sales: periodSales,
+      grand_total_refunds: periodRefunds,
+      grand_total_net: periodNet,
+      perpetual_sales: perpetualSales,
+      perpetual_refunds: perpetualRefunds,
+      perpetual_net: perpetualNet,
+      perpetual_transaction_count: perpetualCount,
+      archive_sha256: archiveSha256,
+      archive_size: 512 + periodTx.length * 96,
+      hash,
+      previous_hash: previousHash,
+      signature_version: 3,
+      created_at: nowIso(),
+    };
+    fiscalClosures.unshift(closure);
+    logJet("closure.created", {
+      type: closure.closure_type,
+      sequence: closure.sequence_number,
+      period: { start: closure.period_start, end: closure.period_end },
+      sha256: closure.archive_sha256,
+    });
+    return closure as unknown as T;
   }
 
   // --- PR3 : client, e-mail (Brevo), newsletter, RGPD -------------------
@@ -1149,6 +1517,374 @@ export async function mockFetchBytes(endpoint: string, options?: FetchAPIOptions
   }
 
   fail(501, `Route non simulée en mode démo : ${method} ${path}`, "mock_not_implemented");
+}
+
+// ---------------------------------------------------------------------------
+// PR4 — téléchargements binaires (CSV Pennylane, FEC, exports de table,
+// archive fiscale .json.gz, export fiscal JSON/XML, PDF du Z).
+//
+// Contenus factices (texte UTF-8 encodé, jamais un vrai gzip/PDF binaire ni
+// un vrai SHA-256) : seul le parcours front (déclenchement du téléchargement,
+// lecture des en-têtes, affichage de l'empreinte) est exercé en mode démo.
+// Voir `pseudoHash` plus haut et le rapport de livraison (écarts assumés).
+// ---------------------------------------------------------------------------
+
+function csvAmount(n: number): string {
+  return n.toFixed(2).replace(".", ",");
+}
+
+function csvDateFr(isoDate: string): string {
+  const [y, mo, d] = isoDate.split("-");
+  return `${d}/${mo}/${y}`;
+}
+
+function fecAmount(n: number): string {
+  return n.toFixed(2);
+}
+
+function fecDate(isoDate: string): string {
+  return isoDate.replaceAll("-", "");
+}
+
+const FEC_COLUMNS = [
+  "JournalCode",
+  "JournalLib",
+  "EcritureNum",
+  "EcritureDate",
+  "CompteNum",
+  "CompteLib",
+  "CompAuxNum",
+  "CompAuxLib",
+  "PieceRef",
+  "PieceDate",
+  "EcritureLib",
+  "Debit",
+  "Credit",
+  "EcritureLet",
+  "DateLet",
+  "ValidDate",
+  "Montantdevise",
+  "Idevise",
+];
+
+function buildFec(exports: AccountingExportDetail[]): string {
+  const cfg = settings.accounting;
+  const rows = [FEC_COLUMNS.join("\t")];
+  for (const exp of exports) {
+    exp.lines.forEach((line, i) => {
+      const num = `${String(exp.z_number).padStart(4, "0")}-${String(i + 1).padStart(3, "0")}`;
+      const date = fecDate(exp.export_date);
+      rows.push(
+        [
+          cfg.journal_code,
+          "Journal des ventes",
+          num,
+          date,
+          line.account_number,
+          line.account_label,
+          "",
+          "",
+          line.piece_reference,
+          date,
+          line.label,
+          fecAmount(line.debit),
+          fecAmount(line.credit),
+          "",
+          "",
+          date,
+          "",
+          "",
+        ].join("\t"),
+      );
+    });
+  }
+  return rows.join("\r\n");
+}
+
+function exportsForMonth(year: number, month: number): AccountingExportDetail[] {
+  const prefix = `${year}-${String(month).padStart(2, "0")}`;
+  return accountingExports.filter((e) => e.export_date.startsWith(prefix)).sort((a, b) => a.z_number - b.z_number);
+}
+
+function buildMonthlyCsv(year: number, month: number): string {
+  const rows = ["Date;Journal;Compte;Libellé compte;Pièce;Libellé écriture;Débit;Crédit"];
+  for (const exp of exportsForMonth(year, month)) {
+    for (const line of exp.lines) {
+      rows.push(
+        [
+          csvDateFr(exp.export_date),
+          settings.accounting.journal_code,
+          line.account_number,
+          line.account_label,
+          line.piece_reference,
+          line.label,
+          line.debit > 0 ? csvAmount(line.debit) : "",
+          line.credit > 0 ? csvAmount(line.credit) : "",
+        ].join(";"),
+      );
+    }
+  }
+  return rows.join("\r\n");
+}
+
+function isoDay(value: string | null | undefined): string {
+  return (value ?? "").slice(0, 10);
+}
+
+/** `true` si `iso` (date-heure) tombe dans `[from, to]` (dates `YYYY-MM-DD`
+ * incluses, Europe/Paris approximée par l'heure locale du navigateur) —
+ * bornes absentes = pas de filtre de ce côté. */
+function inRange(iso: string, from: string | null, to: string | null): boolean {
+  const day = isoDay(iso);
+  if (from && day < from) return false;
+  if (to && day > to) return false;
+  return true;
+}
+
+function buildTableCsv(table: ExportableTable, from: string | null, to: string | null): string {
+  const BOM = "﻿";
+  const rows: string[] = [];
+  switch (table) {
+    case "transactions": {
+      rows.push("id;numero;type;date;total_ht;total_tva;total_ttc");
+      for (const t of transactions) {
+        if (!inRange(t.created_at, from, to)) continue;
+        rows.push(
+          [t.id, String(t.transaction_number), t.transaction_type, t.created_at, csvAmount(t.total_ht), csvAmount(t.total_tva), csvAmount(t.total_ttc)].join(
+            ";",
+          ),
+        );
+      }
+      break;
+    }
+    case "transaction_items": {
+      rows.push("transaction_id;numero_transaction;position;libelle;quantite;prix_unitaire;remise;total_ligne");
+      for (const t of transactions) {
+        if (!inRange(t.created_at, from, to)) continue;
+        for (const it of t.items) {
+          rows.push(
+            [
+              t.id,
+              String(t.transaction_number),
+              String(it.position),
+              it.label.replaceAll(";", ","),
+              String(it.quantity),
+              csvAmount(it.unit_price),
+              csvAmount(it.discount_amount),
+              csvAmount(it.line_total),
+            ].join(";"),
+          );
+        }
+      }
+      break;
+    }
+    case "payments": {
+      rows.push("transaction_id;numero_transaction;methode;montant");
+      for (const t of transactions) {
+        if (!inRange(t.created_at, from, to)) continue;
+        for (const p of t.payments) {
+          rows.push([t.id, String(t.transaction_number), p.method, csvAmount(p.amount)].join(";"));
+        }
+      }
+      break;
+    }
+    case "z_reports": {
+      rows.push("id;numero;cloture_le;ventes;remboursements;net;ecart");
+      for (const z of zReports) {
+        if (!inRange(z.closed_at, from, to)) continue;
+        rows.push(
+          [z.id, String(z.report_number), z.closed_at, csvAmount(z.total_sales), csvAmount(z.total_refunds), csvAmount(z.total_net), csvAmount(z.discrepancy)].join(
+            ";",
+          ),
+        );
+      }
+      break;
+    }
+    case "cash_movements": {
+      rows.push("id;sens;montant;motif;date");
+      for (const mv of cashMovements) {
+        if (!inRange(mv.created_at, from, to)) continue;
+        rows.push([mv.id, mv.direction, csvAmount(mv.amount), mv.reason, mv.created_at].join(";"));
+      }
+      break;
+    }
+    case "cash_drawers": {
+      rows.push("id;ouverture;fond_initial;fermeture;montant_compte");
+      for (const d of drawerHistory) {
+        if (!inRange(d.opened_at, from, to)) continue;
+        rows.push([d.id, d.opened_at, csvAmount(d.opening_amount), d.closed_at ?? "", d.closing_amount !== null ? csvAmount(d.closing_amount) : ""].join(";"));
+      }
+      break;
+    }
+    case "journal_events": {
+      rows.push("seq;type;date");
+      for (const e of jetEvents) {
+        if (!inRange(e.created_at, from, to)) continue;
+        rows.push([String(e.seq), e.event_type, e.created_at].join(";"));
+      }
+      break;
+    }
+  }
+  return BOM + rows.join("\r\n");
+}
+
+function buildFiscalExportBody(from: string | null, to: string | null, format: "json" | "xml"): { text: string; sha256: string } {
+  const inPeriod = transactions.filter((t) => inRange(t.created_at, from, to));
+  const payload = {
+    period: { from: from ?? null, to: to ?? null },
+    transaction_count: inPeriod.length,
+    total_sales: round2(inPeriod.filter((t) => t.transaction_type === "sale").reduce((s, t) => s + t.total_ttc, 0)),
+    total_refunds: round2(inPeriod.filter((t) => t.transaction_type === "refund").reduce((s, t) => s + t.total_ttc, 0)),
+    cash_movement_count: cashMovements.filter((m) => inRange(m.created_at, from, to)).length,
+    journal_event_count: jetEvents.filter((e) => inRange(e.created_at, from, to)).length,
+  };
+  // sha256 calculé sur le corps SANS `generated_at` (F6 : le corps est
+  // reproductible, l'horodatage de génération en est exclu).
+  const sha256 = pseudoHash(JSON.stringify(payload));
+  const generatedAt = nowIso();
+  if (format === "json") {
+    return { text: JSON.stringify({ ...payload, generated_at: generatedAt }, null, 2), sha256 };
+  }
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<export_fiscal generated_at="${generatedAt}">`,
+    `  <periode de="${payload.period.from ?? ""}" a="${payload.period.to ?? ""}" />`,
+    `  <nombre_ventes>${payload.transaction_count}</nombre_ventes>`,
+    `  <total_ventes>${payload.total_sales}</total_ventes>`,
+    `  <total_remboursements>${payload.total_refunds}</total_remboursements>`,
+    `  <nombre_mouvements_caisse>${payload.cash_movement_count}</nombre_mouvements_caisse>`,
+    `  <nombre_evenements_journal>${payload.journal_event_count}</nombre_evenements_journal>`,
+    "</export_fiscal>",
+  ].join("\n");
+  return { text: xml, sha256 };
+}
+
+function buildZPdfText(z: ZReport): string {
+  // Contenu déterministe (aucun horodatage de génération) : deux appels sur
+  // le même Z produisent le même contenu, donc le même sha256 (F8).
+  return [
+    "%PDF-1.4 (démo — pas un vrai PDF binaire)",
+    `Rapport Z n° ${z.report_number}`,
+    `Période : ${z.opened_at} -> ${z.closed_at}`,
+    `Ventes : ${csvAmount(z.total_sales)} EUR`,
+    `Remboursements : ${csvAmount(z.total_refunds)} EUR`,
+    `Net : ${csvAmount(z.total_net)} EUR`,
+    `Fond initial : ${csvAmount(z.opening_amount)} EUR`,
+    `Attendu : ${csvAmount(z.expected_amount)} EUR`,
+    `Compté : ${csvAmount(z.closing_amount)} EUR`,
+    `Écart : ${csvAmount(z.discrepancy)} EUR`,
+    "Auto-attestation art. 286 I-3° bis CGI",
+  ].join("\n");
+}
+
+export async function mockFetchBytesWithHeaders(endpoint: string, options?: FetchAPIOptions): Promise<BytesWithHeaders> {
+  const [path, queryString] = endpoint.split("?");
+  const query = new URLSearchParams(queryString ?? "");
+  const method = (options?.method ?? "GET").toUpperCase();
+
+  await new Promise((r) => setTimeout(r, 150));
+
+  let m: RegExpMatchArray | null;
+
+  const asResult = (text: string, contentType: string, extraHeaders: Record<string, string> = {}): BytesWithHeaders => ({
+    bytes: new TextEncoder().encode(text),
+    headers: { "content-type": contentType, ...extraHeaders },
+  });
+
+  if ((m = path.match(/^\/api\/admin\/accounting\/monthly-csv\/(\d{4})\/(\d{1,2})$/)) && method === "GET") {
+    const year = parseInt(m[1], 10);
+    const monthNum = parseInt(m[2], 10);
+    const csv = buildMonthlyCsv(year, monthNum);
+    logJet("export.downloaded", { kind: "monthly_csv", period_start: `${year}-${String(monthNum).padStart(2, "0")}-01`, rows: csv.split("\r\n").length - 1 });
+    return asResult(csv, "text/csv; charset=utf-8", {
+      "content-disposition": `attachment; filename="ecritures_${year}-${String(monthNum).padStart(2, "0")}.csv"`,
+    });
+  }
+
+  if ((m = path.match(/^\/api\/admin\/accounting\/fec\/day\/(\d{4}-\d{2}-\d{2})$/)) && method === "GET") {
+    const day = m[1];
+    const exportsOfDay = accountingExports.filter((e) => e.export_date === day);
+    const fec = buildFec(exportsOfDay);
+    const siren = (settings.shop.siret || "000000000").slice(0, 9);
+    logJet("export.downloaded", { kind: "fec_day", period_start: day, period_end: day, rows: exportsOfDay.length });
+    return asResult(fec, "text/plain; charset=utf-8", {
+      "content-disposition": `attachment; filename="FEC_${siren}_${day.replaceAll("-", "")}.txt"`,
+    });
+  }
+
+  if ((m = path.match(/^\/api\/admin\/accounting\/fec\/month\/(\d{4})\/(\d{1,2})$/)) && method === "GET") {
+    const year = parseInt(m[1], 10);
+    const monthNum = parseInt(m[2], 10);
+    const monthExports = exportsForMonth(year, monthNum);
+    const fec = buildFec(monthExports);
+    const siren = (settings.shop.siret || "000000000").slice(0, 9);
+    const periodLabel = `${year}${String(monthNum).padStart(2, "0")}`;
+    logJet("export.downloaded", { kind: "fec_month", period_start: `${year}-${String(monthNum).padStart(2, "0")}-01`, rows: monthExports.length });
+    return asResult(fec, "text/plain; charset=utf-8", {
+      "content-disposition": `attachment; filename="FEC_${siren}_${periodLabel}.txt"`,
+    });
+  }
+
+  if ((m = path.match(/^\/api\/admin\/exports\/table\/([a-z_]+)$/)) && method === "GET") {
+    const table = m[1];
+    const known = EXPORTABLE_TABLES.some((t) => t.value === table);
+    if (!known) fail(422, "Cette table n'est pas exportable.", "table_not_allowed");
+    const from = query.get("from");
+    const to = query.get("to");
+    const csv = buildTableCsv(table as ExportableTable, from, to);
+    logJet("export.downloaded", { kind: "table", table, period_start: from, period_end: to, rows: csv.split("\r\n").length - 1 });
+    return asResult(csv, "text/csv; charset=utf-8", {
+      "content-disposition": `attachment; filename="${table}${from || to ? `_${from ?? ""}_${to ?? ""}` : ""}.csv"`,
+    });
+  }
+
+  if ((m = path.match(/^\/api\/admin\/fiscal-closures\/([^/]+)\/archive$/)) && method === "GET") {
+    const closure = fiscalClosures.find((c) => c.id === m![1]);
+    if (!closure) fail(404, "Clôture fiscale introuvable.", "not_found");
+    // Contenu factice (jamais un vrai gzip) : assez pour déclencher un vrai
+    // téléchargement et vérifier les en-têtes en mode démo.
+    const content = `ARCHIVE FISCALE (démo — pas un vrai .json.gz)\nSéquence ${closure!.sequence_number}\nType ${closure!.closure_type}\nPériode ${closure!.period_start} -> ${closure!.period_end}\nEmpreinte ${closure!.archive_sha256}\n`;
+    logJet("export.downloaded", {
+      kind: "fiscal_archive",
+      period_start: closure!.period_start,
+      period_end: closure!.period_end,
+      sha256: closure!.archive_sha256,
+    });
+    return asResult(content, "application/gzip", {
+      "content-disposition": `attachment; filename="cloture_${closure!.sequence_number}.json.gz"`,
+      "x-archive-sha256": closure!.archive_sha256,
+      "x-closure-hash": closure!.hash,
+    });
+  }
+
+  if (path === "/api/admin/fiscal-export" && method === "GET") {
+    const from = query.get("from");
+    const to = query.get("to");
+    const formatParam = query.get("format") === "xml" ? "xml" : "json";
+    // Chaîne toujours valide en mode démo (le mock ne modélise pas de
+    // rupture de chaîne — voir rapport de livraison).
+    const { text, sha256 } = buildFiscalExportBody(from, to, formatParam);
+    logJet("export.downloaded", { kind: "fiscal_export", period_start: from, period_end: to, sha256 });
+    return asResult(text, formatParam === "json" ? "application/json; charset=utf-8" : "application/xml; charset=utf-8", {
+      "content-disposition": `attachment; filename="export_fiscal_${from ?? "debut"}_${to ?? "fin"}.${formatParam}"`,
+      "x-export-sha256": sha256,
+    });
+  }
+
+  if ((m = path.match(/^\/api\/pos\/z-reports\/([^/]+)\/pdf$/)) && method === "GET") {
+    const z = zReports.find((zr) => zr.id === m![1]);
+    if (!z) fail(404, "Rapport Z introuvable.", "not_found");
+    const text = buildZPdfText(z!);
+    logJet("export.downloaded", { kind: "z_pdf", z_number: z!.report_number });
+    return asResult(text, "application/pdf", {
+      "content-disposition": `attachment; filename="Z${String(z!.report_number).padStart(4, "0")}.pdf"`,
+    });
+  }
+
+  // Routes ESC/POS (PR3b) — déléguées à `mockFetchBytes` pour ne pas
+  // dupliquer leur logique (couplage WebUSB, tiroir…).
+  const bytes = await mockFetchBytes(endpoint, options);
+  return { bytes, headers: {} };
 }
 
 // Expose un reset pour d'éventuels tests / Playwright (état frais par page load

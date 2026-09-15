@@ -7,11 +7,14 @@
  */
 import React, { useEffect, useState } from "react";
 
+import AccountingTab from "@/components/admin/AccountingTab";
+import FiscalArchivesTab from "@/components/admin/FiscalArchivesTab";
 import AppShell from "@/components/layout/AppShell";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/api";
+import { downloadFile } from "@/lib/download";
 import { formatCurrency, formatDateTime } from "@/lib/format";
 import { kickDrawer } from "@/lib/printing";
 import {
@@ -36,13 +39,13 @@ import {
 import { findPairedUsbDevice, getStoredPrinter, isWebUsbSupported, pairUsbPrinter, sendBytes } from "@/lib/webusb-printer";
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<"settings" | "hardware" | "clients">("settings");
+  const [tab, setTab] = useState<"settings" | "hardware" | "clients" | "accounting" | "fiscal">("settings");
 
   return (
     <AppShell>
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-fc-ink">Administration</h1>
-        <div className="flex items-center gap-1 rounded-fc-lg bg-fc-bg-alt p-1">
+        <div className="flex flex-wrap items-center gap-1 rounded-fc-lg bg-fc-bg-alt p-1">
           <TabButton active={tab === "settings"} onClick={() => setTab("settings")}>
             Réglages
           </TabButton>
@@ -51,6 +54,12 @@ export default function AdminPage() {
           </TabButton>
           <TabButton active={tab === "clients"} onClick={() => setTab("clients")}>
             Clients
+          </TabButton>
+          <TabButton active={tab === "accounting"} onClick={() => setTab("accounting")}>
+            Comptabilité
+          </TabButton>
+          <TabButton active={tab === "fiscal"} onClick={() => setTab("fiscal")}>
+            Archives fiscales
           </TabButton>
         </div>
       </div>
@@ -75,6 +84,10 @@ export default function AdminPage() {
       )}
 
       {tab === "clients" && <ClientsSection />}
+
+      {tab === "accounting" && <AccountingTab />}
+
+      {tab === "fiscal" && <FiscalArchivesTab />}
     </AppShell>
   );
 }
@@ -757,6 +770,8 @@ function ZReportsCard() {
   const [list, setList] = useState<ZReport[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfBusyId, setPdfBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -766,6 +781,18 @@ function ZReportsCard() {
       .finally(() => setLoading(false));
   }, []);
 
+  const handlePdf = async (z: ZReport): Promise<void> => {
+    setPdfBusyId(z.id);
+    setPdfError(null);
+    try {
+      await downloadFile(`/api/pos/z-reports/${z.id}/pdf`, `Z${String(z.report_number).padStart(4, "0")}.pdf`);
+    } catch (err) {
+      setPdfError(err instanceof ApiError ? err.detail : "Échec du téléchargement du PDF.");
+    } finally {
+      setPdfBusyId(null);
+    }
+  };
+
   return (
     <Card title="Clôtures de caisse" subtitle="Historique des rapports Z, du plus récent au plus ancien.">
       {loading ? (
@@ -773,6 +800,7 @@ function ZReportsCard() {
       ) : (
         <div className="space-y-2">
           <ErrorNotice message={error} />
+          <ErrorNotice message={pdfError} />
           {list.length === 0 && <p className="text-sm text-fc-ink-soft">Aucune clôture enregistrée.</p>}
           {list.length > 0 && (
             <div className="overflow-x-auto">
@@ -785,6 +813,7 @@ function ZReportsCard() {
                     <th className="py-2 pr-4">Attendu</th>
                     <th className="py-2 pr-4">Compté</th>
                     <th className="py-2 pr-4">Écart</th>
+                    <th className="py-2 pr-4" />
                   </tr>
                 </thead>
                 <tbody>
@@ -798,6 +827,11 @@ function ZReportsCard() {
                       <td className={`py-2 pr-4 font-mono tabular-nums ${Math.abs(z.discrepancy) > 2 ? "text-fc-warn" : ""}`}>
                         {z.discrepancy > 0 ? "+" : ""}
                         {formatCurrency(z.discrepancy)}
+                      </td>
+                      <td className="py-2 pr-4">
+                        <Button variant="outline" onClick={() => void handlePdf(z)} disabled={pdfBusyId === z.id}>
+                          {pdfBusyId === z.id ? "Préparation…" : "PDF"}
+                        </Button>
                       </td>
                     </tr>
                   ))}
