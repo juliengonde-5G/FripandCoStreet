@@ -63,6 +63,17 @@ class Transaction(Base):
         UUID(as_uuid=True), ForeignKey("clients.id"), nullable=True
     )
 
+    # PR8 (J1, migration 0008) — vendeuse qui a encaisse. HORS SIGNATURE
+    # (comme `client_id` : absente de `fiscal.py::_transaction_payload`,
+    # donc le `hash_chain` est le meme avec ou sans vendeuse) mais, a la
+    # difference de `client_id`, posee a l'INSERT et GELEE : le trigger
+    # `fripco_protect_signed_transaction` (reecrit en 0008) refuse toute
+    # reattribution apres coup. NULL = vente encaissee sans identification
+    # (reglage `pos.cashier_required` a false, ou historique anterieur).
+    cashier_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cashiers.id"), nullable=True
+    )
+
     # Remise globale (D2) — ventilee au prorata sur les lignes, tracee dans
     # le payload signe (`fiscal.py::_transaction_payload`).
     discount_type: Mapped[DiscountType | None] = mapped_column(
@@ -186,6 +197,22 @@ class CashDrawer(Base):
         UUID(as_uuid=True), ForeignKey("z_reports.id"), nullable=True
     )
 
+    # PR8 (J1/J2) — vendeuses. `opened_by`/`closed_by` sont poses une fois
+    # (ouverture, cloture) ; `current_cashier_id` est l'etat COURANT de la
+    # caisse, mutable tant que le tiroir est ouvert : c'est lui que la
+    # releve change en cours de journee, et c'est lui qui est recopie sur
+    # chaque vente/mouvement. Rien de fiscal ici — le tiroir n'est fige
+    # qu'une fois cloture (`fripco_protect_cash_drawer`).
+    opened_by_cashier_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cashiers.id"), nullable=True
+    )
+    closed_by_cashier_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cashiers.id"), nullable=True
+    )
+    current_cashier_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cashiers.id"), nullable=True
+    )
+
 
 class ZReport(Base):
     __tablename__ = "z_reports"
@@ -196,6 +223,13 @@ class ZReport(Base):
     )
     cash_drawer_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("cash_drawers.id"), unique=True, nullable=False
+    )
+    # PR8 (J1) — vendeuse qui tenait la caisse a la cloture. Hors payload
+    # signe du Z (`fiscal.py::generate_z_report`) : posee a l'INSERT, et le
+    # Z est scelle des sa creation (`fripco_protect_z_report` refuse tout
+    # UPDATE), donc immuable de fait.
+    cashier_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cashiers.id"), nullable=True
     )
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

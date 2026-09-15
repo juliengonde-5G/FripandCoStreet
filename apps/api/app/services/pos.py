@@ -24,6 +24,7 @@ from app.models.pos import (
     TransactionType,
 )
 from app.services import cash_payment_validator
+from app.services.cashier_service import CashierRequired, CashierService
 from app.services.fiscal import (
     DrawerAlreadyOpen,
     DrawerClosed,
@@ -43,7 +44,12 @@ from app.services.jet import (
     EVENT_SALE_CREATED,
     JournalService,
 )
-from app.services.receipt import ReceiptService, apply_client_line, format_client_label
+from app.services.receipt import (
+    ReceiptService,
+    apply_client_line,
+    apply_invoice_line,
+    format_client_label,
+)
 from app.services.settings_service import SettingsService
 from app.services.tva_service import compute_line_totals
 
@@ -167,6 +173,10 @@ class PosService:
             raise DrawerClosed()
 
         client = await self._resolve_client(client_id)
+        # PR8/J2 — la vendeuse inscrite sur la vente est celle qui tient la
+        # caisse a cet instant precis (releve incluse), pas celle qui a
+        # ouvert le tiroir.
+        cashier_id = await self.resolve_cashier(drawer)
 
         if not items:
             raise CartInvalid("Le panier est vide.")
@@ -249,6 +259,9 @@ class PosService:
             client_uuid=client_uuid,
             # Hors payload signe (cf. docstring) — pose des l'INSERT.
             client_id=client.id if client is not None else None,
+            # Idem pour la vendeuse (PR8/J1) : hors signature, posee a
+            # l'INSERT, puis GELEE par le trigger (migration 0008).
+            cashier_id=cashier_id,
             discount_type=discount_type,
             discount_value=(float(discount_value) if discount_value is not None else None),
             discount_amount=float(Decimal(discount_cents) / Decimal("100")),
@@ -326,6 +339,12 @@ class PosService:
                 if client is not None
                 else None
             ),
+            # PR8/J2 — la ligne « Vendeuse : … » est ecrite DANS le texte
+            # stocke, a l'emission : c'est la vendeuse du moment qui fait
+            # foi, et le ticket deja remis ne doit pas changer de nom si la
+            # releve a lieu une minute plus tard (contrairement a la ligne
+            # « Client : », qui suit le rattachement courant).
+            cashier_label=await self.cashier_label(cashier_id),
         )
         from app.models.receipt import Receipt
 
@@ -383,6 +402,30 @@ class PosService:
         if client is None or client.anonymized_at is not None:
             raise ClientNotFound()
         return client
+
+    async def resolve_cashier(self, drawer: CashDrawer) -> uuid.UUID | None:
+        """Vendeuse a inscrire sur l'operation en cours (PR8/J2).
+
+        C'est `cash_drawers.current_cashier_id` — l'identite COURANTE de la
+        caisse — et non celle qui a ouvert le tiroir : apres une releve, les
+        ventes suivantes portent la nouvelle vendeuse, celles d'avant
+        gardent l'ancienne (elles sont gelees).
+
+        Quand le reglage `pos.cashier_required` est actif et que personne
+        n'est identifie, l'operation est refusee (422 `cashier_required`)
+        plutot qu'attribuee a personne : c'est tout l'interet du reglage.
+        """
+        cashier_id = drawer.current_cashier_id if drawer is not None else None
+        if cashier_id is None and await SettingsService(self.db).get_cashier_required():
+            raise CashierRequired()
+        return cashier_id
+
+    async def cashier_label(self, cashier_id: uuid.UUID | None) -> str | None:
+        """Nom affichable de la vendeuse (ticket, ecran de caisse)."""
+        if cashier_id is None:
+            return None
+        cashier = await CashierService(self.db).get(cashier_id)
+        return cashier.display_name if cashier is not None else None
 
     @staticmethod
     def _resolve_discount(
@@ -465,9 +508,29 @@ class PosService:
         courant, pas celui de l'instant de la vente. Seule la ligne
         « Client : … » est reecrite (`apply_client_line`) ; tout le reste
         du ticket reste figé au mot pres.
+
+        Meme mecanique pour la ligne « Facture : F-… » (PR8/J5) : la
+        facture d'un client professionnel est emise APRES la vente, le
+        ticket stocke ne peut donc pas la porter — elle est posee au rendu
+        (`apply_invoice_line`).
         """
         transaction = transaction or receipt.transaction
-        return apply_client_line(receipt.content, await self.client_label(transaction))
+        text = apply_client_line(receipt.content, await self.client_label(transaction))
+        number, is_credit_note = await self.invoice_label(transaction)
+        return apply_invoice_line(text, number, credit_note=is_credit_note)
+
+    async def invoice_label(self, transaction: Transaction | None) -> tuple[str | None, bool]:
+        """``(numero de facture, est_un_avoir)`` du document rattache a une
+        transaction — ``(None, False)`` quand elle n'est pas facturee."""
+        if transaction is None:
+            return None, False
+        from app.models.invoice import InvoiceKind
+        from app.services.invoice_service import InvoiceService
+
+        invoice = await InvoiceService(self.db).get_for_transaction(transaction.id)
+        if invoice is None:
+            return None, False
+        return invoice.invoice_number, invoice.kind == InvoiceKind.credit_note
 
     async def client_label(self, transaction: Transaction | None) -> str | None:
         """« Prenom N. » de la cliente rattachee a une vente, ou ``None``."""
@@ -502,27 +565,64 @@ class PosService:
         ).scalar_one_or_none()
 
     async def open_drawer(
-        self, *, user_id: uuid.UUID, opening_amount: Decimal, breakdown: list[dict] | None = None
+        self,
+        *,
+        user_id: uuid.UUID,
+        opening_amount: Decimal,
+        breakdown: list[dict] | None = None,
+        cashier_id: uuid.UUID | None = None,
     ) -> CashDrawer:
+        """Ouvre la caisse (D9), en notant la vendeuse qui l'ouvre (PR8/J2).
+
+        L'identification precede necessairement l'ouverture (il n'y a pas
+        encore de tiroir ou inscrire l'identite courante) : le front la
+        conserve apres `POST /pos/cashiers/identify` et la renvoie ici. La
+        vendeuse devient a la fois `opened_by_cashier_id` (fige) et
+        `current_cashier_id` (etat courant, que la releve changera).
+        """
         if await self.get_open_drawer() is not None:
             raise DrawerAlreadyOpen()
+        cashier = await self._resolve_opening_cashier(cashier_id)
         drawer = CashDrawer(
             user_id=user_id,
             opened_at=datetime.now(timezone.utc),
             opening_amount=float(_round_eur(opening_amount)),
             opening_breakdown=breakdown,
             is_open=True,
+            opened_by_cashier_id=cashier.id if cashier is not None else None,
+            current_cashier_id=cashier.id if cashier is not None else None,
         )
         self.db.add(drawer)
         await self.db.flush()
         await JournalService(self.db).record(
             EVENT_DRAWER_OPENED,
             user_id=user_id,
-            payload={"opening_amount": float(opening_amount)},
+            payload={
+                "opening_amount": float(opening_amount),
+                "cashier_id": str(cashier.id) if cashier is not None else None,
+            },
         )
         await self.db.flush()
         await self.db.refresh(drawer)
         return drawer
+
+    async def _resolve_opening_cashier(self, cashier_id: uuid.UUID | None):
+        """Valide la vendeuse annoncee a l'ouverture de caisse (PR8/J2).
+
+        Une vendeuse inconnue ou desactivee est refusee ; l'absence de
+        vendeuse l'est aussi quand `pos.cashier_required` est actif (le
+        front doit alors demander l'identification AVANT d'ouvrir).
+        """
+        if cashier_id is None:
+            if await SettingsService(self.db).get_cashier_required():
+                raise CashierRequired(
+                    "Identifiez-vous avec votre code avant d'ouvrir la caisse."
+                )
+            return None
+        cashier = await CashierService(self.db).get(cashier_id)
+        if cashier is None or not cashier.active:
+            raise CashierRequired("Vendeuse inconnue ou désactivée : identifiez-vous à nouveau.")
+        return cashier
 
     async def add_cash_movement(
         self,
@@ -536,6 +636,9 @@ class PosService:
         drawer = await self.get_open_drawer()
         if drawer is None:
             raise DrawerClosed()
+        # PR8/J2 — un mouvement de caisse engage autant qu'une vente : meme
+        # regle d'identification, meme colonne gelee.
+        cashier_id = await self.resolve_cashier(drawer)
         if amount <= 0:
             raise CartInvalid("Le montant du mouvement doit être positif.")
         if reason == CashMovementReason.other and not (note or "").strip():
@@ -547,6 +650,7 @@ class PosService:
             reason=reason,
             note=note,
             user_id=user_id,
+            cashier_id=cashier_id,
         )
         self.db.add(movement)
         await self.db.flush()
@@ -659,6 +763,12 @@ class PosService:
         drawer.closing_breakdown = breakdown
         drawer.closing_note = note
         drawer.closing_amount = float(_round_eur(closing_amount))
+        # PR8/J2 — la vendeuse qui cloture, notee AVANT le scellement : une
+        # fois le Z genere, le tiroir est fige (`fripco_protect_cash_drawer`).
+        # La cloture, elle, n'est jamais refusee faute d'identification :
+        # c'est un geste de fin de journee, deja authentifie par le JWT du
+        # compte manager, et il ne doit rien pouvoir bloquer.
+        drawer.closed_by_cashier_id = drawer.current_cashier_id
         await self.db.flush()
 
         z_report = await FiscalService(self.db).generate_z_report(drawer, user_id, counted=True)

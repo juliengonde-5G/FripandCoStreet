@@ -15,6 +15,12 @@
  * l'écran de fin de vente (`lib/printing.ts`), sans kick automatique (le
  * tiroir a déjà été ouvert, le cas échéant, à la vente d'origine).
  *
+ * PR8 (J6) : le détail porte la facture pro de la vente quand elle existe
+ * (« Facture : F-2026-0001 » + PDF), sinon un bouton « Facture pro » qui
+ * ouvre le formulaire dans le panneau (une vente non annulée uniquement).
+ * Une vente facturée puis annulée montre en plus son AVOIR
+ * (« Avoir : A-2026-0001 » + PDF), généré automatiquement côté serveur.
+ *
  * PR7 (I3) : le détail affiche « Client : Prénom Nom » quand la vente est
  * rattachée, avec un bouton « Détacher » (confirmation inline) —
  * `DELETE /pos/transactions/{id}/client`. Détacher ne touche ni aux
@@ -24,10 +30,12 @@
 import React, { useEffect, useState } from "react";
 
 import Modal from "@/components/ui/Modal";
+import InvoiceForm, { InvoiceSummary } from "@/components/pos/InvoiceForm";
 import { api, ApiError } from "@/lib/api";
 import { formatClientName, formatCurrency, formatDateTime, isValidEmail, maskEmail } from "@/lib/format";
+import { fetchInvoiceForTransaction } from "@/lib/invoices";
 import { loadHardwareSettings, printReceipt } from "@/lib/printing";
-import type { HardwareSettings, SendReceiptEmailResponse, TransactionOut, TransactionSummary } from "@/lib/types";
+import type { HardwareSettings, Invoice, SendReceiptEmailResponse, TransactionOut, TransactionSummary } from "@/lib/types";
 
 interface Props {
   open: boolean;
@@ -60,6 +68,14 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
   const [detaching, setDetaching] = useState(false);
   const [detachError, setDetachError] = useState<string | null>(null);
 
+  // PR8 (J6) — facture pro du ticket ouvert, et avoir quand la vente
+  // facturée a été annulée. Chargés à l'ouverture du détail, remis à zéro
+  // à chaque changement de ticket.
+  const [invoice, setInvoice] = useState<Invoice | null>(null);
+  const [creditNote, setCreditNote] = useState<Invoice | null>(null);
+  const [invoiceError, setInvoiceError] = useState<string | null>(null);
+  const [invoiceFormOpen, setInvoiceFormOpen] = useState(false);
+
   // PR3b — réimpression physique depuis le détail.
   const [hardware, setHardware] = useState<HardwareSettings | null>(null);
   const [reprinting, setReprinting] = useState(false);
@@ -81,6 +97,10 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
     setEmailDraft("");
     setEmailError(null);
     setEmailSentTo(null);
+    setInvoice(null);
+    setCreditNote(null);
+    setInvoiceError(null);
+    setInvoiceFormOpen(false);
     setLoading(true);
     setError(null);
     loadList()
@@ -99,6 +119,30 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
     return list.find((t) => t.id === id)?.transaction_number ?? null;
   };
 
+  /** Facture et avoir du ticket ouvert (PR8, J6).
+   *
+   * On n'interroge l'API que si la transaction PORTE un n° de document
+   * (`invoice_number`) : la grande majorité des tickets n'est pas facturée,
+   * inutile de provoquer un 404 à chaque ouverture de détail. Pour une
+   * vente facturée puis annulée, l'avoir se lit sur la transaction
+   * d'annulation (`refund_transaction_id`), qui le porte côté serveur. */
+  const loadInvoices = async (tx: TransactionOut): Promise<void> => {
+    setInvoiceError(null);
+    try {
+      if (tx.invoice_number) {
+        const doc = await fetchInvoiceForTransaction(tx.id);
+        if (doc?.kind === "credit_note") setCreditNote(doc);
+        else if (doc) setInvoice(doc);
+      }
+      if (tx.transaction_type === "sale" && tx.invoice_number && tx.cancelled && tx.refund_transaction_id) {
+        const avoir = await fetchInvoiceForTransaction(tx.refund_transaction_id);
+        if (avoir) setCreditNote(avoir);
+      }
+    } catch (err) {
+      setInvoiceError(err instanceof ApiError ? err.detail : "Impossible de lire la facture de ce ticket.");
+    }
+  };
+
   const openDetail = async (id: string): Promise<void> => {
     setCancelError(null);
     setReason("");
@@ -108,10 +152,15 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
     setReprinted(false);
     setConfirmDetach(false);
     setDetachError(null);
+    setInvoice(null);
+    setCreditNote(null);
+    setInvoiceError(null);
+    setInvoiceFormOpen(false);
     try {
       const tx = await api.get<TransactionOut>(`/api/pos/transactions/${id}`);
       setDetail(tx);
       setEmailDraft(tx.client?.email ?? "");
+      void loadInvoices(tx);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "Impossible de charger ce ticket.");
     }
@@ -173,7 +222,13 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
       // un ticket "actif" déjà annulé, même le temps d'un aller-retour réseau.
       await loadList();
       setDetail(null);
+      setInvoice(null);
+      setInvoiceFormOpen(false);
+      setCreditNote(null);
       setCancelledResult(refund);
+      // Annulation d'une vente facturée : le serveur a émis l'avoir, on
+      // l'affiche tout de suite avec son PDF (PR8, J5).
+      if (refund.invoice_number) void loadInvoices(refund);
       onCancelled();
     } catch (err) {
       setCancelError(err instanceof ApiError ? err.detail : "Échec de l'annulation du ticket.");
@@ -215,6 +270,7 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
               ),
             )}
           </div>
+          {creditNote && <InvoiceSummary invoice={creditNote} compact />}
           <button
             type="button"
             onClick={backToList}
@@ -325,6 +381,41 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {(invoice || creditNote || (detail.transaction_type === "sale" && !detail.cancelled)) && (
+            <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-4 space-y-2">
+              <p className="text-sm font-medium text-fc-ink">Facture pro</p>
+              {invoiceError && (
+                <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 p-2 text-sm text-fc-danger">
+                  {invoiceError}
+                </div>
+              )}
+              {invoice && <InvoiceSummary invoice={invoice} compact />}
+              {creditNote && <InvoiceSummary invoice={creditNote} compact />}
+              {!invoice &&
+                detail.transaction_type === "sale" &&
+                !detail.cancelled &&
+                (invoiceFormOpen ? (
+                  <InvoiceForm
+                    transactionId={detail.id}
+                    transactionNumber={detail.transaction_number}
+                    onIssued={(created) => {
+                      setInvoice(created);
+                      setInvoiceFormOpen(false);
+                    }}
+                    onCancel={() => setInvoiceFormOpen(false)}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setInvoiceFormOpen(true)}
+                    className="w-full min-h-touch rounded-fc-lg border border-fc-line bg-fc-surface px-4 py-3 text-sm font-semibold text-fc-ink hover:bg-fc-bg-alt"
+                  >
+                    Facture pro
+                  </button>
+                ))}
             </div>
           )}
 

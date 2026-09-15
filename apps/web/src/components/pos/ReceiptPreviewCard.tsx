@@ -20,6 +20,12 @@
  * bloquante), ouverture du tiroir combinée à la première impression d'une
  * vente espèces si `hardware.auto_kick_on_cash` — voir lib/printing.ts.
  *
+ * PR8 (J6) : bouton « Facture pro » sous le bloc e-mail — ouvre le
+ * formulaire de facture (raison sociale, SIRET, adresse) dans une modale ;
+ * une fois émise, le n° de facture et son PDF restent affichés sur
+ * l'écran de fin de vente. Jamais sur une annulation (l'avoir est
+ * automatique, côté serveur).
+ *
  * PR7 (I3) : quand une cliente a été choisie EN CAISSE avant
  * l'encaissement, le bloc e-mail ne redemande ni son nom ni son
  * consentement (déjà saisis à la sélection) — il annonce « Ticket pour
@@ -33,10 +39,12 @@
  */
 import React, { useEffect, useRef, useState } from "react";
 
+import Modal from "@/components/ui/Modal";
+import InvoiceForm, { InvoiceSummary } from "@/components/pos/InvoiceForm";
 import { api, ApiError } from "@/lib/api";
 import { formatClientName, formatCurrency, isValidEmail } from "@/lib/format";
 import { kickDrawer, printReceipt } from "@/lib/printing";
-import type { AttachClientResponse, ClientRef, HardwareSettings, SendReceiptEmailResponse } from "@/lib/types";
+import type { AttachClientResponse, ClientRef, HardwareSettings, Invoice, SendReceiptEmailResponse } from "@/lib/types";
 
 interface Props {
   /** Id de la vente — sert au rattachement client + envoi du ticket. */
@@ -82,6 +90,11 @@ export default function ReceiptPreviewCard({
   const printedOnceRef = useRef(false);
   const autoFiredRef = useRef(false);
   const [printing, setPrinting] = useState(false);
+  // PR8 (J6) — facture pro de cette vente : `null` tant qu'aucune n'a été
+  // émise. Une vente n'en porte qu'une seule (409 `invoice_exists` côté
+  // serveur si on réessaie), d'où le bouton qui disparaît une fois émise.
+  const [invoice, setInvoice] = useState<Invoice | null>(null);
+  const [invoiceOpen, setInvoiceOpen] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
   const [printedMessage, setPrintedMessage] = useState<string | null>(null);
 
@@ -189,6 +202,20 @@ export default function ReceiptPreviewCard({
             />
           )}
         </div>
+        {!isCancellation &&
+          (invoice ? (
+            <div className="flex-shrink-0">
+              <InvoiceSummary invoice={invoice} compact />
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setInvoiceOpen(true)}
+              className="w-full min-h-touch flex-shrink-0 rounded-fc-lg border border-fc-line bg-fc-surface px-4 py-3 text-sm font-semibold text-fc-ink hover:bg-fc-bg-alt"
+            >
+              Facture pro
+            </button>
+          ))}
         <button
           type="button"
           onClick={onNewSale}
@@ -197,6 +224,18 @@ export default function ReceiptPreviewCard({
           Nouveau ticket
         </button>
       </div>
+
+      {/* Facture pour un professionnel (PR8, J6) — modale accessible
+          (Échap, piège de focus, focus restauré sur le bouton d'appel). */}
+      <Modal open={invoiceOpen} onClose={() => setInvoiceOpen(false)} title="Facture pour un professionnel">
+        <InvoiceForm
+          transactionId={transactionId}
+          transactionNumber={ticketNumber}
+          invoice={invoice}
+          onIssued={setInvoice}
+          onCancel={() => setInvoiceOpen(false)}
+        />
+      </Modal>
     </div>
   );
 }

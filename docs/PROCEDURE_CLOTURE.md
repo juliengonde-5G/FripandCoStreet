@@ -32,8 +32,29 @@ manager. Les libellés cités entre **gras** sont ceux affichés à l'écran.
    revenir à l'accueil.
 7. Le **PDF du rapport Z** peut être téléchargé depuis la liste des Z
    (bouton « PDF ») — il reprend les mêmes totaux, la ventilation par mode
-   de paiement, les mouvements de caisse et la mention légale du logiciel,
-   sans jamais indiquer « conforme NF525 ».
+   de paiement, la ventilation par vendeuse (ci-dessous), les mouvements de
+   caisse et la mention légale du logiciel, sans jamais indiquer « conforme
+   NF525 ».
+
+### Ventilation par vendeuse
+Quand les vendeuses s'identifient en caisse par leur code (voir
+`docs/GUIDE_VENDEUR.md`), le rapport Z indique, en plus des totaux de la
+journée, **combien de ventes et quel montant chaque vendeuse a encaissés** —
+sur l'écran de clôture comme sur le PDF, sous le titre **Ventes par
+vendeuse**. Les ventes encaissées sans identification (code non demandé, ou
+journée antérieure à la mise en service des codes) sont regroupées sous
+**Non identifiée** : elles ne disparaissent jamais du total.
+
+Cette ventilation est **recalculée à chaque lecture** à partir des ventes de
+la période, qui sont elles-mêmes inaltérables : elle dit donc toujours la
+même chose, mais elle ne fait pas partie de ce qui est scellé dans le Z. Une
+vente ne peut pas être réattribuée à une autre vendeuse après coup (la base
+le refuse), et la relève en cours de journée n'affecte que les ventes
+suivantes : celles déjà encaissées gardent le nom de celle qui les a faites.
+
+C'est un outil de suivi d'équipe, pas un contrôle fiscal : un écart de
+caisse reste l'écart de **la journée**, pas celui d'une vendeuse — la caisse
+est physiquement commune, et rien n'est compté par vendeuse à la relève.
 
 ### Que faire en cas d'écart important
 Un écart au-delà de la tolérance n'empêche pas de clôturer (le commentaire

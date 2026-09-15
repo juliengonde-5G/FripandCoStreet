@@ -8,8 +8,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query, Response
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -22,6 +23,12 @@ from app.models.pos import CashDrawer, Transaction, TransactionType, ZReport
 from app.models.receipt import Receipt
 from app.models.user import User
 from app.services import escpos_service
+from app.services.cashier_service import (
+    CashierService,
+    PinRateLimited,
+    sales_by_cashier,
+    serialize_cashier,
+)
 from app.services.client_service import ClientService, mask_email, mask_phone
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.jet import (
@@ -86,6 +93,16 @@ class CreatePosClientRequest(BaseModel):
     email: str | None = None
     phone: str | None = None
     newsletter_optin: bool = False
+
+
+def _client_ip(request: Request) -> str | None:
+    """IP client en tenant compte de X-Forwarded-For (Caddy est en frontal)
+    — meme extraction que `api/auth/router.py`, utilisee ici pour le
+    rate-limit du code PIN (PR8/J2)."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
 
 
 def _raise(exc: PosServiceError):
@@ -157,6 +174,7 @@ def _serialize_transaction(
     refund_of_sale: dict[str, str] | None = None,
     original_number_by_refund_id: dict[str, int] | None = None,
     clients_by_id: dict[str, dict] | None = None,
+    invoice_numbers: dict[str, str] | None = None,
 ) -> dict:
     """Serialise une transaction.
 
@@ -174,10 +192,16 @@ def _serialize_transaction(
     first_name, last_name}`` pour TOUTE la page appelante — jamais une
     requete par transaction. ``client`` vaut ``None`` quand `client_id`
     est absent, ou (defensif) quand l'appelant n'a pas fourni le mapping.
+
+    ``invoice_numbers`` (PR8/J5, voir `_load_invoice_numbers`) mappe de la
+    meme facon ``str(transaction_id) -> invoice_number`` : ``invoice_number``
+    vaut ``F-AAAA-NNNN`` sur une vente facturee, ``A-AAAA-NNNN`` sur
+    l'annulation d'une vente facturee, ``None`` partout ailleurs.
     """
     refund_of_sale = refund_of_sale or {}
     original_number_by_refund_id = original_number_by_refund_id or {}
     clients_by_id = clients_by_id or {}
+    invoice_numbers = invoice_numbers or {}
     tx_id = str(transaction.id)
     is_refund = transaction.transaction_type == TransactionType.refund
     refund_transaction_id = None if is_refund else refund_of_sale.get(tx_id)
@@ -197,6 +221,7 @@ def _serialize_transaction(
         "cancelled": False if is_refund else refund_transaction_id is not None,
         "refund_transaction_id": refund_transaction_id,
         "refund_reason": transaction.refund_reason,
+        "invoice_number": invoice_numbers.get(tx_id),
         "discount_type": transaction.discount_type.value if transaction.discount_type else None,
         "discount_value": (
             float(transaction.discount_value) if transaction.discount_value is not None else None
@@ -227,6 +252,14 @@ def _serialize_drawer(drawer: CashDrawer) -> dict:
         "is_open": drawer.is_open,
         "closed_by_guard": drawer.closed_by_guard,
         "z_report_id": str(drawer.z_report_id) if drawer.z_report_id else None,
+        # PR8/J2 — identites de caisse : qui a ouvert, qui tient la caisse
+        # en ce moment (la releve change la seconde, jamais la premiere).
+        "opened_by_cashier_id": (
+            str(drawer.opened_by_cashier_id) if drawer.opened_by_cashier_id else None
+        ),
+        "current_cashier_id": (
+            str(drawer.current_cashier_id) if drawer.current_cashier_id else None
+        ),
     }
 
 
@@ -242,7 +275,13 @@ def _serialize_movement(movement) -> dict:
     }
 
 
-def _serialize_z_report(z: ZReport) -> dict:
+def _serialize_z_report(z: ZReport, by_cashier: list[dict] | None = None) -> dict:
+    """Serialise un Z. `by_cashier` (PR8/J2) est la ventilation des ventes
+    par vendeuse, recalculee a la lecture (voir
+    `cashier_service.sales_by_cashier`) : elle n'est pas scellee dans le Z,
+    parce qu'elle se rededuit exactement des ventes de la periode, qui sont
+    immuables — et qu'ajouter un champ au payload signe serait une
+    evolution fiscale majeure."""
     return {
         "id": str(z.id),
         "report_number": z.report_number,
@@ -276,6 +315,8 @@ def _serialize_z_report(z: ZReport) -> dict:
         "hash": z.hash,
         "previous_hash": z.previous_hash,
         "created_at": z.created_at.isoformat() if z.created_at else None,
+        "cashier_id": str(z.cashier_id) if z.cashier_id else None,
+        "by_cashier": by_cashier if by_cashier is not None else [],
     }
 
 
@@ -320,6 +361,16 @@ async def _load_refund_links(
     return refund_of_sale, original_number_by_refund_id
 
 
+async def _load_invoice_numbers(
+    db: AsyncSession, transaction_ids: list[uuid.UUID]
+) -> dict[str, str]:
+    """Numeros de facture/avoir d'une page de transactions (PR8/J5), en UNE
+    requete — meme principe que `_load_clients`."""
+    from app.services.invoice_service import InvoiceService
+
+    return await InvoiceService(db).numbers_by_transaction(transaction_ids)
+
+
 async def _load_clients(db: AsyncSession, client_ids: list[uuid.UUID | None]) -> dict[str, dict]:
     """Charge, en UNE seule requete, les clients rattaches a une page de
     transactions (PR3) — evite le N+1 que ferait une requete par
@@ -346,6 +397,105 @@ async def _load_clients(db: AsyncSession, client_ids: list[uuid.UUID | None]) ->
 # ---------------------------------------------------------------------------
 
 
+async def _by_cashier(db: AsyncSession, z: ZReport) -> list[dict]:
+    """Ventilation des ventes par vendeuse d'UN Z (PR8/J2)."""
+    return (await sales_by_cashier(db, [z])).get(str(z.id), [])
+
+
+# ---------------------------------------------------------------------------
+# Vendeuses en caisse (PR8, docs/ARCHITECTURE_PR8.md J2) — identification
+# par code PIN et releve. Ce ne sont PAS des comptes : la route reste
+# protegee par le JWT du compte manager unique, le PIN ne fait qu'identifier
+# QUI encaisse derriere ce compte.
+# ---------------------------------------------------------------------------
+
+
+class IdentifyCashierRequest(BaseModel):
+    cashier_id: uuid.UUID
+    # 4 chiffres — la validation reelle (et le refus des suites triviales a
+    # la definition) vit dans `cashier_service.validate_pin`. Ici, on borne
+    # seulement la taille pour ne pas hacher n'importe quoi.
+    pin: str = Field(min_length=1, max_length=16)
+
+
+@router.get("/cashiers")
+async def list_pos_cashiers(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Vendeuses ACTIVES, pour les cartes de l'ecran d'identification.
+
+    `has_pin` permet au front de griser une vendeuse dont le code n'a pas
+    encore ete defini par le manager. Le hash, lui, ne sort jamais.
+    """
+    cashiers = await CashierService(db).list(only_active=True)
+    return {
+        "cashiers": [
+            {
+                "id": str(c.id),
+                "display_name": c.display_name,
+                "has_pin": c.pin_hash is not None,
+            }
+            for c in cashiers
+        ]
+    }
+
+
+@router.post("/cashiers/identify")
+async def identify_cashier(
+    body: IdentifyCashierRequest,
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Identifie une vendeuse par son code PIN (J2).
+
+    Le `db.commit()` du chemin d'ERREUR n'est pas un oubli : le refus vient
+    d'ecrire `cashier.pin_rejected` au JET, et le rollback implicite de
+    `get_db` effacerait cet evenement de securite (meme discipline que
+    `/auth/login`).
+    """
+    try:
+        cashier = await CashierService(db).identify(
+            cashier_id=body.cashier_id,
+            pin=body.pin,
+            ip=_client_ip(request),
+            user_id=user.id,
+        )
+    except PinRateLimited as exc:
+        await db.commit()
+        # `Retry-After` en plus du corps `{detail, code}` : l'ecran de
+        # caisse affiche un compte a rebours plutot qu'un message fige.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": str(exc), "code": exc.code, "retry_after": exc.retry_after},
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+    except PosServiceError as exc:
+        await db.commit()
+        _raise(exc)
+    await db.commit()
+    return {"cashier": serialize_cashier(cashier)}
+
+
+@router.post("/cashiers/release")
+async def release_cashier(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Releve : plus personne n'est identifie en caisse (J2).
+
+    Toujours 200, meme si personne ne tenait la caisse : l'etat voulu est
+    atteint. `released` dit si une identite a effectivement ete retiree.
+    """
+    cashier = await CashierService(db).release(user_id=user.id)
+    await db.commit()
+    return {
+        "released": cashier is not None,
+        "cashier": serialize_cashier(cashier) if cashier is not None else None,
+    }
+
+
 @router.get("/drawer/current")
 async def drawer_current(
     _user: Annotated[User, Depends(get_current_user)],
@@ -354,9 +504,18 @@ async def drawer_current(
     pos = PosService(db)
     drawer = await pos.get_open_drawer()
     if drawer is None:
-        return {"open": False}
+        # Caisse fermee : il n'existe aucun tiroir ou inscrire l'identite
+        # courante (PR8/J2) — le front conserve la vendeuse identifiee
+        # avant l'ouverture et la renvoie dans `POST /pos/drawer/open`.
+        return {"open": False, "current_cashier": None}
     today = await pos.drawer_snapshot(drawer)
-    return {"open": True, "drawer": _serialize_drawer(drawer), "today": today}
+    cashier = await CashierService(db).current_for_drawer(drawer)
+    return {
+        "open": True,
+        "drawer": _serialize_drawer(drawer),
+        "today": today,
+        "current_cashier": serialize_cashier(cashier) if cashier is not None else None,
+    }
 
 
 @router.post("/drawer/open")
@@ -370,6 +529,7 @@ async def drawer_open(
             user_id=user.id,
             opening_amount=body.opening_amount,
             breakdown=[d.model_dump() for d in body.breakdown] if body.breakdown else None,
+            cashier_id=body.cashier_id,
         )
     except PosServiceError as exc:
         _raise(exc)
@@ -393,7 +553,7 @@ async def drawer_close(
     except PosServiceError as exc:
         _raise(exc)
     await db.commit()
-    return _serialize_z_report(z_report)
+    return _serialize_z_report(z_report, await _by_cashier(db, z_report))
 
 
 @router.post("/cash-movements")
@@ -457,12 +617,14 @@ async def create_transaction(
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction.id])
     clients_by_id = await _load_clients(db, [transaction.client_id])
+    invoice_numbers = await _load_invoice_numbers(db, [transaction.id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
+        invoice_numbers=invoice_numbers,
     )
 
 
@@ -483,6 +645,7 @@ async def list_transactions(
         db, [t.id for t in transactions]
     )
     clients_by_id = await _load_clients(db, [t.client_id for t in transactions])
+    invoice_numbers = await _load_invoice_numbers(db, [t.id for t in transactions])
     return {
         "transactions": [
             _serialize_transaction(
@@ -490,6 +653,7 @@ async def list_transactions(
                 refund_of_sale=refund_of_sale,
                 original_number_by_refund_id=original_number_by_refund_id,
                 clients_by_id=clients_by_id,
+                invoice_numbers=invoice_numbers,
             )
             for t in transactions
         ]
@@ -510,12 +674,14 @@ async def get_transaction(
     )
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
     clients_by_id = await _load_clients(db, [transaction.client_id])
+    invoice_numbers = await _load_invoice_numbers(db, [transaction_id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
+        invoice_numbers=invoice_numbers,
     )
 
 
@@ -541,12 +707,14 @@ async def cancel_transaction(
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [refund_tx.id])
     clients_by_id = await _load_clients(db, [refund_tx.client_id])
+    invoice_numbers = await _load_invoice_numbers(db, [refund_tx.id])
     return _serialize_transaction(
         refund_tx,
         receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
+        invoice_numbers=invoice_numbers,
     )
 
 
@@ -961,12 +1129,14 @@ async def detach_client(
         transaction_id, transaction=transaction
     )
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
+    invoice_numbers = await _load_invoice_numbers(db, [transaction_id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id={},
+        invoice_numbers=invoice_numbers,
     )
 
 
@@ -1046,7 +1216,10 @@ async def list_z_reports(
     reports = (
         await db.execute(select(ZReport).order_by(ZReport.report_number.desc()).limit(limit))
     ).scalars().all()
-    return {"z_reports": [_serialize_z_report(z) for z in reports]}
+    grouped = await sales_by_cashier(db, list(reports))
+    return {
+        "z_reports": [_serialize_z_report(z, grouped.get(str(z.id), [])) for z in reports]
+    }
 
 
 @router.get("/z-reports/regularization/preview")
@@ -1088,7 +1261,7 @@ async def create_regularization(
     except PosServiceError as exc:
         _raise(exc)
     await db.commit()
-    return _serialize_z_report(z_report)
+    return _serialize_z_report(z_report, await _by_cashier(db, z_report))
 
 
 @router.get("/z-reports/{z_report_id}/pdf")
@@ -1145,4 +1318,4 @@ async def get_z_report(
     z = (await db.execute(select(ZReport).where(ZReport.id == z_report_id))).scalar_one_or_none()
     if z is None:
         raise PosServiceError("Z introuvable.", code="not_found", status_code=404)
-    return _serialize_z_report(z)
+    return _serialize_z_report(z, await _by_cashier(db, z))

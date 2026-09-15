@@ -28,7 +28,9 @@ async def test_close_drawer_without_open_one_is_rejected(client, auth_headers):
 async def test_drawer_current_reports_closed_state(client, auth_headers):
     r = await client.get("/api/pos/drawer/current", headers=auth_headers)
     assert r.status_code == 200
-    assert r.json() == {"open": False}
+    # `current_cashier` (PR8/J2) est toujours present, meme caisse fermee :
+    # il n'existe alors aucun tiroir ou inscrire l'identite courante.
+    assert r.json() == {"open": False, "current_cashier": None}
 
 
 async def test_drawer_current_reports_open_totals(client, auth_headers, open_drawer):

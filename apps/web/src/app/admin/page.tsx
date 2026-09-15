@@ -10,6 +10,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import AccountingTab from "@/components/admin/AccountingTab";
 import BackupsTab from "@/components/admin/BackupsTab";
+import CashiersTab from "@/components/admin/CashiersTab";
 import FiscalArchivesTab from "@/components/admin/FiscalArchivesTab";
 import RequireAuth from "@/components/layout/RequireAuth";
 import Sidebar from "@/components/layout/Sidebar";
@@ -43,12 +44,13 @@ import {
 import { findPairedUsbDevice, getStoredPrinter, isWebUsbSupported, pairUsbPrinter, sendBytes } from "@/lib/webusb-printer";
 
 /** Onglets de la page — l'ordre suit celui de la barre latérale (PR7, I1). */
-type Tab = "settings" | "hardware" | "clients" | "accounting" | "fiscal" | "backups";
+type Tab = "settings" | "hardware" | "clients" | "cashiers" | "accounting" | "fiscal" | "backups";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "settings", label: "Réglages" },
   { id: "hardware", label: "Matériel" },
   { id: "clients", label: "Clients" },
+  { id: "cashiers", label: "Vendeuses" },
   { id: "accounting", label: "Comptabilité" },
   { id: "fiscal", label: "Archives fiscales" },
   { id: "backups", label: "Sauvegardes" },
@@ -125,6 +127,9 @@ function AdminTabs() {
       )}
 
       {tab === "clients" && <ClientsSection />}
+
+      {/* PR8 (J3) — vendeuses par code PIN et réglage d'identification. */}
+      {tab === "cashiers" && <CashiersTab />}
 
       {tab === "accounting" && <AccountingTab />}
 

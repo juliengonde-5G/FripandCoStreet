@@ -13,6 +13,14 @@ de caisse (billet par billet ou en montant global), saisis-le, puis touche
 **Ouvrir la caisse — [montant]**. Tant que la caisse n'est pas ouverte,
 impossible d'encaisser.
 
+## S'identifier et faire la relève
+Touche **S'identifier** en haut de la caisse, choisis ton prénom et tape ton
+code à quatre chiffres : ton nom s'affiche alors à côté du tiroir. Si la
+boutique l'exige, le code est demandé avant d'ouvrir la caisse et avant
+d'encaisser. Pour passer la main, touche **Relève** : le panier en cours
+reste à l'écran, la suivante s'identifie et termine la vente. Après cinq
+codes faux, l'écran affiche le temps à attendre avant de réessayer.
+
 ## Encaisser une vente (3 gestes)
 1. Tape le prix sur le pavé numérique (le libellé est facultatif) puis
    touche **Ajouter au panier**. Répète pour chaque article du panier.
@@ -86,3 +94,11 @@ En haut à droite de l'écran de caisse : **Accueil** (le tableau de bord),
 ces trois boutons sont regroupés sous le bouton **⋯**.
 Sortir de la caisse ne la ferme pas : tu la retrouveras telle quelle en
 revenant — pense quand même à la **clôturer** le soir.
+
+## Facture pour un professionnel
+Après la vente, touche **Facture pro** (ou **Tickets du jour** → le ticket
+→ **Facture pro**). Saisis la raison sociale, le SIRET (l'écran dit s'il
+est valide), le n° de TVA s'il y en a un, puis l'adresse, et touche
+**Émettre la facture** : le numéro s'affiche et **Télécharger le PDF** le
+donne à la cliente. Une vente ne se facture qu'une fois ; si tu annules un
+ticket facturé, l'avoir est créé tout seul.

@@ -38,6 +38,7 @@ type IconName =
   | "home"
   | "cash"
   | "users"
+  | "badge"
   | "settings"
   | "printer"
   | "accounting"
@@ -68,6 +69,16 @@ const ICON_PATHS: Record<IconName, React.ReactNode> = {
       <circle cx="9" cy="7" r="4" />
       <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </>
+  ),
+  // PR8 (J3) — « Vendeuses » : un badge de comptoir (porte-nom), pas une
+  // silhouette de plus : l'entrée Clients voisine utilise déjà `users`.
+  badge: (
+    <>
+      <rect x="3" y="4" width="18" height="17" rx="2" />
+      <path d="M9 2h6v3H9z" />
+      <circle cx="12" cy="11" r="2.5" />
+      <path d="M8 18.5a4 4 0 0 1 8 0" />
     </>
   ),
   settings: (
@@ -180,6 +191,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/caisse", label: "Caisse", icon: "cash" },
       { href: "/admin?tab=clients", label: "Clients", icon: "users", matchQuery: { tab: "clients" } },
+      { href: "/admin?tab=cashiers", label: "Vendeuses", icon: "badge", matchQuery: { tab: "cashiers" } },
     ],
   },
   {

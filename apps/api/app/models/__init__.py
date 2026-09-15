@@ -28,6 +28,8 @@ from app.models.communication import (
     CommunicationStatus,
 )
 from app.models.database_backup import BackupStatus, BackupTrigger, DatabaseBackup
+from app.models.cashier import Cashier
+from app.models.invoice import Invoice, InvoiceKind
 
 __all__ = [
     "Base",
@@ -60,4 +62,7 @@ __all__ = [
     "DatabaseBackup",
     "BackupTrigger",
     "BackupStatus",
+    "Cashier",
+    "Invoice",
+    "InvoiceKind",
 ]

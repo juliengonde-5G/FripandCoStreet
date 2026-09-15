@@ -16,6 +16,7 @@ import Modal from "@/components/ui/Modal";
 import NumPad from "@/components/ui/NumPad";
 import CashDrawerOpenModal from "@/components/pos/CashDrawerOpenModal";
 import CashDrawerCloseModal from "@/components/pos/CashDrawerCloseModal";
+import CashierIdentifyScreen from "@/components/pos/CashierIdentifyScreen";
 import ClientSelectionScreen from "@/components/pos/ClientSelectionScreen";
 import type { DenominationLine } from "@/components/pos/DenominationGrid";
 import MultiStepPaymentWizard from "@/components/pos/MultiStepPaymentWizard";
@@ -23,10 +24,12 @@ import PosTopBar from "@/components/pos/PosTopBar";
 import ReceiptPreviewCard from "@/components/pos/ReceiptPreviewCard";
 import TicketsPanel from "@/components/pos/TicketsPanel";
 import { api, ApiError } from "@/lib/api";
+import { fetchPosSettings, releaseCashier } from "@/lib/cashier";
 import { formatClientName, formatCurrency } from "@/lib/format";
 import { clampDiscountValue, computeBrut, computeDiscountAmount } from "@/lib/posCalc";
 import { kickDrawer, loadHardwareSettings } from "@/lib/printing";
 import type {
+  CashierRef,
   CbStatusConfig,
   DiscountInput,
   DrawerCurrentResponse,
@@ -82,6 +85,16 @@ export default function CaissePage() {
   const [selectedClient, setSelectedClient] = useState<PosClient | null>(null);
   const [clientScreenOpen, setClientScreenOpen] = useState(false);
 
+  // PR8 (J4) — vendeuse qui encaisse. L'identité vit sur le tiroir
+  // (`current_cashier`), pas dans le navigateur : cet état n'en est qu'un
+  // reflet, réaligné à chaque lecture de la caisse. `cashierRequired`
+  // vient du réglage `pos` et décide si l'on peut encaisser anonymement.
+  const [cashier, setCashier] = useState<CashierRef | null>(null);
+  const [cashierRequired, setCashierRequired] = useState(false);
+  const [cashierBusy, setCashierBusy] = useState(false);
+  const [cashierScreenOpen, setCashierScreenOpen] = useState(false);
+  const [cashierReason, setCashierReason] = useState<string | null>(null);
+
   const [ticketsOpen, setTicketsOpen] = useState(false);
   const [closeDrawerOpen, setCloseDrawerOpen] = useState(false);
   const [lastZ, setLastZ] = useState<ZReport | null>(null);
@@ -94,6 +107,16 @@ export default function CaissePage() {
   const [drawerKicking, setDrawerKicking] = useState(false);
 
   const clientUuidRef = useRef<string>(newUuid());
+
+  // Geste interrompu par l'identification, rejoué dès qu'une vendeuse est
+  // identifiée : la vente qu'on venait de valider, ou l'ouverture de
+  // caisse qu'on venait de lancer. Jamais les deux à la fois.
+  const pendingSaleRef = useRef<PaymentInput[] | null>(null);
+  const pendingOpenRef = useRef<{ opening_amount: number; opening_breakdown: DenominationLine[] | null } | null>(null);
+  // Remonte le composant de paiement à zéro après une vente reprise :
+  // sans cela, ses moyens de paiement déjà saisis survivraient au ticket
+  // suivant.
+  const [paymentKey, setPaymentKey] = useState(0);
 
   // Rend le contenu de la page sous-jacente inert (non interactif, hors
   // piège de focus) tant qu'un panneau plein écran ou une modale est
@@ -108,7 +131,8 @@ export default function CaissePage() {
   // exclu dans nos tests — `aria-hidden="true"`, lui, est le mécanisme
   // que les moteurs de requête par rôle respectent de façon fiable.
   const mainContentRef = useRef<HTMLDivElement | null>(null);
-  const anyOverlayOpen = discountEditorOpen || paymentOpen || ticketsOpen || closeDrawerOpen || clientScreenOpen;
+  const anyOverlayOpen =
+    discountEditorOpen || paymentOpen || ticketsOpen || closeDrawerOpen || clientScreenOpen || cashierScreenOpen;
   useEffect(() => {
     const el = mainContentRef.current;
     if (!el) return;
@@ -121,6 +145,9 @@ export default function CaissePage() {
     try {
       const data = await api.get<DrawerCurrentResponse>("/api/pos/drawer/current");
       setDrawerState(data);
+      // Un backend antérieur à PR8 n'envoie pas le champ : dans ce cas on
+      // ne touche pas à la vendeuse connue plutôt que de l'effacer.
+      if ("current_cashier" in data) setCashier(data.current_cashier ?? null);
     } catch (err) {
       setBanner(err instanceof ApiError ? err.detail : "Impossible de contacter la caisse.");
     } finally {
@@ -151,6 +178,7 @@ export default function CaissePage() {
     void loadDrawer();
     void loadCbConfig();
     void loadShopSettings();
+    void fetchPosSettings().then((s) => setCashierRequired(s.cashier_required));
     void loadHardwareSettings().then(setHardware);
   }, []);
 
@@ -169,6 +197,9 @@ export default function CaissePage() {
       if (err instanceof ApiError) {
         setBanner(err.detail);
         if (err.code === "drawer_closed") void loadDrawer();
+        // Le serveur exige une vendeuse : on ouvre l'écran plutôt que de
+        // laisser un message d'erreur sans geste possible.
+        if (err.code === "cashier_required") openCashierScreen("Identifie-toi pour continuer.");
       } else {
         setBanner("Une erreur inattendue est survenue.");
       }
@@ -176,16 +207,91 @@ export default function CaissePage() {
     }
   };
 
+  const openCashierScreen = (reason: string | null): void => {
+    setCashierReason(reason);
+    setCashierScreenOpen(true);
+  };
+
+  const doOpenDrawer = async (
+    payload: { opening_amount: number; opening_breakdown: DenominationLine[] | null },
+    cashierId: string | null,
+  ): Promise<void> => {
+    setOpenDrawerError(null);
+    try {
+      await api.post("/api/pos/drawer/open", {
+        opening_amount: payload.opening_amount,
+        breakdown: payload.opening_breakdown,
+        // La vendeuse qui ouvre est notée sur le tiroir (J2) ; omis quand
+        // personne n'est identifiée, plutôt qu'un `null` inutile.
+        ...(cashierId ? { cashier_id: cashierId } : {}),
+      });
+      await loadDrawer();
+    } catch (err) {
+      setOpenDrawerError(err instanceof ApiError ? err.detail : "Impossible d'ouvrir la caisse.");
+    }
+  };
+
   const handleOpenDrawer = async (payload: {
     opening_amount: number;
     opening_breakdown: DenominationLine[] | null;
   }): Promise<void> => {
-    setOpenDrawerError(null);
+    // PR8 (J4) : quand l'identification est obligatoire, on la demande
+    // AVANT d'ouvrir — le fond de caisse compté n'est pas perdu, il est
+    // rejoué tel quel après l'identification.
+    if (cashierRequired && !cashier) {
+      pendingSaleRef.current = null;
+      pendingOpenRef.current = payload;
+      openCashierScreen("Identifie-toi pour ouvrir la caisse.");
+      return;
+    }
+    await doOpenDrawer(payload, cashier?.id ?? null);
+  };
+
+  // --- Vendeuse (PR8, J4) -----------------------------------------------
+
+  const handleCashierIdentified = (identified: CashierRef): void => {
+    setCashier(identified);
+    setCashierScreenOpen(false);
+    setCashierReason(null);
+    setBanner(null);
+    const pendingSale = pendingSaleRef.current;
+    const pendingOpen = pendingOpenRef.current;
+    pendingSaleRef.current = null;
+    pendingOpenRef.current = null;
+    void loadDrawer();
+    if (pendingSale) {
+      void (async () => {
+        try {
+          await commitSale(pendingSale);
+          // Vente enregistrée : on referme le paiement et on repart d'un
+          // composant neuf (les moyens de paiement saisis sont consommés).
+          setPaymentOpen(false);
+          setPaymentKey((k) => k + 1);
+        } catch {
+          // Le message est déjà affiché (bandeau + écran de paiement) ;
+          // la vendeuse peut revalider elle-même.
+        }
+      })();
+      return;
+    }
+    if (pendingOpen) {
+      void doOpenDrawer(pendingOpen, identified.id);
+    }
+  };
+
+  /** Relève : la caisse n'a plus de vendeuse identifiée. Le panier en
+   * cours n'est PAS touché — la vendeuse suivante reprend le ticket là où
+   * il en est (J4). */
+  const handleReleaseCashier = async (): Promise<void> => {
+    setCashierBusy(true);
     try {
-      await api.post("/api/pos/drawer/open", { opening_amount: payload.opening_amount, breakdown: payload.opening_breakdown });
+      await releaseCashier();
+      setCashier(null);
       await loadDrawer();
     } catch (err) {
-      setOpenDrawerError(err instanceof ApiError ? err.detail : "Impossible d'ouvrir la caisse.");
+      setBanner(err instanceof ApiError ? err.detail : "Relève impossible.");
+    } finally {
+      setCashierBusy(false);
     }
   };
 
@@ -221,7 +327,7 @@ export default function CaissePage() {
   const cardDisabled = !cbConfig?.configured || cbConfig?.reader_online === false;
   const cardDisabledReason = cbConfig?.message || (!cbConfig?.configured ? "Terminal non configuré." : "Terminal hors ligne.");
 
-  const handleCommitSale = async (payments: PaymentInput[]): Promise<void> => {
+  const commitSale = async (payments: PaymentInput[]): Promise<void> => {
     await runGuarded(async () => {
       const tx = await api.post<TransactionOut>("/api/pos/transactions", {
         client_uuid: clientUuidRef.current,
@@ -237,6 +343,21 @@ export default function CaissePage() {
       setDiscount(null);
       await loadDrawer();
     });
+  };
+
+  const handleCommitSale = async (payments: PaymentInput[]): Promise<void> => {
+    try {
+      await commitSale(payments);
+    } catch (err) {
+      // 422 `cashier_required` : la vente n'est pas perdue, elle est
+      // rejouée telle quelle dès que quelqu'un s'est identifié (J4).
+      if (err instanceof ApiError && err.code === "cashier_required") {
+        pendingSaleRef.current = payments;
+        pendingOpenRef.current = null;
+        openCashierScreen("Identifie-toi pour encaisser cette vente.");
+      }
+      throw err;
+    }
   };
 
   const handleNewTicket = (): void => {
@@ -301,6 +422,19 @@ export default function CaissePage() {
     return (
       <RequireAuth>
         <CashDrawerOpenModal onSubmit={handleOpenDrawer} error={openDrawerError} />
+        {/* Caisse fermée : l'identification passe par-dessus l'écran
+            d'ouverture (z-62 > z-58) quand le réglage l'exige. */}
+      <CashierIdentifyScreen
+        open={cashierScreenOpen}
+        reason={cashierReason}
+        onClose={() => {
+          setCashierScreenOpen(false);
+          setCashierReason(null);
+          pendingSaleRef.current = null;
+          pendingOpenRef.current = null;
+        }}
+        onIdentified={handleCashierIdentified}
+      />
       </RequireAuth>
     );
   }
@@ -324,6 +458,10 @@ export default function CaissePage() {
           onCashMovement={handleCashMovement}
           onOpenTickets={() => setTicketsOpen(true)}
           onCloseDrawer={() => setCloseDrawerOpen(true)}
+          cashier={cashier}
+          cashierBusy={cashierBusy}
+          onIdentifyCashier={() => openCashierScreen(null)}
+          onReleaseCashier={() => void handleReleaseCashier()}
         />
 
         {banner && (
@@ -577,6 +715,7 @@ export default function CaissePage() {
       </Modal>
 
       <MultiStepPaymentWizard
+        key={paymentKey}
         open={paymentOpen}
         totalTtc={totalTtc}
         clientUuid={clientUuidRef.current}
@@ -584,6 +723,18 @@ export default function CaissePage() {
         cardDisabledReason={cardDisabledReason}
         onClose={() => setPaymentOpen(false)}
         onCommit={handleCommitSale}
+      />
+
+      <CashierIdentifyScreen
+        open={cashierScreenOpen}
+        reason={cashierReason}
+        onClose={() => {
+          setCashierScreenOpen(false);
+          setCashierReason(null);
+          pendingSaleRef.current = null;
+          pendingOpenRef.current = null;
+        }}
+        onIdentified={handleCashierIdentified}
       />
 
       <ClientSelectionScreen

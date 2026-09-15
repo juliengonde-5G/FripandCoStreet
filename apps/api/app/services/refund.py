@@ -107,9 +107,15 @@ class RefundService:
 
         from app.services.pos import DrawerClosed, PosService
 
-        drawer = await PosService(self.db).get_open_drawer()
+        pos = PosService(self.db)
+        drawer = await pos.get_open_drawer()
         if drawer is None:
             raise DrawerClosed()
+        # PR8/J2 — une annulation est une operation de caisse a part
+        # entiere : elle porte la vendeuse identifiee a cet instant, et
+        # elle est refusee (422 `cashier_required`) si le reglage l'exige
+        # et que personne ne tient la caisse.
+        cashier_id = await pos.resolve_cashier(drawer)
 
         original = (
             await self.db.execute(select(Transaction).where(Transaction.id == original_tx_id))
@@ -157,6 +163,8 @@ class RefundService:
             transaction_type=TransactionType.refund,
             user_id=user_id,
             client_uuid=client_uuid,
+            # Hors signature, posee a l'INSERT puis gelee (migration 0008).
+            cashier_id=cashier_id,
             original_transaction_id=original.id,
             refund_reason=reason,
             discount_type=original.discount_type,
@@ -214,6 +222,7 @@ class RefundService:
             refund_tx,
             shop=await SettingsService(self.db).get("shop"),
             original_number=original.transaction_number,
+            cashier_label=await pos.cashier_label(cashier_id),
         )
         self.db.add(Receipt(transaction_id=refund_tx.id, content=receipt_text))
 
@@ -225,6 +234,18 @@ class RefundService:
                 "original_number": original.transaction_number,
                 "reason": reason,
             },
+        )
+
+        # PR8/J5 — vente FACTUREE : l'annulation emet automatiquement
+        # l'avoir correspondant (`A-AAAA-NNNN`), dans la meme transaction
+        # SQL et sous le meme verrou fiscal (deja tenu ici). Ne fait rien
+        # si la vente n'etait pas facturee, ce qui est le cas courant ;
+        # refuse (409 `invoiced_partial_refund`) si l'annulation ne solde
+        # pas la vente entiere, un avoir partiel n'etant pas au perimetre.
+        from app.services.invoice_service import InvoiceService
+
+        await InvoiceService(self.db).credit_note_for_cancellation(
+            original, refund_tx, user_id=user_id
         )
 
         await self.db.flush()

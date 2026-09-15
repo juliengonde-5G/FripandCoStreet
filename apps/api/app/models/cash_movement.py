@@ -58,3 +58,10 @@ class CashMovement(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
+    # PR8 (J1) — vendeuse qui a fait le mouvement, recopiee depuis
+    # `cash_drawers.current_cashier_id`. La table est append-only
+    # (`fripco_protect_cash_movement`) : la colonne est donc gelee par
+    # construction, comme toutes les autres.
+    cashier_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cashiers.id"), nullable=True
+    )

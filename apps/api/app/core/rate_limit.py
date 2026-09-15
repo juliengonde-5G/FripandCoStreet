@@ -64,3 +64,39 @@ async def reset_login_rate_limit(request: Request) -> None:
     """Reinitialise le compteur du client courant (appele au login reussi)."""
     key = _client_key(request, "login")
     await _reset(key)
+
+
+# ---------------------------------------------------------------------------
+# Code PIN des vendeuses (PR8, docs/ARCHITECTURE_PR8.md J2) — 5 essais / 5
+# min PAR VENDEUSE ET PAR IP. Compteur distinct de celui du login manager
+# (cle prefixee differemment) : bloquer une vendeuse qui se trompe de code
+# ne doit jamais bloquer la connexion du manager depuis le meme poste, et
+# reciproquement. Valeurs figees ici plutot que dans `Settings` : ce sont
+# des essais sur un code a 4 chiffres, pas un reglage d'exploitation.
+# ---------------------------------------------------------------------------
+
+CASHIER_PIN_RATE_LIMIT_ATTEMPTS = 5
+CASHIER_PIN_RATE_LIMIT_WINDOW_SECONDS = 300
+
+
+def _cashier_pin_key(cashier_id: str, ip: str | None) -> str:
+    return f"cashier_pin:{ip or 'unknown'}:{cashier_id}"
+
+
+async def cashier_pin_rate_limit(cashier_id: str, ip: str | None) -> None:
+    """Compte un essai de code PIN ; leve 429 (avec `Retry-After`) au-dela.
+
+    Prend l'IP deja extraite par l'appelant (et non la `Request`) : la
+    verification a lieu dans le service, pas dans une dependance FastAPI,
+    parce que l'echec doit d'abord etre journalise au JET.
+    """
+    await _check(
+        _cashier_pin_key(cashier_id, ip),
+        max_attempts=CASHIER_PIN_RATE_LIMIT_ATTEMPTS,
+        window_seconds=CASHIER_PIN_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+
+async def reset_cashier_pin_rate_limit(cashier_id: str, ip: str | None) -> None:
+    """Reinitialise le compteur (appele sur une identification reussie)."""
+    await _reset(_cashier_pin_key(cashier_id, ip))

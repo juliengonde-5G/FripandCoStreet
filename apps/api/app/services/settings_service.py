@@ -88,6 +88,12 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
     #   monthly : carte "YYYY-MM" -> objectif ; un mois absent herite de
     #             monthly["default"] s'il existe, sinon 0.
     "targets": {"daily": "0.00", "monthly": {}},
+    # PR8 (J2, docs/ARCHITECTURE_PR8.md) — identification des vendeuses en
+    # caisse. `cashier_required` a **false** par defaut : la boutique tourne
+    # exactement comme avant PR8 tant que le manager n'a pas cree ses
+    # vendeuses. Une fois vrai, aucune vente, annulation ni mouvement de
+    # caisse n'est possible sans vendeuse identifiee (422 `cashier_required`).
+    "pos": {"cashier_required": False},
 }
 
 
@@ -111,6 +117,15 @@ class SettingsService:
             return Decimal(str(fiscal.get("tva_rate", DEFAULT_TVA_RATE)))
         except Exception:
             return DEFAULT_TVA_RATE
+
+    async def get_cashier_required(self) -> bool:
+        """Reglage `pos.cashier_required` (PR8/J2) — booleen tolerant aux
+        valeurs heritees d'un JSONB ecrit a la main (`"true"`, `1`...)."""
+        pos = await self.get("pos")
+        value = pos.get("cashier_required", False)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     async def set(
         self,

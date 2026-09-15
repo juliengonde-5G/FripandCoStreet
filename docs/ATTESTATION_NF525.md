@@ -68,9 +68,15 @@ mono-poste, mono-utilisateur :
   matériel — chaque modification journalisée.
 - **Clôtures périodiques, archivage et exports comptables** : voir §3.3 et
   §3.4.
+- **Facture professionnelle et avoir** : une vente peut, à la demande d'un
+  client professionnel, donner lieu à une facture numérotée (`F-AAAA-NNNN`)
+  figeant sa raison sociale, son SIRET et son adresse ; l'annulation d'une
+  vente facturée émet automatiquement l'avoir correspondant
+  (`A-AAAA-NNNN`).
 
 Sont explicitement **hors périmètre** : gestion de stock/catalogue produit,
-programme de fidélité, facturation B2B, avoir, coupons, personal shopper.
+programme de fidélité, coupons, personal shopper, facture sur une
+annulation partielle (refusée, l'avoir couvrant l'annulation totale).
 Aucune de ces fonctions ne participe donc à la chaîne de preuve décrite
 ci-dessous.
 
@@ -138,6 +144,7 @@ ou `BEFORE INSERT OR UPDATE OR DELETE` selon la table, par table protégée) :
 | `receipts` | `trg_protect_receipt` | `fripco_protect_receipt()` | Suppression interdite ; contenu et transaction figés — seuls `duplicate_count`, `printed_count` et `printed_at` restent mutables (compteurs de relecture/réimpression, voir §4) | `0002_pos_fiscal.py:471-493`, étendue par `0004_receipts_printed.py:28-66` |
 | `consents` | `trg_protect_consent` | `fripco_protect_consent()` | UPDATE/DELETE toujours interdits (registre de consentement append-only) | `0003_clients_email.py:174-189` |
 | `journal_events` | `trg_protect_journal_event` | `fripco_protect_journal_event()` | UPDATE/DELETE toujours interdits (voir §3.2) | `0001_initial.py` |
+| `invoices` | `trg_protect_invoice` | `fripco_protect_invoice()` | Suppression interdite ; facture et avoir figés dès l'émission — le seul UPDATE toléré est celui qui pose `pdf_sha256` alors qu'il valait `NULL` (empreinte du PDF, scellée au premier téléchargement, voir §3.4) | `0008_cashiers_invoices.py` |
 
 Chaque migration exécute chaque instruction SQL (création de fonction,
 suppression puis création de trigger) séparément, contrainte du pilote
@@ -169,7 +176,13 @@ clôture de caisse (`FISCAL_WRITE_LOCK_KEY = 5_252_026`,
 `fiscal.py:33-37, 83-84` ; acquis par `PosService.create_transaction`,
 `RefundService.cancel_transaction` et `PosService.close_drawer`,
 `apps/api/app/services/pos.py:136, 552`, `refund.py:102`). Aucune vente ne
-peut donc s'intercaler entre le calcul d'un Z et sa signature.
+peut donc s'intercaler entre le calcul d'un Z et sa signature. Depuis PR8,
+**le numéro de facture et d'avoir est attribué sous ce même verrou**
+(`InvoiceService.issue` et `InvoiceService.credit_note_for_cancellation`,
+`apps/api/app/services/invoice_service.py`) : la séquence `F-AAAA-NNNN` /
+`A-AAAA-NNNN`, remise à `0001` à chaque année civile (fuseau de la
+boutique), est donc sans trou ni doublon, y compris sur deux émissions
+concurrentes.
 
 ### 3.2 Sécurisation
 
@@ -213,7 +226,16 @@ règle également énoncée dans `CLAUDE.md`).
   (`system.job_failed`), utilisé par la garde fiscale 23:59
   (`apps/api/app/jobs.py`, voir §3.3) — jamais avalé en silence.
 - **Vérifications d'intégrité** : chaque contrôle de la chaîne de vente
-  lancé depuis l'administration (`fiscal.integrity_checked`).
+  lancé depuis l'administration (`fiscal.integrity_checked`), et toute
+  divergence constatée en servant un document scellé
+  (`system.integrity_alert` — aujourd'hui le PDF d'une facture dont
+  l'empreinte ne correspond plus à celle enregistrée, voir §3.4).
+- **Facture professionnelle et avoir** : émission d'une facture
+  (`invoice.issued`) et émission automatique de l'avoir à l'annulation
+  (`invoice.credit_note_issued`) — chaînés dans le JET au même titre que
+  les ventes, avec pour seul contenu des identifiants (identifiant de
+  facture, de transaction et numéro de facture), jamais la raison sociale
+  ni le SIRET du client professionnel.
 
 **Exports et téléchargements.** Aucun export ou téléchargement (CSV
 comptable, FEC, export brut, archive de clôture, export fiscal à la
@@ -225,7 +247,9 @@ est appelé par les six routes de téléchargement de l'administration (CSV
 mensuel, FEC journalier, FEC mensuel, export de table brute, archive de
 clôture, export fiscal JSON/XML — `admin/router.py:478, 505, 531, 579, 663,
 735`), et le téléchargement du PDF d'un Z l'appelle indépendamment depuis
-`apps/api/app/api/pos/router.py:937-976`. Les autres constantes
+`apps/api/app/api/pos/router.py:937-976`. Le PDF d'une facture ou d'un avoir
+fait de même (`kind = "invoice_pdf"`,
+`apps/api/app/api/pos/invoices_router.py`). Les autres constantes
 d'événement PR4 (`accounting.export_created`, `accounting.mismatch`,
 `closure.created`, `closure.failed`) sont déclarées dans
 `apps/api/app/services/jet.py` et écrites respectivement par
@@ -461,6 +485,25 @@ montants de caisse, les mouvements, les cumuls perpétuels, le hash et le
 (`apps/api/app/api/pos/router.py:937-980`), qui journalise
 `export.downloaded` (kind `z_report_pdf`) avant de servir le fichier.
 
+**PDF de facture et d'avoir** (`apps/api/app/services/invoice_pdf.py`) :
+même canevas invariant que le PDF du Z — deux rendus du même document
+produisent les mêmes octets, donc la même empreinte — et c'est ce qui rend
+la facture opposable dans le temps : au **premier** téléchargement,
+l'empreinte SHA-256 du document est scellée dans `invoices.pdf_sha256`
+(seul UPDATE que le trigger d'immuabilité tolère, et une seule fois) ; aux
+téléchargements suivants, le document est régénéré et son empreinte
+comparée à celle scellée, une divergence faisant échouer la requête
+(`pdf_mismatch`) après journalisation de `system.integrity_alert`
+(`apps/api/app/api/pos/invoices_router.py`). Le document porte les mentions
+légales d'une facture entre professionnels (pénalités de retard au taux
+d'intérêt légal, indemnité forfaitaire de recouvrement de 40 €, TVA
+exigible à la livraison), le numéro de facture, sa date et le numéro du
+ticket associé — jamais « conforme NF525 ». Les factures et avoirs de la
+période figurent par ailleurs dans l'archive de clôture scellée et dans
+l'export fiscal à la demande, sous la clé `invoices`
+(`apps/api/app/services/invoice_service.py::invoice_snapshot_dicts`,
+appelée par `FiscalExportService.build_snapshot`).
+
 À la date de rédaction, l'ensemble de cette section (services, migration
 `0005`, routes d'administration et de caisse, écran **Comptabilité** et
 écran **Archives fiscales**) est écrit, raccordé de bout en bout et
@@ -515,6 +558,25 @@ acceptables pour une caisse mono-poste auto-attestée.
   (`apps/api/alembic/versions/0004_receipts_printed.py:28-66`). Ces
   compteurs opérationnels ne portent aucune information fiscale et ne
   contredisent pas l'intégrité du ticket.
+- **Identité de la vendeuse, hors signature mais gelée.** Depuis PR8, chaque
+  vente, annulation et mouvement de caisse porte l'identité de la vendeuse
+  qui a encaissé (`cashier_id`, table `cashiers` — des identités de caisse
+  protégées par un code PIN, pas des comptes utilisateurs). Cette colonne
+  **n'entre pas dans le payload signé**
+  (`apps/api/app/services/fiscal.py::_transaction_payload` ne la référence
+  pas) : le hash d'une vente est rigoureusement le même avec ou sans
+  vendeuse, et la mise en service des codes n'a donc aucun effet sur la
+  chaîne de preuve existante. Contrairement à `client_id`, elle est en
+  revanche **posée à l'INSERT puis gelée** : le trigger
+  `fripco_protect_signed_transaction`, réécrit par
+  `apps/api/alembic/versions/0008_cashiers_invoices.py`, refuse toute
+  modification de `cashier_id` sur une vente signée, et `cash_movements`
+  reste intégralement en ajout seul. Une vente ne peut donc pas être
+  réattribuée à une autre vendeuse après coup. La ventilation des ventes par
+  vendeuse affichée sur le rapport Z est **recalculée à la lecture** depuis
+  ces ventes immuables, et non scellée dans le Z : aucun champ n'a été
+  ajouté au payload signé d'un Z, donc aucune version de signature fiscale
+  n'a eu à être incrémentée.
 - **Signature à clé secrète, pas à clé publique.** La chaîne de preuve
   (ventes, Z, JET) est scellée par HMAC-SHA256, un algorithme à **clé
   secrète** (`FISCAL_SIGNING_KEY`). Cela signifie qu'un tiers extérieur
@@ -563,6 +625,13 @@ acceptables pour une caisse mono-poste auto-attestée.
   donnée fiscale de lui-même ; la seule opération de suppression prévue
   (anonymisation RGPD d'une fiche client) préserve intégralement les ventes
   et n'efface qu'une colonne hors signature (`client_id`, remise à `NULL`).
+  Les **factures et avoirs professionnels** relèvent, eux, de la
+  conservation **10 ans** des pièces comptables (art. L.123-22 du code de
+  commerce) et sont **exclus de l'anonymisation RGPD** : une raison sociale
+  et un SIRET ne sont pas des données personnelles d'une personne physique,
+  et le client professionnel n'a jamais de fiche client
+  (`apps/api/app/services/client_service.py::anonymize`, qui ne touche
+  aucune facture).
 - **Sauvegarde et test de restauration.** Une sauvegarde complète de la
   base de données (`pg_dump | gzip`) est programmée quotidiennement
   (`docs/DEPLOIEMENT.md` §5), avec une rétention de 60 jours. **Une

@@ -27,7 +27,7 @@ import { useRouter } from "next/navigation";
 import CashMovementButton from "@/components/pos/CashMovementButton";
 import { formatCurrency } from "@/lib/format";
 import { logout } from "@/lib/logout";
-import type { CashMovementDirection, CashMovementReason } from "@/lib/types";
+import type { CashierRef, CashMovementDirection, CashMovementReason } from "@/lib/types";
 
 interface CashMovementPayload {
   direction: CashMovementDirection;
@@ -50,6 +50,14 @@ interface Props {
   onCashMovement: (payload: CashMovementPayload) => Promise<void>;
   onOpenTickets: () => void;
   onCloseDrawer: () => void;
+  /** PR8 (J4) — vendeuse identifiée sur le poste, `null` si personne. */
+  cashier: CashierRef | null;
+  /** Relève en cours (appel serveur) : le bouton se met en attente. */
+  cashierBusy?: boolean;
+  /** Ouvre l'écran d'identification (« Qui encaisse ? »). */
+  onIdentifyCashier: () => void;
+  /** Relève : la caisse n'a plus de vendeuse. Le panier, lui, reste. */
+  onReleaseCashier: () => void;
 }
 
 function formatTime(iso: string): string {
@@ -59,6 +67,12 @@ function formatTime(iso: string): string {
 /** Bouton d'action de la barre sombre. */
 const ACTION_CLASS =
   "inline-flex min-h-touch items-center justify-center whitespace-nowrap rounded-fc border border-white/40 bg-white/10 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50 xl:px-3";
+
+/** Action accentuée — fond blanc plein sur le bleu de la barre (11,7:1).
+ * Réservée à l'appel à l'action du moment : « S'identifier » tant que
+ * personne n'est identifiée (PR8, J4). */
+const ACCENT_ACTION_CLASS =
+  "inline-flex min-h-touch items-center justify-center whitespace-nowrap rounded-fc bg-white px-3 py-1.5 text-xs font-bold text-fc-primary-deep shadow-sm transition-colors hover:bg-white/90 disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Même action, présentée en pleine largeur dans le menu « ⋯ » (fond clair). */
 const MENU_ITEM_CLASS =
@@ -85,6 +99,10 @@ export default function PosTopBar({
   onCashMovement,
   onOpenTickets,
   onCloseDrawer,
+  cashier,
+  cashierBusy = false,
+  onIdentifyCashier,
+  onReleaseCashier,
 }: Props) {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -155,6 +173,50 @@ export default function PosTopBar({
           </span>
         )}
       </div>
+
+      {/* Vendeuse (PR8, J4) — toujours visible, y compris sous 768 px :
+          savoir qui encaisse prime sur les autres actions, et la relève
+          doit se faire en un geste sans ouvrir le menu « ⋯ ». */}
+      {cashier ? (
+        <div className="flex flex-shrink-0 items-center gap-1">
+          <span
+            title={`Vendeuse : ${cashier.display_name}`}
+            className="inline-flex min-h-[36px] max-w-[8rem] items-center gap-1.5 rounded-full bg-white/15 px-2.5 text-xs font-medium text-white xl:max-w-[12rem]"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              className="flex-shrink-0"
+            >
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+            <span className="truncate">
+              <span className="hidden xl:inline">Vendeuse : </span>
+              {cashier.display_name}
+            </span>
+          </span>
+          <button type="button" onClick={onReleaseCashier} disabled={cashierBusy} className={ACTION_CLASS}>
+            {cashierBusy ? "Relève…" : "Relève"}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onIdentifyCashier}
+          disabled={cashierBusy}
+          className={`flex-shrink-0 ${ACCENT_ACTION_CLASS}`}
+        >
+          S&apos;identifier
+        </button>
+      )}
 
       {/* Actions — une seule ligne à partir de 768 px. */}
       <div className="hidden flex-shrink-0 items-center gap-1 md:flex xl:gap-1.5">

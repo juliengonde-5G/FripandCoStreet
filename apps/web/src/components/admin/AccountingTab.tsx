@@ -8,6 +8,9 @@
  * table brute (« Journal des événements » reste le libellé déjà utilisé
  * ailleurs dans l'admin, cf. CDC §3.2 — c'est un nom d'écran, pas du jargon
  * technique).
+ *
+ * PR8 (J6) : carte « Factures » — factures pro et avoirs d'une année, avec
+ * le PDF de chaque document (`GET /api/admin/invoices?year=`).
  */
 import React, { useEffect, useMemo, useState } from "react";
 
@@ -17,6 +20,9 @@ import Modal from "@/components/ui/Modal";
 import { api, ApiError } from "@/lib/api";
 import { downloadFile } from "@/lib/download";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { downloadInvoicePdf, invoiceAmount, invoiceKindLabel, listInvoices } from "@/lib/invoices";
+import { formatSiret } from "@/lib/siret";
+import type { Invoice } from "@/lib/types";
 import {
   EXPORTABLE_TABLES,
   type AccountingExportDetail,
@@ -68,6 +74,7 @@ export default function AccountingTab() {
     <div className="space-y-6">
       <AccountingSettingsCard />
       <AccountingEntriesCard />
+      <InvoicesCard />
       <RawTableExportsCard />
     </div>
   );
@@ -440,6 +447,114 @@ function AccountingEntriesCard() {
           </div>
         )}
       </Modal>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Factures pro et avoirs (PR8, J6)
+// ---------------------------------------------------------------------------
+
+function InvoicesCard() {
+  const [year, setYear] = useState(() => new Date().getFullYear());
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    listInvoices(year)
+      .then(setInvoices)
+      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les factures."))
+      .finally(() => setLoading(false));
+  }, [year]);
+
+  const handleDownload = async (invoice: Invoice): Promise<void> => {
+    setDownloadingId(invoice.id);
+    setDownloadError(null);
+    try {
+      await downloadInvoicePdf(invoice);
+    } catch (err) {
+      setDownloadError(err instanceof ApiError ? err.detail : "Échec du téléchargement du PDF.");
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  return (
+    <Card
+      title="Factures"
+      subtitle="Factures émises pour des professionnels et avoirs d'annulation, numérotés par année."
+    >
+      <div className="space-y-4">
+        <ErrorNotice message={error} />
+        <ErrorNotice message={downloadError} />
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-[0.12em] font-medium text-fc-ink-soft mb-1.5">Année</span>
+          <select
+            value={year}
+            onChange={(e) => setYear(Number(e.target.value))}
+            aria-label="Année des factures"
+            className={`${selectClass} min-w-[110px] max-w-[160px]`}
+          >
+            {yearOptions().map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {loading ? (
+          <p className="text-sm text-fc-ink-soft">Chargement…</p>
+        ) : invoices.length === 0 ? (
+          <p className="text-sm text-fc-ink-soft">Aucune facture en {year}.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-fc-ink-mute uppercase text-xs tracking-wide">
+                  <th className="py-2 pr-4">Numéro</th>
+                  <th className="py-2 pr-4">Date</th>
+                  <th className="py-2 pr-4">Société</th>
+                  <th className="py-2 pr-4">Total TTC</th>
+                  <th className="py-2 pr-4" />
+                </tr>
+              </thead>
+              <tbody>
+                {invoices.map((inv) => (
+                  <tr key={inv.id} className="border-t border-fc-line">
+                    <td className="py-2 pr-4 whitespace-nowrap">
+                      <span className="font-mono tabular-nums font-semibold">{inv.invoice_number}</span>
+                      {inv.kind === "credit_note" && (
+                        <span className="ml-2 inline-flex items-center rounded-fc bg-fc-warn-soft px-2 py-0.5 text-xs font-medium text-fc-warn">
+                          {invoiceKindLabel(inv.kind)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-4 whitespace-nowrap">{formatDate(inv.issued_at)}</td>
+                    <td className="py-2 pr-4">
+                      {inv.company_name}
+                      <span className="block font-mono text-xs text-fc-ink-mute tabular-nums">{formatSiret(inv.siret)}</span>
+                    </td>
+                    <td className="py-2 pr-4 font-mono tabular-nums whitespace-nowrap">
+                      {formatCurrency(invoiceAmount(inv.total_ttc))}
+                    </td>
+                    <td className="py-2 pr-4">
+                      <Button variant="outline" onClick={() => void handleDownload(inv)} disabled={downloadingId !== null}>
+                        {downloadingId === inv.id ? "Préparation…" : "PDF"}
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </Card>
   );
 }

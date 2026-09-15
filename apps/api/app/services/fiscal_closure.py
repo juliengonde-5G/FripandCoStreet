@@ -224,6 +224,13 @@ class FiscalClosureService:
         snapshot["receipts"] = receipts_payload
         snapshot["shop_settings"] = shop
 
+        # PR8/J5 — factures et avoirs professionnels de la periode. La cle
+        # `invoices` vient de `FiscalExportService.build_snapshot` (appele
+        # plus haut) : une seule serialisation pour l'export a la demande et
+        # pour l'archive scellee. On la reaffirme ici — plutot que de la
+        # supposer — parce que le contrat exige que l'archive la porte.
+        snapshot.setdefault("invoices", [])
+
         snapshot["software_version"] = SOFTWARE_VERSION
         snapshot["fiscal_version_date"] = FISCAL_VERSION_DATE
         snapshot["integrity"] = {
@@ -234,8 +241,9 @@ class FiscalClosureService:
         snapshot["closure_notice_fr"] = (
             "Cette archive fiscale auto-descriptive (art. 286 I-3° bis du CGI) "
             "contient toutes les ventes, annulations, clôtures Z, mouvements "
-            "de caisse, événements techniques (JET), tickets et réglages "
-            "boutique de la période. Elle se lit hors application (JSON "
+            "de caisse, événements techniques (JET), tickets, factures et "
+            "avoirs professionnels, et réglages boutique de la période. "
+            "Elle se lit hors application (JSON "
             "compressé gzip) : décompresser, vérifier le SHA-256 affiché "
             "(en-tête X-Archive-SHA256), puis comparer les totaux "
             "grand_total_period aux clôtures Z correspondantes."

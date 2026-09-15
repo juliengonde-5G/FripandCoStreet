@@ -32,6 +32,7 @@ from app.services import brevo_contacts, email_gateway
 from app.models.database_backup import BackupStatus, DatabaseBackup
 from app.services import database_backup as database_backup_service
 from app.services.accounting_service import AccountingService
+from app.services.cashier_service import CashierService, serialize_cashier
 from app.services.client_service import ClientService
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.fiscal_closure import FiscalClosureService
@@ -295,6 +296,14 @@ class TargetsSettingsIn(BaseModel):
         return normalized
 
 
+class PosSettingsIn(BaseModel):
+    """Reglages de caisse (PR8, J2). `cashier_required` a **false** par
+    defaut : tant que la boutique n'a pas cree ses vendeuses, la caisse
+    fonctionne exactement comme avant PR8."""
+
+    cashier_required: bool = False
+
+
 _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "shop": ShopSettingsIn,
     "fiscal": FiscalSettingsIn,
@@ -303,6 +312,7 @@ _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "accounting": AccountingSettingsIn,
     "backup": BackupSettingsIn,
     "targets": TargetsSettingsIn,
+    "pos": PosSettingsIn,
 }
 
 
@@ -1108,6 +1118,93 @@ async def export_client(
 
 
 # ---------------------------------------------------------------------------
+# Vendeuses (PR8, docs/ARCHITECTURE_PR8.md J3) — administration des identités
+# de caisse. Ce ne sont pas des comptes utilisateurs : pas de mot de passe,
+# pas de rôle, uniquement un nom affiché et un code PIN à 4 chiffres. Une
+# vendeuse n'est jamais supprimée (les ventes la référencent) : on la
+# désactive.
+# ---------------------------------------------------------------------------
+
+
+class CashierCreateIn(BaseModel):
+    display_name: str
+    # Optionnel : le manager peut créer la fiche puis définir le code plus
+    # tard (la vendeuse apparaît alors « sans code » et ne peut pas encore
+    # s'identifier). La double saisie du code est une vérification d'écran,
+    # côté front.
+    pin: str | None = None
+
+
+class CashierUpdateIn(BaseModel):
+    display_name: str | None = None
+    active: bool | None = None
+
+
+class CashierPinIn(BaseModel):
+    pin: str
+
+
+@router.get("/cashiers")
+async def list_cashiers(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Toutes les vendeuses, actives ET désactivées (l'écran admin doit
+    pouvoir réactiver). `has_pin` remplace le hash, qui ne sort jamais."""
+    cashiers = await CashierService(db).list()
+    return {"cashiers": [serialize_cashier(c, admin=True) for c in cashiers]}
+
+
+@router.post("/cashiers", status_code=201)
+async def create_cashier(
+    body: CashierCreateIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    cashier = await CashierService(db).create(
+        display_name=body.display_name, pin=body.pin, user_id=user.id
+    )
+    await db.commit()
+    return {"cashier": serialize_cashier(cashier, admin=True)}
+
+
+@router.put("/cashiers/{cashier_id}")
+async def update_cashier(
+    cashier_id: uuid.UUID,
+    body: CashierUpdateIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    service = CashierService(db)
+    cashier = await service.get_or_404(cashier_id)
+    cashier = await service.update(
+        cashier=cashier,
+        display_name=body.display_name,
+        active=body.active,
+        user_id=user.id,
+    )
+    await db.commit()
+    return {"cashier": serialize_cashier(cashier, admin=True)}
+
+
+@router.put("/cashiers/{cashier_id}/pin")
+async def set_cashier_pin(
+    cashier_id: uuid.UUID,
+    body: CashierPinIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Définit ou change le code d'une vendeuse (422 `weak_pin` si le code
+    n'a pas exactement 4 chiffres ou s'il est trivial). Le code n'apparaît
+    ni dans la réponse, ni dans le JET, ni dans les journaux."""
+    service = CashierService(db)
+    cashier = await service.get_or_404(cashier_id)
+    cashier = await service.set_pin(cashier=cashier, pin=body.pin, user_id=user.id)
+    await db.commit()
+    return {"cashier": serialize_cashier(cashier, admin=True)}
+
+
+# ---------------------------------------------------------------------------
 # Messagerie — état des fournisseurs, aucun secret (PR3, §4)
 # ---------------------------------------------------------------------------
 
@@ -1120,4 +1217,43 @@ async def messaging_status(
     return {
         "email": email_gateway.describe_active_provider(),
         "brevo_contacts": brevo_contacts.describe(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Factures professionnelles (PR8, docs/ARCHITECTURE_PR8.md J5) — liste par
+# année pour la carte « Factures » de l'onglet Comptabilité. L'émission, la
+# lecture par vente et le PDF vivent côté caisse
+# (`app/api/pos/invoices_router.py`) : ici, uniquement de la consultation.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/invoices")
+async def list_invoices(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    year: int = Query(..., ge=2000, le=2100),
+):
+    from app.models.pos import Transaction
+    from app.services.invoice_service import InvoiceService
+
+    service = InvoiceService(db)
+    invoices = await service.list_for_year(year)
+    transactions = {
+        t.id: t
+        for t in (
+            await db.execute(
+                select(Transaction).where(
+                    Transaction.id.in_([i.transaction_id for i in invoices])
+                )
+            )
+        ).scalars().all()
+    } if invoices else {}
+    return {
+        "year": year,
+        "invoices": [
+            InvoiceService.serialize(i, transactions[i.transaction_id])
+            for i in invoices
+            if i.transaction_id in transactions
+        ],
     }

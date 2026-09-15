@@ -1,8 +1,8 @@
 # Nouveau service (PR4, docs/ARCHITECTURE_PR4.md §1/§3, F8) — PDF du rapport
 # Z (reportlab), extrait/adapte du module equivalent de l'application source
 # (`services/z_report_pdf.py`), reduit au perimetre Frip & Co Street (deux
-# moyens de paiement — especes/CB, pas de `cashier_id`, pas de tolerance de
-# caisse configurable) et rendu DETERMINISTE (contrairement a l'application
+# moyens de paiement — especes/CB, pas de tolerance de caisse configurable)
+# et rendu DETERMINISTE (contrairement a l'application
 # source, qui laisse reportlab horodater le PDF) : le canvas est cree en
 # mode `invariant=1` (reportlab fige alors `CreationDate`/`ModDate` et
 # l'identifiant de fichier a une valeur fixe — voir
@@ -66,6 +66,14 @@ async def generate_z_report_pdf(db: AsyncSession, z_report: ZReport) -> bytes:
             .order_by(CashMovement.created_at.asc())
         )
     ).scalars().all()
+
+    # PR8 (J2) — ventilation des ventes par vendeuse. Recalculee a la
+    # lecture depuis les ventes de la periode (immuables) et triee de facon
+    # deterministe : le PDF reste octet pour octet identique d'un rendu a
+    # l'autre, donc son SHA-256 aussi.
+    from app.services.cashier_service import sales_by_cashier_for
+
+    by_cashier = await sales_by_cashier_for(db, z_report)
 
     def _invariant_canvas(*args, **kwargs):
         kwargs["invariant"] = 1
@@ -218,6 +226,43 @@ async def generate_z_report_pdf(db: AsyncSession, z_report: ZReport) -> bytes:
         )
     )
     story.append(Spacer(1, 4 * mm))
+
+    # ------------------------------------------------------------------
+    # Ventes par vendeuse (PR8/J2) — absente des Z anterieurs a PR8 et des
+    # journees encaissees sans identification : la section n'apparait que
+    # lorsqu'il y a quelque chose a ventiler.
+    # ------------------------------------------------------------------
+    if by_cashier:
+        story.append(Paragraph("Ventes par vendeuse", h2))
+        cashier_rows = [
+            [
+                Paragraph("<b>Vendeuse</b>", body),
+                Paragraph("<b>Ventes</b>", body_right),
+                Paragraph("<b>Total</b>", body_right),
+            ]
+        ]
+        for entry in by_cashier:
+            cashier_rows.append(
+                [
+                    Paragraph(entry["display_name"], body),
+                    Paragraph(str(entry["sales_count"]), body_right),
+                    Paragraph(_format_eur(float(entry["sales_total"])), body_right),
+                ]
+            )
+        cashier_table = Table(cashier_rows, colWidths=[80 * mm, 35 * mm, 35 * mm])
+        cashier_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#ECEAE3")),
+                    ("LINEBELOW", (0, 0), (-1, 0), 0.4, colors.HexColor("#0E0E0C")),
+                    ("LINEBELOW", (0, 1), (-1, -1), 0.2, colors.HexColor("#D5D3CC")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        story.append(cashier_table)
+        story.append(Spacer(1, 4 * mm))
 
     # ------------------------------------------------------------------
     # Mouvements de caisse
