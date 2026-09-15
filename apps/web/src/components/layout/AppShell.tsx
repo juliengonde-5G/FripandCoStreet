@@ -9,9 +9,12 @@ import RequireAuth from "@/components/layout/RequireAuth";
 import { clearSession, getUsername } from "@/lib/auth";
 import { fetchAPI } from "@/lib/api";
 
+// PR6 : `/` est devenu le tableau de bord d'accueil — il rejoint la barre
+// de navigation, en tête (`exact` car tous les chemins commencent par « / »).
 const NAV_ITEMS = [
-  { href: "/caisse", label: "Caisse" },
-  { href: "/admin", label: "Administration" },
+  { href: "/", label: "Accueil", exact: true },
+  { href: "/caisse", label: "Caisse", exact: false },
+  { href: "/admin", label: "Administration", exact: false },
 ];
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
@@ -55,7 +58,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
             <nav className="flex items-center gap-1">
               {NAV_ITEMS.map((item) => {
-                const active = pathname?.startsWith(item.href);
+                const active = item.exact ? pathname === item.href : pathname?.startsWith(item.href);
                 return (
                   <Link
                     key={item.href}

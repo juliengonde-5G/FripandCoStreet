@@ -1,5 +1,12 @@
 # Guide de la caisse — Frip & Co Street
 
+## Accueil
+En te connectant, tu arrives sur le tableau de bord. **Aujourd'hui** montre
+l'argent encaissé depuis ce matin (ventes moins annulations), le panier moyen
+et la part espèces / carte. **Ce mois** montre le cumul du mois, l'objectif et
+le montant à faire chaque jour restant pour le tenir. **7 derniers jours** situe
+la journée par rapport à la semaine. Touche **Aller à la caisse** pour encaisser.
+
 ## Ouvrir la caisse
 Au lancement, l'écran affiche « Ouvrir la caisse ». Compte l'argent du fond
 de caisse (billet par billet ou en montant global), saisis-le, puis touche

@@ -12,7 +12,7 @@ import re
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
@@ -255,6 +255,46 @@ class BackupSettingsIn(BaseModel):
         return value
 
 
+# PR6 (H1, docs/ARCHITECTURE_PR6.md §1) — objectifs de chiffre d'affaires du
+# tableau de bord d'accueil. Montants en euros TTC nets, normalises en
+# chaines a 2 decimales par `_settings_to_json` (comme `fiscal.tva_rate`).
+# Cles de `monthly` : "YYYY-MM", ou "default" (objectif herite par tout mois
+# non saisi). Aucune valeur negative.
+_TARGET_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_TARGET_DEFAULT_KEY = "default"
+
+
+def _validate_target_amount(value: Decimal, label: str) -> Decimal:
+    if not value.is_finite():
+        raise ValueError(f"Objectif invalide ({label}) : montant non numérique")
+    if value < 0:
+        raise ValueError(f"Objectif invalide ({label}) : montant négatif interdit")
+    return value.quantize(Decimal("0.01"))
+
+
+class TargetsSettingsIn(BaseModel):
+    daily: Decimal = Decimal("0.00")
+    monthly: dict[str, Decimal] = Field(default_factory=dict)
+
+    @field_validator("daily")
+    @classmethod
+    def _validate_daily(cls, value: Decimal) -> Decimal:
+        return _validate_target_amount(value, "objectif journalier")
+
+    @field_validator("monthly")
+    @classmethod
+    def _validate_monthly(cls, value: dict[str, Decimal]) -> dict[str, Decimal]:
+        normalized: dict[str, Decimal] = {}
+        for key, amount in value.items():
+            if key != _TARGET_DEFAULT_KEY and not _TARGET_MONTH_RE.match(key or ""):
+                raise ValueError(
+                    f"Clé d'objectif mensuel invalide ({key!r}) : "
+                    '"YYYY-MM" ou "default" attendu'
+                )
+            normalized[key] = _validate_target_amount(amount, key)
+        return normalized
+
+
 _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "shop": ShopSettingsIn,
     "fiscal": FiscalSettingsIn,
@@ -262,14 +302,27 @@ _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "hardware": HardwareSettingsIn,
     "accounting": AccountingSettingsIn,
     "backup": BackupSettingsIn,
+    "targets": TargetsSettingsIn,
 }
 
 
-def _settings_to_json(value: BaseModel) -> dict:
-    """Serialise un schema de settings en JSON-compatible (Decimal -> str)."""
-    return {
-        k: (str(v) if isinstance(v, Decimal) else v) for k, v in value.model_dump().items()
-    }
+def _settings_to_json(value: Any) -> Any:
+    """Serialise un schema de settings en JSON-compatible (Decimal -> str).
+
+    Recursif depuis PR6 : la cle `targets` porte une carte imbriquee
+    `monthly` dont les valeurs sont des `Decimal` — JSONB ne sait pas les
+    ecrire, et un `str()` applique au seul premier niveau les laisserait
+    passer telles quelles.
+    """
+    if isinstance(value, BaseModel):
+        return _settings_to_json(value.model_dump())
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _settings_to_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_settings_to_json(v) for v in value]
+    return value
 
 
 @router.get("/settings/{key}")

@@ -79,6 +79,15 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
         "nightly_enabled": True,
         "alert_email": "",
     },
+    # PR6 (H1, docs/ARCHITECTURE_PR6.md §1) — objectifs de chiffre d'affaires
+    # du tableau de bord d'accueil. Montants en euros TTC **nets** (ventes
+    # moins annulations), stockes en chaines a 2 decimales comme
+    # `fiscal.tva_rate` (JSONB ne sait pas porter un Decimal). Aucun impact
+    # fiscal : lecture seule des ventes, rien n'est signe ici.
+    #   daily   : objectif par jour ouvert ("0.00" = pas d'objectif).
+    #   monthly : carte "YYYY-MM" -> objectif ; un mois absent herite de
+    #             monthly["default"] s'il existe, sinon 0.
+    "targets": {"daily": "0.00", "monthly": {}},
 }
 
 

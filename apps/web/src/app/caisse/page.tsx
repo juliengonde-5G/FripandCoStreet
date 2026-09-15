@@ -349,7 +349,14 @@ export default function CaissePage() {
           </button>
           {/* Correctif persona vendeuse : la navigation vers /admin avait
               disparu de l'en-tête caisse depuis PR1 — /admin, lui, propose
-              déjà un lien « Caisse » (AppShell). */}
+              déjà un lien « Caisse » (AppShell). PR6 : « Accueil » rejoint
+              « Administration », `/` étant devenu le tableau de bord. */}
+          <Link
+            href="/"
+            className="min-h-touch inline-flex items-center rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
+          >
+            Accueil
+          </Link>
           <Link
             href="/admin"
             className="min-h-touch inline-flex items-center rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
