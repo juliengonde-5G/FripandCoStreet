@@ -55,10 +55,17 @@ async def run_daily_fiscal_close_guard() -> None:
             )
 
 
-async def _alert_job_failure(job_name: str, exc: Exception) -> None:
+async def _alert_job_failure(
+    job_name: str, exc: Exception, *, email_override: str | None = None
+) -> None:
     """Journalise l'echec au JET (jamais avale, S-5) puis tente un e-mail
-    d'alerte best-effort a `shop.email` (un echec d'envoi ne remonte pas :
-    la trace JET est deja ecrite, c'est elle la garantie)."""
+    d'alerte best-effort (un echec d'envoi ne remonte pas : la trace JET est
+    deja ecrite, c'est elle la garantie).
+
+    `email_override` (PR5, G4, docs/ARCHITECTURE_PR5.md §1) permet a un
+    appelant de cibler un destinataire specifique (ex. `backup.alert_email`)
+    avant le repli par defaut sur `shop.email` — fonction reutilisee telle
+    quelle par ailleurs (garde fiscale 23:59, clotures mensuelle/annuelle)."""
     logger.exception("%s echoue : %s", job_name, exc)
     try:
         async with async_session() as db:
@@ -75,14 +82,16 @@ async def _alert_job_failure(job_name: str, exc: Exception) -> None:
         from app.services.email_gateway import EmailMessage, send_email
         from app.services.settings_service import SettingsService
 
-        async with async_session() as db:
-            shop = await SettingsService(db).get("shop")
-        shop_email = (shop.get("email") or "").strip() if isinstance(shop, dict) else ""
-        if not shop_email:
+        recipient = (email_override or "").strip()
+        if not recipient:
+            async with async_session() as db:
+                shop = await SettingsService(db).get("shop")
+            recipient = (shop.get("email") or "").strip() if isinstance(shop, dict) else ""
+        if not recipient:
             return
         await send_email(
             EmailMessage(
-                to=shop_email,
+                to=recipient,
                 subject=f"⚠ Frip & Co Street — échec du job « {job_name} »",
                 html=(
                     f"<p>Le job planifié <b>{job_name}</b> a échoué.</p>"
@@ -163,6 +172,48 @@ async def run_annual_fiscal_closure() -> None:
         await _alert_job_failure(JOB_ANNUAL_FISCAL_CLOSURE, exc)
 
 
+JOB_NIGHTLY_DATABASE_BACKUP = "nightly_database_backup"
+
+
+async def run_nightly_database_backup() -> None:
+    """Sauvegarde applicative nocturne de la base — 03:00 Europe/Paris (PR5,
+    G4, docs/ARCHITECTURE_PR5.md §1). Aucun chevauchement avec les clotures
+    fiscales (00:15/00:30/23:59). N'ecrit rien si `backup.nightly_enabled`
+    est faux (simple log — pas de JET dedie, ce n'est pas un echec).
+
+    En cas d'echec, `database_backup.run_backup` a deja committe une ligne
+    `failed` avant de lever `BackupError` : ce wrapper journalise en plus
+    au JET (`system.job_failed`) et alerte `backup.alert_email` (repli
+    `shop.email` via `_alert_job_failure`) — jamais avale en silence (S-5).
+    """
+    try:
+        from app.services import database_backup
+        from app.services.settings_service import SettingsService
+
+        async with async_session() as db:
+            backup_settings = await SettingsService(db).get("backup")
+            if not backup_settings.get("nightly_enabled", True):
+                logger.info("Sauvegarde nocturne désactivée (backup.nightly_enabled=false)")
+                return
+            backup = await database_backup.run_backup(db, trigger="nightly", user_id=None)
+            logger.info(
+                "Sauvegarde nocturne : statut=%s fichier=%s", backup.status.value, backup.filename
+            )
+    except Exception as exc:  # noqa: BLE001
+        alert_email = ""
+        try:
+            from app.services.settings_service import SettingsService
+
+            async with async_session() as db:
+                backup_settings = await SettingsService(db).get("backup")
+            alert_email = (backup_settings.get("alert_email") or "").strip()
+        except Exception:  # noqa: BLE001 — lecture des reglages best-effort
+            logger.exception("Lecture des réglages de sauvegarde impossible avant alerte")
+        await _alert_job_failure(
+            JOB_NIGHTLY_DATABASE_BACKUP, exc, email_override=alert_email or None
+        )
+
+
 def register_all_jobs(scheduler) -> None:
     """Enregistre les jobs planifies (fuseau Europe/Paris, cf. `app/main.py`)."""
     from apscheduler.triggers.cron import CronTrigger
@@ -183,5 +234,11 @@ def register_all_jobs(scheduler) -> None:
         run_annual_fiscal_closure,
         CronTrigger(month=1, day=1, hour=0, minute=30),
         id=JOB_ANNUAL_FISCAL_CLOSURE,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_nightly_database_backup,
+        CronTrigger(hour=3, minute=0),
+        id=JOB_NIGHTLY_DATABASE_BACKUP,
         replace_existing=True,
     )
