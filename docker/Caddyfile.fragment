@@ -5,7 +5,7 @@
 # Caddy ≥ 2.5 remplace tout X-Forwarded-For entrant par l'IP réelle du client
 # (aucun `trusted_proxies` déclaré) : l'API peut donc utiliser sa première
 # valeur pour le rate-limit de connexion et le journal (JET).
-street.fripco.fr {
+app.lloomi.fr {
 	encode gzip
 	handle /api/* {
 		reverse_proxy fripco-api:8000
