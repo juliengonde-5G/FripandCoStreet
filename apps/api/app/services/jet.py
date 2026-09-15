@@ -102,6 +102,16 @@ EVENT_EXPORT_DOWNLOADED = "export.downloaded"
 # d'un type dedie.
 EVENT_BACKUP_DELETED = "backup.deleted"
 
+# PR7 — client en caisse (docs/ARCHITECTURE_PR7.md, I3). `client.linked`
+# existe depuis PR3 (rattachement a posteriori) et sert desormais aussi au
+# rattachement A LA CREATION de la vente (`client_id` dans le corps de
+# `POST /pos/transactions`) ; `client.unlinked` est son pendant
+# (`DELETE /pos/transactions/{id}/client`). Payload : `client_id` et
+# `transaction_id` — JAMAIS de nom, d'e-mail ni de telephone (le JET est
+# immuable : aucune donnee personnelle ne doit pouvoir s'y retrouver
+# piegee, cf. PR3/E4 et art. 17 RGPD).
+EVENT_CLIENT_UNLINKED = "client.unlinked"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""

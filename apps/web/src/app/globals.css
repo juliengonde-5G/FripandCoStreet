@@ -43,3 +43,13 @@ body {
     min-width: 48px;
   }
 }
+
+/* Barre latérale réduite (PR7, I1) : les pages posent `md:ml-64` en dur et
+   n'ont pas à connaître l'état de la barre — c'est cette règle, pilotée par
+   `document.body.dataset.sidebar`, qui ramène la marge à la largeur réduite
+   (4 rem). Sous 768 px la barre est un tiroir superposé : aucune marge. */
+@media (min-width: 768px) {
+  body[data-sidebar="collapsed"] [class*="md:ml-64"] {
+    margin-left: 4rem !important;
+  }
+}

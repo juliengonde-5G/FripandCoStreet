@@ -185,3 +185,20 @@ export function maskEmail(email: string | null | undefined): string {
   if (at <= 0) return "***";
   return `${email[0]}***@${email.slice(at + 1)}`;
 }
+
+/**
+ * « Prénom Nom » d'une fiche cliente, pour la pastille de la caisse, le
+ * détail d'un ticket et l'écran de fin de vente (PR7, I3). Renvoie une
+ * chaîne vide quand la fiche n'a aucun nom : l'appelant décide alors quoi
+ * afficher à la place (coordonnée masquée, « Cliente », …) plutôt que de
+ * se retrouver avec un espace isolé.
+ */
+export function formatClientName(
+  client: { first_name?: string | null; last_name?: string | null } | null | undefined,
+): string {
+  if (!client) return "";
+  return [client.first_name, client.last_name]
+    .map((part) => (part ?? "").trim())
+    .filter(Boolean)
+    .join(" ");
+}

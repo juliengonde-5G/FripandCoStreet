@@ -5,18 +5,20 @@
  * terminal de paiement, rapports de clôture, contrôle d'intégrité et
  * journal des événements (jamais nommé « JET » dans l'UI — CDC §3.2).
  */
-import React, { useEffect, useState } from "react";
+import React, { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import AccountingTab from "@/components/admin/AccountingTab";
 import BackupsTab from "@/components/admin/BackupsTab";
 import FiscalArchivesTab from "@/components/admin/FiscalArchivesTab";
-import AppShell from "@/components/layout/AppShell";
+import RequireAuth from "@/components/layout/RequireAuth";
+import Sidebar from "@/components/layout/Sidebar";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/api";
 import { downloadFile } from "@/lib/download";
-import { formatCurrency, formatDateTime } from "@/lib/format";
+import { formatClientName, formatCurrency, formatDateTime } from "@/lib/format";
 import { kickDrawer } from "@/lib/printing";
 import {
   TVA_RATES,
@@ -40,32 +42,65 @@ import {
 } from "@/lib/types";
 import { findPairedUsbDevice, getStoredPrinter, isWebUsbSupported, pairUsbPrinter, sendBytes } from "@/lib/webusb-printer";
 
+/** Onglets de la page — l'ordre suit celui de la barre latérale (PR7, I1). */
+type Tab = "settings" | "hardware" | "clients" | "accounting" | "fiscal" | "backups";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "settings", label: "Réglages" },
+  { id: "hardware", label: "Matériel" },
+  { id: "clients", label: "Clients" },
+  { id: "accounting", label: "Comptabilité" },
+  { id: "fiscal", label: "Archives fiscales" },
+  { id: "backups", label: "Sauvegardes" },
+];
+
+/** Onglet ouvert par défaut quand l'URL ne porte pas de `?tab=`. */
+const DEFAULT_TAB: Tab = "settings";
+
+function isTab(value: string | null): value is Tab {
+  return !!value && TABS.some((t) => t.id === value);
+}
+
 export default function AdminPage() {
-  const [tab, setTab] = useState<"settings" | "hardware" | "clients" | "accounting" | "fiscal" | "backups">("settings");
+  return (
+    <RequireAuth>
+      <Sidebar />
+      <main className="md:ml-64 px-4 pt-16 pb-6 md:p-8">
+        {/* `useSearchParams` impose une frontière de rendu différé (Next 15). */}
+        <Suspense fallback={<p className="text-sm text-fc-ink-soft">Chargement…</p>}>
+          <AdminTabs />
+        </Suspense>
+      </main>
+    </RequireAuth>
+  );
+}
+
+/**
+ * PR7 (I1) : l'onglet actif vit dans l'URL (`/admin?tab=clients`), pour que
+ * les entrées de la barre latérale ouvrent directement le bon onglet et que
+ * la page reste partageable/rechargeable. Un clic sur un onglet met l'URL à
+ * jour sans empiler d'entrée d'historique (`replace`).
+ */
+function AdminTabs() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const param = searchParams.get("tab");
+  const tab: Tab = isTab(param) ? param : DEFAULT_TAB;
+
+  const selectTab = (next: Tab): void => {
+    router.replace(next === DEFAULT_TAB ? "/admin" : `/admin?tab=${next}`, { scroll: false });
+  };
 
   return (
-    <AppShell>
+    <>
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-fc-ink">Administration</h1>
         <div className="flex flex-wrap items-center gap-1 rounded-fc-lg bg-fc-bg-alt p-1">
-          <TabButton active={tab === "settings"} onClick={() => setTab("settings")}>
-            Réglages
-          </TabButton>
-          <TabButton active={tab === "hardware"} onClick={() => setTab("hardware")}>
-            Matériel
-          </TabButton>
-          <TabButton active={tab === "clients"} onClick={() => setTab("clients")}>
-            Clients
-          </TabButton>
-          <TabButton active={tab === "accounting"} onClick={() => setTab("accounting")}>
-            Comptabilité
-          </TabButton>
-          <TabButton active={tab === "fiscal"} onClick={() => setTab("fiscal")}>
-            Archives fiscales
-          </TabButton>
-          <TabButton active={tab === "backups"} onClick={() => setTab("backups")}>
-            Sauvegardes
-          </TabButton>
+          {TABS.map((t) => (
+            <TabButton key={t.id} active={tab === t.id} onClick={() => selectTab(t.id)}>
+              {t.label}
+            </TabButton>
+          ))}
         </div>
       </div>
 
@@ -96,7 +131,7 @@ export default function AdminPage() {
       {tab === "fiscal" && <FiscalArchivesTab />}
 
       {tab === "backups" && <BackupsTab />}
-    </AppShell>
+    </>
   );
 }
 
@@ -1200,7 +1235,7 @@ function ClientsSection() {
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[340px_1fr]">
-      <Card title="Clients" subtitle="Recherche par e-mail ou par nom.">
+      <Card title="Clients" subtitle="Recherche par e-mail, par nom ou par téléphone.">
         <div className="space-y-3">
           <Input
             label="Rechercher"
@@ -1209,7 +1244,7 @@ function ClientsSection() {
             onKeyDown={(e) => {
               if (e.key === "Enter") search(query);
             }}
-            placeholder="julie@exemple.fr ou Dupont"
+            placeholder="julie@exemple.fr, Dupont ou 06 12 34 56 78"
           />
           <Button variant="outline" size="sm" onClick={() => search(query)} disabled={loadingList}>
             {loadingList ? "Recherche…" : "Rechercher"}
@@ -1227,9 +1262,21 @@ function ClientsSection() {
                     selectedId === c.id ? "bg-fc-primary-soft text-fc-primary-deep" : "hover:bg-fc-bg-alt text-fc-ink"
                   }`}
                 >
-                  <div className="text-sm font-medium truncate">{c.anonymized_at ? "Client anonymisé" : c.email}</div>
+                  {/* PR7 (I3) : une fiche peut n'avoir qu'un téléphone —
+                      l'en-tête prend alors le nom, et la ligne de détail
+                      dit explicitement « Pas d'e-mail » plutôt que de
+                      laisser un vide. */}
+                  <div className="text-sm font-medium truncate">
+                    {c.anonymized_at
+                      ? "Client anonymisé"
+                      : c.email || formatClientName(c) || c.phone || "Fiche sans coordonnée"}
+                  </div>
                   <div className="text-xs text-fc-ink-mute truncate">
-                    {[c.first_name, c.last_name].filter(Boolean).join(" ") || "—"} ·{" "}
+                    {c.anonymized_at ? "—" : c.email ? formatClientName(c) || "—" : "Pas d'e-mail"}
+                    {" · "}
+                    {c.phone || "Pas de téléphone"}
+                  </div>
+                  <div className="text-xs text-fc-ink-mute truncate">
                     {c.newsletter_optin ? "Newsletter : oui" : "Newsletter : non"}
                   </div>
                 </button>
@@ -1309,7 +1356,10 @@ function ClientDetailCard({ clientId, onChanged }: { clientId: string; onChanged
 
   return (
     <div className="space-y-6">
-      <Card title={client.anonymized_at ? "Client anonymisé" : client.email} subtitle={client.anonymized_at ? undefined : fullName || undefined}>
+      <Card
+        title={client.anonymized_at ? "Client anonymisé" : client.email || fullName || "Pas d'e-mail"}
+        subtitle={client.anonymized_at || !client.email ? undefined : fullName || undefined}
+      >
         {client.anonymized_at ? (
           <div className="rounded-fc-lg bg-fc-bg-alt p-4 text-sm text-fc-ink-soft">
             Données supprimées le {formatDateTime(client.anonymized_at)}.
@@ -1317,6 +1367,16 @@ function ClientDetailCard({ clientId, onChanged }: { clientId: string; onChanged
         ) : (
           <div className="space-y-4">
             <ErrorNotice message={consentError} />
+            <dl className="grid gap-4 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-fc-ink-mute">E-mail</dt>
+                <dd className="break-all text-fc-ink">{client.email || "Pas d'e-mail"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-fc-ink-mute">Téléphone</dt>
+                <dd className="break-all text-fc-ink">{client.phone || "Pas de téléphone"}</dd>
+              </div>
+            </dl>
             <div className="flex flex-wrap items-center gap-4">
               <StatusPill ok={client.newsletter_optin} okLabel="Inscrit à la newsletter" koLabel="Non inscrit à la newsletter" />
               <span className="text-xs text-fc-ink-mute">Client depuis le {formatDateTime(client.created_at)}</span>

@@ -34,6 +34,7 @@ from app.services.fiscal import (
 )
 from app.services.jet import (
     EVENT_CASH_MOVEMENT_CREATED,
+    EVENT_CLIENT_LINKED,
     EVENT_DRAWER_CLOSED,
     EVENT_DRAWER_OPENED,
     EVENT_RECEIPT_DUPLICATE,
@@ -42,7 +43,7 @@ from app.services.jet import (
     EVENT_SALE_CREATED,
     JournalService,
 )
-from app.services.receipt import ReceiptService
+from app.services.receipt import ReceiptService, apply_client_line, format_client_label
 from app.services.settings_service import SettingsService
 from app.services.tva_service import compute_line_totals
 
@@ -60,6 +61,18 @@ class PaymentMismatch(PosServiceError):
 class CashCapExceeded(PosServiceError):
     status_code = 422
     code = "cash_cap_exceeded"
+
+
+class ClientNotFound(PosServiceError):
+    """`client_id` inconnu (ou fiche anonymisee) dans le corps d'une vente —
+    PR7/I3. 422 plutot que 404 : la ressource visee par le POST (la vente)
+    existe bien, c'est un champ du corps qui est invalide."""
+
+    status_code = 422
+    code = "client_not_found"
+
+    def __init__(self, message: str = "Fiche client introuvable."):
+        super().__init__(message)
 
 
 class CardNotConfirmedError(PosServiceError):
@@ -125,10 +138,20 @@ class PosService:
         items: list,
         discount,
         payments: list,
+        client_id: uuid.UUID | None = None,
     ) -> tuple[Transaction, bool]:
         """Cree une vente. Retourne ``(transaction, created)`` — ``created``
         est ``False`` quand ``client_uuid`` correspondait deja a une vente
-        existante (idempotence, §4.1 point 2)."""
+        existante (idempotence, §4.1 point 2).
+
+        ``client_id`` (PR7/I3) rattache la vente a une fiche client DES sa
+        creation. Ce rattachement reste HORS SIGNATURE, exactement comme le
+        rattachement a posteriori de PR3 : `client_id` n'apparait nulle part
+        dans `fiscal.py::_transaction_payload`, donc la valeur du
+        `hash_chain` est rigoureusement la meme avec ou sans cliente. La
+        colonne est posee a l'INSERT (pas par un UPDATE apres coup) — rien
+        n'est donc jamais modifie sur une ligne deja signee.
+        """
         existing = await self._find_by_client_uuid(client_uuid)
         if existing is not None:
             return existing, False
@@ -142,6 +165,8 @@ class PosService:
         drawer = await self.get_open_drawer()
         if drawer is None:
             raise DrawerClosed()
+
+        client = await self._resolve_client(client_id)
 
         if not items:
             raise CartInvalid("Le panier est vide.")
@@ -222,6 +247,8 @@ class PosService:
             transaction_type=TransactionType.sale,
             user_id=user_id,
             client_uuid=client_uuid,
+            # Hors payload signe (cf. docstring) — pose des l'INSERT.
+            client_id=client.id if client is not None else None,
             discount_type=discount_type,
             discount_value=(float(discount_value) if discount_value is not None else None),
             discount_amount=float(Decimal(discount_cents) / Decimal("100")),
@@ -292,7 +319,13 @@ class PosService:
         await FiscalService(self.db).sign_transaction(transaction)
 
         receipt_text = ReceiptService().generate_sale_text(
-            transaction, shop=await SettingsService(self.db).get("shop")
+            transaction,
+            shop=await SettingsService(self.db).get("shop"),
+            client_label=(
+                format_client_label(client.first_name, client.last_name)
+                if client is not None
+                else None
+            ),
         )
         from app.models.receipt import Receipt
 
@@ -308,6 +341,19 @@ class PosService:
             },
         )
 
+        if client is not None:
+            # I3 — payload strictement limite aux deux identifiants
+            # techniques : le JET est immuable, il ne porte jamais de nom,
+            # d'e-mail ni de telephone.
+            await JournalService(self.db).record(
+                EVENT_CLIENT_LINKED,
+                user_id=user_id,
+                payload={
+                    "client_id": str(client.id),
+                    "transaction_id": str(transaction.id),
+                },
+            )
+
         await self.db.flush()
         # Recharge via `select()` plutot que `refresh()` : `items`/`payments`
         # sont `lazy="selectin"` (mapper-level) — cette strategie ne s'active
@@ -319,6 +365,24 @@ class PosService:
             await self.db.execute(select(Transaction).where(Transaction.id == transaction.id))
         ).scalar_one()
         return transaction, True
+
+    async def _resolve_client(self, client_id: uuid.UUID | None):
+        """Charge la fiche visee par `client_id` (PR7/I3), ou ``None``.
+
+        Une fiche ANONYMISEE (RGPD, E4) est traitee comme introuvable : elle
+        ne porte plus aucune donnee personnelle, la rattacher a une vente
+        nouvelle n'aurait aucun sens.
+        """
+        if client_id is None:
+            return None
+        from app.models.client import Client
+
+        client = (
+            await self.db.execute(select(Client).where(Client.id == client_id))
+        ).scalar_one_or_none()
+        if client is None or client.anonymized_at is not None:
+            raise ClientNotFound()
+        return client
 
     @staticmethod
     def _resolve_discount(
@@ -388,6 +452,45 @@ class PosService:
         return (
             await self.db.execute(select(Receipt).where(Receipt.transaction_id == transaction_id))
         ).scalar_one_or_none()
+
+    async def render_receipt_text(self, receipt, *, transaction: Transaction | None = None) -> str:
+        """Texte du ticket tel qu'il doit etre RENDU aujourd'hui (PR7/I3).
+
+        Le contenu stocke est immuable (trigger `trg_protect_receipt`) :
+        c'est la trace du ticket emis, et c'est elle qui part dans
+        l'archive fiscale. Mais le rattachement d'une cliente peut changer
+        APRES la vente (rattachement a posteriori de PR3, detachement
+        `DELETE /pos/transactions/{id}/client`) — la relecture, le renvoi
+        par e-mail et la reimpression doivent alors montrer l'etat
+        courant, pas celui de l'instant de la vente. Seule la ligne
+        « Client : … » est reecrite (`apply_client_line`) ; tout le reste
+        du ticket reste figé au mot pres.
+        """
+        transaction = transaction or receipt.transaction
+        return apply_client_line(receipt.content, await self.client_label(transaction))
+
+    async def client_label(self, transaction: Transaction | None) -> str | None:
+        """« Prenom N. » de la cliente rattachee a une vente, ou ``None``."""
+        if transaction is None or transaction.client_id is None:
+            return None
+        from app.models.client import Client
+
+        client = (
+            await self.db.execute(select(Client).where(Client.id == transaction.client_id))
+        ).scalar_one_or_none()
+        if client is None:
+            return None
+        return format_client_label(client.first_name, client.last_name)
+
+    async def get_rendered_receipt_text(
+        self, transaction_id: uuid.UUID, *, transaction: Transaction | None = None
+    ) -> str | None:
+        """`render_receipt_text` pour un ticket charge par son id de vente
+        — ``None`` s'il n'y a pas (encore) de ticket."""
+        receipt = await self.get_receipt(transaction_id)
+        if receipt is None:
+            return None
+        return await self.render_receipt_text(receipt, transaction=transaction)
 
     # ------------------------------------------------------------------
     # Caisse espèces (§4.3)
@@ -745,10 +848,15 @@ class PosService:
 
         shop = await SettingsService(self.db).get("shop")
         receipt = await self.get_receipt(transaction.id)
+        # Rendu courant (PR7/I3) : si la vente a ete rattachee — ou
+        # detachee — apres coup, l'e-mail porte l'etat d'aujourd'hui, pas
+        # celui de l'instant de la vente.
         receipt_text = (
-            receipt.content
+            await self.render_receipt_text(receipt, transaction=transaction)
             if receipt is not None
-            else ReceiptService().generate(transaction, shop=shop)
+            else ReceiptService().generate(
+                transaction, shop=shop, client_label=await self.client_label(transaction)
+            )
         )
         dpo_email = shop.get("dpo_email") if isinstance(shop, dict) else None
         message = build_receipt_email(

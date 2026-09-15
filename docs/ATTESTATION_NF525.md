@@ -502,6 +502,12 @@ acceptables pour une caisse mono-poste auto-attestée.
   ticket par e-mail après paiement) sans que ce rattachement, qui ne modifie
   ni les montants ni les moyens de paiement de la vente, ne rentre dans le
   périmètre de la preuve fiscale — un choix délibéré plutôt qu'un oubli.
+  Ce rattachement peut également être posé **dès la création de la vente**
+  (cliente choisie en caisse avant l'encaissement, `client_id` dans le corps
+  de `POST /pos/transactions`) : il reste exactement aussi hors périmètre de
+  la signature que le rattachement a posteriori, `client_id` n'apparaissant
+  nulle part dans le payload signé
+  (`apps/api/app/services/fiscal.py::_transaction_payload`).
   Sur un ticket (`receipts`) déjà émis, `duplicate_count` (nombre de
   relectures du texte), `printed_count` et `printed_at` (compteur et date
   de la dernière impression physique) restent mutables ; le contenu du

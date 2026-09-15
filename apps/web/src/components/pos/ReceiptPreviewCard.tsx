@@ -19,13 +19,24 @@
  * l'affichage si `hardware.auto_print_on_sale` (une seule fois, jamais
  * bloquante), ouverture du tiroir combinée à la première impression d'une
  * vente espèces si `hardware.auto_kick_on_cash` — voir lib/printing.ts.
+ *
+ * PR7 (I3) : quand une cliente a été choisie EN CAISSE avant
+ * l'encaissement, le bloc e-mail ne redemande ni son nom ni son
+ * consentement (déjà saisis à la sélection) — il annonce « Ticket pour
+ * Prénom Nom » et pré-remplit l'adresse quand la fiche en a une. L'envoi
+ * passe alors par `POST /pos/transactions/{id}/receipt/email`, qui envoie
+ * le ticket SANS toucher au rattachement : la vente est déjà liée, et
+ * repasser par `POST …/client` avec une autre adresse créerait une
+ * seconde fiche (409 `client_already_linked`) au lieu d'envoyer le
+ * ticket. Sans cliente rattachée (vente de passage), le parcours PR3
+ * d'origine — adresse + nom facultatif + newsletter — est inchangé.
  */
 import React, { useEffect, useRef, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
-import { formatCurrency, isValidEmail } from "@/lib/format";
+import { formatClientName, formatCurrency, isValidEmail } from "@/lib/format";
 import { kickDrawer, printReceipt } from "@/lib/printing";
-import type { AttachClientResponse, HardwareSettings } from "@/lib/types";
+import type { AttachClientResponse, ClientRef, HardwareSettings, SendReceiptEmailResponse } from "@/lib/types";
 
 interface Props {
   /** Id de la vente — sert au rattachement client + envoi du ticket. */
@@ -47,6 +58,9 @@ interface Props {
   /** Vrai si un des moyens de paiement de cette vente est « espèces » —
    * seul cas où `auto_kick_on_cash` s'applique (§3). */
   isCashSale: boolean;
+  /** Cliente rattachée à la vente (PR7, I3), telle que la renvoie
+   * `POST /pos/transactions`. `null` pour une vente de passage. */
+  client?: ClientRef | null;
   onNewSale: () => void;
 }
 
@@ -59,6 +73,7 @@ export default function ReceiptPreviewCard({
   dpoEmail,
   hardware,
   isCashSale,
+  client,
   onNewSale,
 }: Props) {
   // Une impression réussie ouvre le tiroir sur une vente espèces (§3 :
@@ -166,7 +181,12 @@ export default function ReceiptPreviewCard({
       <div className="flex min-h-0 flex-col gap-3">
         <div className="min-h-0 flex-1 overflow-y-auto">
           {!isCancellation && (
-            <SendReceiptByEmail transactionId={transactionId} dpoEmail={dpoEmail} onSkip={onNewSale} />
+            <SendReceiptByEmail
+              transactionId={transactionId}
+              dpoEmail={dpoEmail}
+              client={client ?? null}
+              onSkip={onNewSale}
+            />
           )}
         </div>
         <button
@@ -180,21 +200,25 @@ export default function ReceiptPreviewCard({
     </div>
   );
 }
-
 // ---------------------------------------------------------------------------
-// Bloc « Envoyer le ticket par e-mail » (§5 PR3)
+// Bloc « Envoyer le ticket par e-mail » (§5 PR3, étendu PR7/I3)
 // ---------------------------------------------------------------------------
 
 function SendReceiptByEmail({
   transactionId,
   dpoEmail,
+  client,
   onSkip,
 }: {
   transactionId: string;
   dpoEmail?: string;
+  client: ClientRef | null;
   onSkip: () => void;
 }) {
-  const [email, setEmail] = useState("");
+  const clientName = formatClientName(client);
+  // Une cliente rattachée a déjà donné son nom et son consentement à la
+  // sélection : on ne les redemande pas, on envoie simplement le ticket.
+  const [email, setEmail] = useState(client?.email ?? "");
   const [showName, setShowName] = useState(false);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -202,11 +226,32 @@ function SendReceiptByEmail({
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [result, setResult] = useState<AttachClientResponse | null>(null);
+  /** Adresse effectivement servie quand la vente est déjà rattachée (le
+   * parcours `client` ci-dessous ne passe pas par `AttachClientResponse`). */
+  const [sentTo, setSentTo] = useState<string | null>(null);
 
   const emailTouched = email.length > 0;
   const emailValid = isValidEmail(email);
 
-  const handleSend = async (): Promise<void> => {
+  /** Vente rattachée : renvoi du ticket, sans retoucher au rattachement. */
+  const handleSendToLinkedClient = async (): Promise<void> => {
+    if (!isValidEmail(email) || sending) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      await api.post<SendReceiptEmailResponse>(`/api/pos/transactions/${transactionId}/receipt/email`, {
+        email: email.trim(),
+      });
+      setSentTo(email.trim());
+    } catch (err) {
+      setSendError(err instanceof ApiError ? err.detail : "Impossible d'envoyer le ticket.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  /** Vente de passage : création/rattachement de la fiche + envoi (PR3). */
+  const handleAttachAndSend = async (): Promise<void> => {
     if (!isValidEmail(email) || sending) return;
     setSending(true);
     setSendError(null);
@@ -225,6 +270,16 @@ function SendReceiptByEmail({
       setSending(false);
     }
   };
+
+  const handleSend = client ? handleSendToLinkedClient : handleAttachAndSend;
+
+  if (sentTo) {
+    return (
+      <div role="status" className="rounded-fc-lg bg-fc-primary-soft p-3 text-sm font-medium text-fc-primary-deep">
+        Ticket envoyé à {sentTo}.
+      </div>
+    );
+  }
 
   if (result) {
     const emailFailed = result.receipt_email?.status === "failed";
@@ -258,7 +313,14 @@ function SendReceiptByEmail({
 
   return (
     <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-3 space-y-2.5">
-      <p className="text-sm font-semibold text-fc-ink">Envoyer le ticket par e-mail</p>
+      <p className="text-sm font-semibold text-fc-ink">
+        {client && clientName ? `Ticket pour ${clientName}` : "Envoyer le ticket par e-mail"}
+      </p>
+      {client && !client.email && (
+        <p className="text-xs text-fc-ink-soft">
+          Cette fiche n&apos;a pas d&apos;adresse e-mail : saisissez-en une pour envoyer le ticket.
+        </p>
+      )}
 
       {sendError && (
         <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 p-2 flex items-center justify-between gap-3">
@@ -289,40 +351,45 @@ function SendReceiptByEmail({
         {emailTouched && !emailValid && <p className="mt-1 text-xs text-fc-danger">Adresse e-mail incomplète</p>}
       </div>
 
-      {!showName ? (
-        <button type="button" onClick={() => setShowName(true)} className="text-xs font-medium text-fc-primary hover:underline">
-          + Ajouter le nom
-        </button>
-      ) : (
-        <div className="grid grid-cols-2 gap-2">
-          <input
-            type="text"
-            value={firstName}
-            onChange={(e) => setFirstName(e.target.value)}
-            placeholder="Prénom"
-            aria-label="Prénom"
-            className="min-h-touch px-3 py-2 rounded-fc border border-fc-line bg-fc-surface text-fc-ink placeholder-fc-ink-mute text-sm focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
-          />
-          <input
-            type="text"
-            value={lastName}
-            onChange={(e) => setLastName(e.target.value)}
-            placeholder="Nom"
-            aria-label="Nom"
-            className="min-h-touch px-3 py-2 rounded-fc border border-fc-line bg-fc-surface text-fc-ink placeholder-fc-ink-mute text-sm focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
-          />
-        </div>
-      )}
+      {/* Nom et newsletter : seulement pour une vente de passage. Avec une
+          cliente rattachée, ils ont déjà été saisis sur sa fiche. */}
+      {!client &&
+        (!showName ? (
+          <button type="button" onClick={() => setShowName(true)} className="text-xs font-medium text-fc-primary hover:underline">
+            + Ajouter le nom
+          </button>
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              type="text"
+              value={firstName}
+              onChange={(e) => setFirstName(e.target.value)}
+              placeholder="Prénom"
+              aria-label="Prénom"
+              className="min-h-touch px-3 py-2 rounded-fc border border-fc-line bg-fc-surface text-fc-ink placeholder-fc-ink-mute text-sm focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
+            />
+            <input
+              type="text"
+              value={lastName}
+              onChange={(e) => setLastName(e.target.value)}
+              placeholder="Nom"
+              aria-label="Nom"
+              className="min-h-touch px-3 py-2 rounded-fc border border-fc-line bg-fc-surface text-fc-ink placeholder-fc-ink-mute text-sm focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
+            />
+          </div>
+        ))}
 
-      <label className="flex items-start gap-2 text-sm text-fc-ink-soft">
-        <input
-          type="checkbox"
-          checked={newsletter}
-          onChange={(e) => setNewsletter(e.target.checked)}
-          className="mt-0.5 h-5 w-5 flex-shrink-0 rounded border-fc-line text-fc-primary focus:ring-fc-primary"
-        />
-        <span>Je souhaite recevoir les actualités et événements Frip &amp; Co Street</span>
-      </label>
+      {!client && (
+        <label className="flex items-start gap-2 text-sm text-fc-ink-soft">
+          <input
+            type="checkbox"
+            checked={newsletter}
+            onChange={(e) => setNewsletter(e.target.checked)}
+            className="mt-0.5 h-5 w-5 flex-shrink-0 rounded border-fc-line text-fc-primary focus:ring-fc-primary"
+          />
+          <span>Je souhaite recevoir les actualités et événements Frip &amp; Co Street</span>
+        </label>
+      )}
 
       <p className="text-xs leading-snug text-fc-ink-mute">
         Vos coordonnées servent uniquement à vous envoyer ce ticket. La newsletter est facultative et se désinscrit en un

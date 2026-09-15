@@ -20,6 +20,22 @@ impossible d'encaisser.
 3. Choisis **Espèces**, **Carte bancaire** ou **Mixte**, puis termine par
    **Valider la vente**.
 
+## Choisir la cliente (3 gestes)
+1. Dans l'en-tête du ticket, touche **Client**.
+2. Tape un nom, une adresse e-mail ou les chiffres d'un téléphone (à partir
+   de 2 caractères) et touche la bonne fiche. Chaque carte rappelle le
+   nombre de visites et la date de la dernière.
+3. Si la cliente n'a pas encore de fiche : **Nouveau client**, prénom, nom,
+   e-mail **ou** téléphone (un des deux suffit), puis **Créer et
+   sélectionner**. Si la fiche existait déjà, l'écran le dit (« Fiche
+   existante reprise ») et la reprend.
+
+Le nom choisi s'affiche en pastille à côté du ticket ; la croix de la
+pastille retire la cliente, toucher son nom permet d'en changer. Après la
+vente, son adresse est déjà remplie pour l'envoi du ticket, et son prénom
+apparaît sur le ticket imprimé. Pour détacher une cliente d'un ticket déjà
+encaissé : **Tickets du jour** → sélectionne-le → **Détacher**.
+
 ## Faire une remise
 Avant d'encaisser, touche le chip **Remise** (ou **Remise globale**) au-dessus
 du total, choisis € ou %, saisis la valeur : elle s'applique à tout le panier.
@@ -63,3 +79,10 @@ ticket, ou réessaie plus tard depuis **Tickets du jour**.
 
 ## Se déconnecter
 Touche **Administration** en haut de l'écran, puis **Se déconnecter**.
+
+## Quitter la caisse
+En haut à droite de l'écran de caisse : **Accueil** (le tableau de bord),
+**Administration** (les réglages) et **Se déconnecter**. Sur petit écran,
+ces trois boutons sont regroupés sous le bouton **⋯**.
+Sortir de la caisse ne la ferme pas : tu la retrouveras telle quelle en
+revenant — pense quand même à la **clôturer** le soir.

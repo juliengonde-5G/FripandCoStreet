@@ -14,15 +14,80 @@ _PARIS = ZoneInfo("Europe/Paris")
 _WIDTH = 42
 
 
+# Prefixe EXACT de la ligne client du ticket — partage entre l'ecriture
+# (`generate_sale_text`) et la reecriture a la lecture
+# (`apply_client_line`), pour qu'aucune des deux ne puisse deriver.
+CLIENT_LINE_PREFIX = "Client : "
+_DATE_LINE_PREFIX = "Date: "
+
+
+def apply_client_line(content: str, client_label: str | None) -> str:
+    """Remet la ligne « Client : … » d'un ticket DEJA FIGE en accord avec
+    la cliente rattachee AUJOURD'HUI a la vente.
+
+    Pourquoi reecrire a la lecture plutot que regenerer et re-stocker :
+    `receipts.content` est IMMUABLE en base — le trigger
+    `trg_protect_receipt` (migration 0002, fonction reecrite en 0004)
+    refuse tout UPDATE de `content` et tout DELETE, seuls les compteurs
+    `duplicate_count`/`printed_count`/`printed_at` bougent. La ligne
+    stockee reste donc la trace exacte du ticket tel qu'il a ete emis
+    (c'est elle, et elle seule, qui part dans l'archive fiscale scellee,
+    cf. `services/fiscal_closure.py`), et c'est le RENDU — relecture,
+    renvoi par e-mail, reimpression ESC/POS — qui suit le rattachement
+    courant. Rien d'autre du ticket n'est recalcule : un changement
+    d'adresse ou de mention de pied ne doit pas modifier retroactivement
+    un ticket deja remis.
+
+    Le rattachement d'une cliente est par ailleurs la seule mutation
+    autorisee hors signature sur une vente signee (E3/PR3) : la ligne
+    client n'entre dans aucun hash, la reecrire ici ne touche donc a
+    aucune preuve.
+    """
+    lines = [
+        line for line in content.split("\n") if not line.startswith(CLIENT_LINE_PREFIX)
+    ]
+    if client_label:
+        for index, line in enumerate(lines):
+            if line.startswith(_DATE_LINE_PREFIX):
+                lines.insert(index + 1, f"{CLIENT_LINE_PREFIX}{client_label}")
+                break
+        # Pas de ligne « Date: » (format inattendu) : on n'invente pas un
+        # emplacement, le ticket est rendu tel quel.
+    return "\n".join(lines)
+
+
+def format_client_label(first_name: str | None, last_name: str | None) -> str | None:
+    """« Prenom N. » — le seul identifiant client imprime sur un ticket (PR7,
+    I3).
+
+    Le ticket est un document remis en main propre, potentiellement oublie
+    sur le comptoir : il ne porte JAMAIS l'e-mail ni le telephone de la
+    cliente, seulement son prenom et l'initiale de son nom. Sans prenom,
+    rien n'est imprime (``None``) — une ligne « Client : » vide n'aiderait
+    personne.
+    """
+    first = (first_name or "").strip()
+    if not first:
+        return None
+    last = (last_name or "").strip()
+    label = f"{first} {last[0].upper()}." if last else first
+    return label[:_WIDTH - 9]
+
+
 class ReceiptService:
     """Genere le texte formate d'un ticket (80 mm, 42 colonnes)."""
 
     def generate(
-        self, transaction: Transaction, *, shop: dict[str, Any], original_number: int | None = None
+        self,
+        transaction: Transaction,
+        *,
+        shop: dict[str, Any],
+        original_number: int | None = None,
+        client_label: str | None = None,
     ) -> str:
         if transaction.transaction_type == TransactionType.refund:
             return self.generate_refund_text(transaction, shop=shop, original_number=original_number)
-        return self.generate_sale_text(transaction, shop=shop)
+        return self.generate_sale_text(transaction, shop=shop, client_label=client_label)
 
     def _header(self, shop: dict[str, Any]) -> list[str]:
         lines: list[str] = []
@@ -49,11 +114,18 @@ class ReceiptService:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(_PARIS)
 
-    def generate_sale_text(self, transaction: Transaction, *, shop: dict[str, Any]) -> str:
+    def generate_sale_text(
+        self, transaction: Transaction, *, shop: dict[str, Any], client_label: str | None = None
+    ) -> str:
         lines = self._header(shop)
         dt = self._local_dt(transaction)
         lines.append(f"Ticket #{transaction.transaction_number}")
-        lines.append(f"Date: {dt.strftime('%d/%m/%Y %H:%M')}")
+        lines.append(f"{_DATE_LINE_PREFIX}{dt.strftime('%d/%m/%Y %H:%M')}")
+        # PR7/I3 — « Prenom N. » sous l'en-tete quand une cliente est
+        # rattachee a la vente. Jamais son e-mail ni son telephone
+        # (`format_client_label`).
+        if client_label:
+            lines.append(f"{CLIENT_LINE_PREFIX}{client_label}")
         lines.append("-" * _WIDTH)
 
         for item in sorted(transaction.items or [], key=lambda i: i.position):

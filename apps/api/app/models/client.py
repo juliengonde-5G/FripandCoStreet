@@ -29,7 +29,18 @@ class Client(Base):
 
     # Normalise (minuscules, trim) par `services/client_service.py` avant
     # toute ecriture — jamais fait cote base.
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    #
+    # PR7/I3 : nullable depuis la migration 0007 (une fiche peut n'avoir
+    # qu'un telephone). L'unicite n'est plus portee par une contrainte
+    # UNIQUE mais par un index unique PARTIEL `WHERE email IS NOT NULL`
+    # (idem `phone`), et une contrainte CHECK en base garantit qu'au moins
+    # un des deux moyens de contact est renseigne — voir la migration 0007.
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    # Normalise par `client_service.normalize_phone` (chiffres, `+` initial
+    # conserve) : `06…`, `+33…` et `0033…` sont stockes tels quels une fois
+    # espaces, points et tirets retires — aucune conversion d'un format vers
+    # un autre.
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Cache de l'etat courant du consentement `newsletter` (la source de

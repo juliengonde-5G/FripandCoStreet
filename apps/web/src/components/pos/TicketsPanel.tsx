@@ -14,12 +14,18 @@
  * PR3b : « Réimprimer » dans le détail — même branchement réseau/USB que
  * l'écran de fin de vente (`lib/printing.ts`), sans kick automatique (le
  * tiroir a déjà été ouvert, le cas échéant, à la vente d'origine).
+ *
+ * PR7 (I3) : le détail affiche « Client : Prénom Nom » quand la vente est
+ * rattachée, avec un bouton « Détacher » (confirmation inline) —
+ * `DELETE /pos/transactions/{id}/client`. Détacher ne touche ni aux
+ * montants, ni aux paiements, ni à la signature : `client_id` est la seule
+ * colonne mutable d'une vente scellée.
  */
 import React, { useEffect, useState } from "react";
 
 import Modal from "@/components/ui/Modal";
 import { api, ApiError } from "@/lib/api";
-import { formatCurrency, formatDateTime, isValidEmail, maskEmail } from "@/lib/format";
+import { formatClientName, formatCurrency, formatDateTime, isValidEmail, maskEmail } from "@/lib/format";
 import { loadHardwareSettings, printReceipt } from "@/lib/printing";
 import type { HardwareSettings, SendReceiptEmailResponse, TransactionOut, TransactionSummary } from "@/lib/types";
 
@@ -48,6 +54,11 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
   const [emailSending, setEmailSending] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [emailSentTo, setEmailSentTo] = useState<string | null>(null);
+
+  // PR7 (I3) — détachement de la cliente depuis le détail.
+  const [confirmDetach, setConfirmDetach] = useState(false);
+  const [detaching, setDetaching] = useState(false);
+  const [detachError, setDetachError] = useState<string | null>(null);
 
   // PR3b — réimpression physique depuis le détail.
   const [hardware, setHardware] = useState<HardwareSettings | null>(null);
@@ -95,6 +106,8 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
     setEmailSentTo(null);
     setReprintError(null);
     setReprinted(false);
+    setConfirmDetach(false);
+    setDetachError(null);
     try {
       const tx = await api.get<TransactionOut>(`/api/pos/transactions/${id}`);
       setDetail(tx);
@@ -117,6 +130,24 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
       setEmailError(err instanceof ApiError ? err.detail : "Échec de l'envoi du ticket.");
     } finally {
       setEmailSending(false);
+    }
+  };
+
+  const handleDetachClient = async (): Promise<void> => {
+    if (!detail || detaching) return;
+    setDetaching(true);
+    setDetachError(null);
+    try {
+      // La réponse est la vente complète, `client` à `null` : on la prend
+      // telle quelle plutôt que de retoucher l'objet local à la main.
+      const updated = await api.delete<TransactionOut>(`/api/pos/transactions/${detail.id}/client`);
+      setDetail(updated);
+      setEmailDraft(updated.client?.email ?? "");
+      setConfirmDetach(false);
+    } catch (err) {
+      setDetachError(err instanceof ApiError ? err.detail : "Impossible de détacher la cliente.");
+    } finally {
+      setDetaching(false);
     }
   };
 
@@ -247,6 +278,56 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
             </ul>
           </div>
 
+          {detail.client && (
+            <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-4 space-y-2">
+              {detachError && (
+                <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 p-2 text-sm text-fc-danger">
+                  {detachError}
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-3">
+                <p className="min-w-0 text-sm text-fc-ink">
+                  <span className="font-medium">Client :</span>{" "}
+                  {formatClientName(detail.client) ||
+                    (detail.client.email ? maskEmail(detail.client.email) : "fiche sans nom")}
+                </p>
+                {!confirmDetach && (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDetach(true)}
+                    className="min-h-touch flex-shrink-0 rounded-fc border border-fc-line px-3 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
+                  >
+                    Détacher
+                  </button>
+                )}
+              </div>
+              {confirmDetach && (
+                <div className="rounded-fc bg-fc-bg-alt p-3 space-y-2">
+                  <p className="text-sm text-fc-ink-soft">
+                    Détacher la cliente de ce ticket ? Le montant, les paiements et le ticket ne changent pas.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDetach(false)}
+                      className="min-h-touch flex-1 rounded-fc border border-fc-line bg-fc-surface px-3 py-2 text-sm font-medium text-fc-ink hover:bg-fc-surface/70"
+                    >
+                      Annuler
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDetachClient()}
+                      disabled={detaching}
+                      className="min-h-touch flex-1 rounded-fc bg-fc-danger px-3 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {detaching ? "Détachement…" : "Détacher"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {hardware && hardware.printer_mode !== "none" && (
             <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-4 space-y-2">
               {reprintError && (
@@ -268,9 +349,6 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
 
           <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-4 space-y-2">
             <p className="text-sm font-medium text-fc-ink">Ticket par e-mail</p>
-            {detail.client && (
-              <p className="text-xs text-fc-ink-mute">Client lié : {maskEmail(detail.client.email)}</p>
-            )}
             {emailSentTo ? (
               <p className="text-sm font-medium text-fc-primary-deep">Ticket envoyé à {emailSentTo}.</p>
             ) : (
