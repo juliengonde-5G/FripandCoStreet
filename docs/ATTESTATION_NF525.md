@@ -515,6 +515,25 @@ acceptables pour une caisse mono-poste auto-attestée.
   (`apps/api/alembic/versions/0004_receipts_printed.py:28-66`). Ces
   compteurs opérationnels ne portent aucune information fiscale et ne
   contredisent pas l'intégrité du ticket.
+- **Identité de la vendeuse, hors signature mais gelée.** Depuis PR8, chaque
+  vente, annulation et mouvement de caisse porte l'identité de la vendeuse
+  qui a encaissé (`cashier_id`, table `cashiers` — des identités de caisse
+  protégées par un code PIN, pas des comptes utilisateurs). Cette colonne
+  **n'entre pas dans le payload signé**
+  (`apps/api/app/services/fiscal.py::_transaction_payload` ne la référence
+  pas) : le hash d'une vente est rigoureusement le même avec ou sans
+  vendeuse, et la mise en service des codes n'a donc aucun effet sur la
+  chaîne de preuve existante. Contrairement à `client_id`, elle est en
+  revanche **posée à l'INSERT puis gelée** : le trigger
+  `fripco_protect_signed_transaction`, réécrit par
+  `apps/api/alembic/versions/0008_cashiers_invoices.py`, refuse toute
+  modification de `cashier_id` sur une vente signée, et `cash_movements`
+  reste intégralement en ajout seul. Une vente ne peut donc pas être
+  réattribuée à une autre vendeuse après coup. La ventilation des ventes par
+  vendeuse affichée sur le rapport Z est **recalculée à la lecture** depuis
+  ces ventes immuables, et non scellée dans le Z : aucun champ n'a été
+  ajouté au payload signé d'un Z, donc aucune version de signature fiscale
+  n'a eu à être incrémentée.
 - **Signature à clé secrète, pas à clé publique.** La chaîne de preuve
   (ventes, Z, JET) est scellée par HMAC-SHA256, un algorithme à **clé
   secrète** (`FISCAL_SIGNING_KEY`). Cela signifie qu'un tiers extérieur

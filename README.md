@@ -58,4 +58,5 @@ cd ../web && npm run lint && npx tsc --noEmit && npm run build
 | PR4 | Écritures comptables par Z, CSV Pennylane et FEC (format de l'application source), exports bruts, clôtures mensuelle/annuelle avec archive signée, export fiscal, PDF du Z, attestation, guide vendeur, procédure de clôture | livré |
 | PR5 | Sauvegarde applicative planifiée de la base (dump `pg_dump\|gzip` nocturne, écran admin, alerte e-mail), libellé SumUp dérivé du nom de boutique | livré |
 | PR6 | Tableau de bord d'accueil (jour, mois, 7 derniers jours) et objectifs de chiffre d'affaires réglables | livré |
-| PR7 | Barre latérale unifiée, sorties de caisse explicites, client en caisse sans fidélité (téléphone ou e-mail, ticket au prénom), logo régénéré | **en cours (cette PR)** |
+| PR7 | Barre latérale unifiée, sorties de caisse explicites, client en caisse sans fidélité (téléphone ou e-mail, ticket au prénom), logo régénéré | livré |
+| PR8 | Vendeuses identifiées par code PIN (relève en cours de journée, ticket et rapport Z au nom de la vendeuse), facture B2B numérotée et avoir | **en cours (cette PR)** |
