@@ -18,6 +18,11 @@ _WIDTH = 42
 # (`generate_sale_text`) et la reecriture a la lecture
 # (`apply_client_line`), pour qu'aucune des deux ne puisse deriver.
 CLIENT_LINE_PREFIX = "Client : "
+# PR8 (J2) — ligne de la vendeuse, ecrite UNE FOIS a l'emission, juste sous
+# la ligne Date. Contrairement a la ligne « Client : », elle n'est jamais
+# reecrite a la lecture : le ticket doit porter le nom de celle qui a
+# encaisse, meme si la releve a eu lieu depuis.
+CASHIER_LINE_PREFIX = "Vendeuse : "
 _DATE_LINE_PREFIX = "Date: "
 
 
@@ -49,7 +54,14 @@ def apply_client_line(content: str, client_label: str | None) -> str:
     if client_label:
         for index, line in enumerate(lines):
             if line.startswith(_DATE_LINE_PREFIX):
-                lines.insert(index + 1, f"{CLIENT_LINE_PREFIX}{client_label}")
+                # La ligne « Vendeuse : … » (PR8/J2), quand elle existe,
+                # suit immediatement la date et reste au-dessus du client :
+                # on insere donc APRES elle, sinon une simple relecture du
+                # ticket en inverserait l'ordre.
+                position = index + 1
+                if position < len(lines) and lines[position].startswith(CASHIER_LINE_PREFIX):
+                    position += 1
+                lines.insert(position, f"{CLIENT_LINE_PREFIX}{client_label}")
                 break
         # Pas de ligne « Date: » (format inattendu) : on n'invente pas un
         # emplacement, le ticket est rendu tel quel.
@@ -84,10 +96,18 @@ class ReceiptService:
         shop: dict[str, Any],
         original_number: int | None = None,
         client_label: str | None = None,
+        cashier_label: str | None = None,
     ) -> str:
         if transaction.transaction_type == TransactionType.refund:
-            return self.generate_refund_text(transaction, shop=shop, original_number=original_number)
-        return self.generate_sale_text(transaction, shop=shop, client_label=client_label)
+            return self.generate_refund_text(
+                transaction,
+                shop=shop,
+                original_number=original_number,
+                cashier_label=cashier_label,
+            )
+        return self.generate_sale_text(
+            transaction, shop=shop, client_label=client_label, cashier_label=cashier_label
+        )
 
     def _header(self, shop: dict[str, Any]) -> list[str]:
         lines: list[str] = []
@@ -115,12 +135,20 @@ class ReceiptService:
         return dt.astimezone(_PARIS)
 
     def generate_sale_text(
-        self, transaction: Transaction, *, shop: dict[str, Any], client_label: str | None = None
+        self,
+        transaction: Transaction,
+        *,
+        shop: dict[str, Any],
+        client_label: str | None = None,
+        cashier_label: str | None = None,
     ) -> str:
         lines = self._header(shop)
         dt = self._local_dt(transaction)
         lines.append(f"Ticket #{transaction.transaction_number}")
         lines.append(f"{_DATE_LINE_PREFIX}{dt.strftime('%d/%m/%Y %H:%M')}")
+        # PR8/J2 — vendeuse qui a encaisse, sous la ligne Date.
+        if cashier_label:
+            lines.append(f"{CASHIER_LINE_PREFIX}{cashier_label[:_WIDTH - len(CASHIER_LINE_PREFIX)]}")
         # PR7/I3 — « Prenom N. » sous l'en-tete quand une cliente est
         # rattachee a la vente. Jamais son e-mail ni son telephone
         # (`format_client_label`).
@@ -196,6 +224,7 @@ class ReceiptService:
         *,
         shop: dict[str, Any],
         original_number: int | None = None,
+        cashier_label: str | None = None,
     ) -> str:
         lines = self._header(shop)
         lines.append("** TICKET D'ANNULATION **".center(_WIDTH))
@@ -203,7 +232,11 @@ class ReceiptService:
 
         dt = self._local_dt(transaction)
         lines.append(f"Annulation #{transaction.transaction_number}")
-        lines.append(f"Date: {dt.strftime('%d/%m/%Y %H:%M')}")
+        lines.append(f"{_DATE_LINE_PREFIX}{dt.strftime('%d/%m/%Y %H:%M')}")
+        # PR8/J2 — la vendeuse qui a passe l'annulation, au meme endroit que
+        # sur un ticket de vente.
+        if cashier_label:
+            lines.append(f"{CASHIER_LINE_PREFIX}{cashier_label[:_WIDTH - len(CASHIER_LINE_PREFIX)]}")
         if original_number is not None:
             lines.append(f"Annule le ticket n° {original_number}")
         if transaction.refund_reason:

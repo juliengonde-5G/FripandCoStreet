@@ -492,6 +492,14 @@ class FiscalService:
         z_report = ZReport(
             report_number=next_number,
             user_id=user_id,
+            # PR8/J1 — vendeuse qui tenait la caisse a la cloture. HORS du
+            # payload signe ci-dessus (`z_payload`) : ajouter un champ a la
+            # signature d'un Z serait une evolution fiscale majeure (bump de
+            # FISCAL_SIGNATURE_VERSION, cf. CLAUDE.md), ce que l'ajout d'une
+            # donnee d'exploitation ne justifie pas. La colonne est posee a
+            # l'INSERT et le Z est scelle des sa creation
+            # (`fripco_protect_z_report` refuse tout UPDATE).
+            cashier_id=drawer.closed_by_cashier_id or drawer.current_cashier_id,
             cash_drawer_id=drawer.id,
             opened_at=drawer.opened_at,
             closed_at=closed_at,

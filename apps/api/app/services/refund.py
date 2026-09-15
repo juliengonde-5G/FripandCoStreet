@@ -107,9 +107,15 @@ class RefundService:
 
         from app.services.pos import DrawerClosed, PosService
 
-        drawer = await PosService(self.db).get_open_drawer()
+        pos = PosService(self.db)
+        drawer = await pos.get_open_drawer()
         if drawer is None:
             raise DrawerClosed()
+        # PR8/J2 — une annulation est une operation de caisse a part
+        # entiere : elle porte la vendeuse identifiee a cet instant, et
+        # elle est refusee (422 `cashier_required`) si le reglage l'exige
+        # et que personne ne tient la caisse.
+        cashier_id = await pos.resolve_cashier(drawer)
 
         original = (
             await self.db.execute(select(Transaction).where(Transaction.id == original_tx_id))
@@ -157,6 +163,8 @@ class RefundService:
             transaction_type=TransactionType.refund,
             user_id=user_id,
             client_uuid=client_uuid,
+            # Hors signature, posee a l'INSERT puis gelee (migration 0008).
+            cashier_id=cashier_id,
             original_transaction_id=original.id,
             refund_reason=reason,
             discount_type=original.discount_type,
@@ -214,6 +222,7 @@ class RefundService:
             refund_tx,
             shop=await SettingsService(self.db).get("shop"),
             original_number=original.transaction_number,
+            cashier_label=await pos.cashier_label(cashier_id),
         )
         self.db.add(Receipt(transaction_id=refund_tx.id, content=receipt_text))
 
