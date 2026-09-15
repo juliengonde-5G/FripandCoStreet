@@ -63,3 +63,10 @@ ticket, ou réessaie plus tard depuis **Tickets du jour**.
 
 ## Se déconnecter
 Touche **Administration** en haut de l'écran, puis **Se déconnecter**.
+
+## Quitter la caisse
+En haut à droite de l'écran de caisse : **Accueil** (le tableau de bord),
+**Administration** (les réglages) et **Se déconnecter**. Sur petit écran,
+ces trois boutons sont regroupés sous le bouton **⋯**.
+Sortir de la caisse ne la ferme pas : tu la retrouveras telle quelle en
+revenant — pense quand même à la **clôturer** le soir.
