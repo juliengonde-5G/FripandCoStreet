@@ -2,7 +2,7 @@
 
 /**
  * Onglet Archives fiscales (PR4, docs/ARCHITECTURE_PR4.md §5) : liste des
- * clôtures scellées (journalières/mensuelles/annuelles + manuelles),
+ * clôtures scellées (mensuelles/annuelles + manuelles),
  * déclenchement d'une clôture manuelle avec garde-fous et double
  * confirmation, téléchargement de l'archive, contrôle d'intégrité, export
  * fiscal à la demande. Vocabulaire sans jargon : « archive fiscale »,
@@ -105,7 +105,7 @@ function FiscalClosuresListCard({
   };
 
   return (
-    <Card title="Archives fiscales" subtitle="Historique des clôtures scellées — journalières, mensuelles, annuelles et manuelles.">
+    <Card title="Archives fiscales" subtitle="Historique des clôtures scellées — mensuelles, annuelles et manuelles.">
       {loading ? (
         <p className="text-sm text-fc-ink-soft">Chargement…</p>
       ) : (
@@ -407,7 +407,7 @@ function IntegrityCheckCard() {
             <IntegrityTile label="Clôtures fiscales" check={closuresResult ?? undefined} />
             <IntegrityTile label="Ventes" check={fullResult?.transactions} />
             <IntegrityTile label="Clôtures de caisse (Z)" check={fullResult?.z_reports} />
-            <IntegrityTile label="Écritures comptables" check={fullResult?.accounting_exports} />
+            <IntegrityTile label="Écritures comptables" check={fullResult?.accounting} />
             <IntegrityTile label="Journal des événements" check={fullResult?.jet} />
           </div>
         )}

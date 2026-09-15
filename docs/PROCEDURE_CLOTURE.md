@@ -13,7 +13,7 @@ manager. Les libellés cités entre **gras** sont ceux affichés à l'écran.
    (un montant global). Le montant compté s'affiche en continu en haut de
    l'écran.
 3. Touche **Continuer** : l'écran de **comparaison** affiche trois lignes :
-   - **Attendu** : ce que la caisse devrait contenir (fond d'ouverture +
+   - **Attendu en caisse** : ce que la caisse devrait contenir (fond d'ouverture +
      ventes espèces − remboursements espèces + entrées − sorties de la
      journée) ;
    - **Compté** : ce que tu viens de saisir ;
@@ -92,12 +92,20 @@ figure dans le Z produit.
   l'origine) et **Empreinte** (SHA-256 courte, avec un bouton **Copier**).
   Vérifie régulièrement qu'une clôture existe bien pour chaque mois écoulé.
   Le bouton **Vérifier l'intégrité** relance un contrôle complet de la
-  continuité des ventes, des clôtures et des écritures comptables.
+  continuité des ventes, des clôtures et des écritures comptables. Cette
+  liste ne référence que les clôtures **mensuelles, annuelles et
+  manuelles** : le Z du jour ne s'y trouve pas, il se consulte dans
+  **Administration → Réglages → Clôtures de caisse** (bouton **PDF**).
 - **Clôture manuelle.** En cas de besoin (contrôle, période particulière,
   rattrapage après une alerte), la section **Clôturer maintenant** permet
   de lancer une clôture à la demande sur une période choisie, avec double
   confirmation — au-delà, plus aucune modification n'est possible sur
-  cette période.
+  cette période. Elle ne peut porter que sur une période **entièrement
+  terminée** : tant que la fin de période choisie n'est pas encore passée,
+  l'écran l'indique (« Cette période n'est pas encore terminée : elle doit
+  être entièrement passée pour être clôturée. ») et bloque la clôture ; côté
+  serveur, toute tentative sur une période non terminée est refusée
+  (« Clôture future interdite. »).
 - **Télécharger l'archive.** Le bouton **Télécharger l'archive** fournit un
   fichier compressé (gzip) contenant l'intégralité des données de la
   période : ventes, tickets, rapports Z, mouvements de caisse, journal des

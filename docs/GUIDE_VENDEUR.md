@@ -8,7 +8,7 @@ impossible d'encaisser.
 
 ## Encaisser une vente (3 gestes)
 1. Tape le prix sur le pavé numérique (le libellé est facultatif) puis
-   touche **Ajouter un article**. Répète pour chaque article du panier.
+   touche **Ajouter au panier**. Répète pour chaque article du panier.
 2. Touche le gros bouton **Encaisser**.
 3. Choisis **Espèces**, **Carte bancaire** ou **Mixte**, puis termine par
    **Valider la vente**.

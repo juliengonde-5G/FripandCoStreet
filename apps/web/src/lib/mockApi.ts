@@ -1146,7 +1146,7 @@ export async function mockFetchAPI<T = unknown>(
       jet: { ok: true, count: jetEvents.length, message: "Journal des événements complet." },
       // PR4 (F5/F6) : extension aux clôtures et aux écritures comptables.
       closures: { ok: true, count: fiscalClosures.length, message: "Chaîne des clôtures fiscales cohérente." },
-      accounting_exports: {
+      accounting: {
         ok: accountingExports.every((e) => e.balanced),
         count: accountingExports.length,
         message: accountingExports.every((e) => e.balanced)

@@ -267,7 +267,7 @@ export interface FiscalIntegrityResponse {
    * fiscales et aux écritures comptables — absent sur un backend qui ne le
    * fournit pas encore (compatibilité ascendante, cf. IntegrityCard). */
   closures?: FiscalIntegrityCheck;
-  accounting_exports?: FiscalIntegrityCheck;
+  accounting?: FiscalIntegrityCheck;
 }
 
 /** Une ligne du journal des événements (JET) — jargon interne « JET »,
