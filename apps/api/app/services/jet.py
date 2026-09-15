@@ -96,6 +96,12 @@ EVENT_CLOSURE_CREATED = "closure.created"
 EVENT_CLOSURE_FAILED = "closure.failed"
 EVENT_EXPORT_DOWNLOADED = "export.downloaded"
 
+# PR5 — sauvegardes applicatives de la base (docs/ARCHITECTURE_PR5.md §1 G4/G5).
+# `export.downloaded` (ci-dessus, kind="database_backup") couvre deja le
+# telechargement ; seule la suppression manuelle d'une sauvegarde a besoin
+# d'un type dedie.
+EVENT_BACKUP_DELETED = "backup.deleted"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""
