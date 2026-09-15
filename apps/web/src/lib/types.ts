@@ -36,6 +36,11 @@ export interface DrawerCurrentResponse {
   open: boolean;
   drawer?: DrawerInfo;
   today?: DrawerToday;
+  /** PR8 (J2/J4) — vendeuse identifiée sur ce poste, `null` si personne.
+   * État courant du tiroir (mutable, jamais fiscal) : c'est la source de
+   * vérité de la pastille « Vendeuse : … » de la barre haute. Absent des
+   * réponses d'un backend antérieur à PR8, donc traité comme `null`. */
+  current_cashier?: CashierRef | null;
 }
 
 export type CashMovementDirection = "in" | "out";
@@ -786,6 +791,97 @@ export interface CreatePosClientRequest {
 export interface CreatePosClientResponse {
   client: PosClient;
   created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// PR8 — vendeuses par code PIN (docs/ARCHITECTURE_PR8.md §1, J2/J3/J4)
+//
+// Une vendeuse n'est PAS un compte : le manager reste le seul utilisateur
+// de l'application. C'est une identité de caisse (un prénom + un code à
+// 4 chiffres) qu'on pose sur le tiroir le temps d'un service, et qu'on
+// retire à la relève. Deux vues :
+//   - `CashierRef` : ce que la caisse affiche (identifiant + prénom) ;
+//   - `AdminCashier` : la ligne d'administration (PIN défini ou non,
+//     active ou non) — jamais le PIN lui-même, ni son empreinte.
+// ---------------------------------------------------------------------------
+
+/** Vendeuse telle que la caisse la nomme : pastille de la barre haute,
+ * ligne « Vendeuse : … » du ticket. */
+export interface CashierRef {
+  id: string;
+  display_name: string;
+}
+
+/** `GET /api/pos/cashiers` — vendeuses actives proposées à l'identification.
+ * `has_pin` vaut `false` pour une fiche créée sans code : elle est listée
+ * mais l'identification est impossible tant que le manager n'a pas posé de
+ * code (l'écran le dit plutôt que de faire échouer la saisie). */
+export interface PosCashier extends CashierRef {
+  has_pin: boolean;
+}
+
+/** `GET /api/pos/cashiers`. */
+export interface PosCashierListResponse {
+  cashiers: PosCashier[];
+}
+
+/** `POST /api/pos/cashiers/identify` — 401 `invalid_pin`, 429 après
+ * 5 essais (le `detail` porte l'attente, l'en-tête `Retry-After` aussi
+ * quand le serveur le fournit). */
+export interface CashierIdentifyRequest {
+  cashier_id: string;
+  pin: string;
+}
+
+/** `POST /api/pos/cashiers/identify` → 200. */
+export interface CashierIdentifyResponse {
+  cashier: CashierRef;
+}
+
+/** Ligne d'administration (`GET /api/admin/cashiers`). Le code n'apparaît
+ * jamais : seulement « défini » ou non. */
+export interface AdminCashier extends CashierRef {
+  has_pin: boolean;
+  active: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+  deactivated_at?: string | null;
+}
+
+/** `GET /api/admin/cashiers`. */
+export interface AdminCashierListResponse {
+  cashiers: AdminCashier[];
+}
+
+/** `POST /api/admin/cashiers` → 201 `{cashier}` ; `PUT /api/admin/cashiers/{id}`
+ * et `PUT /api/admin/cashiers/{id}/pin` renvoient la même enveloppe. */
+export interface AdminCashierResponse {
+  cashier: AdminCashier;
+}
+
+/** `POST /api/admin/cashiers` — le code est exigé à la création (exactement
+ * 4 chiffres, 422 `weak_pin` sur une suite triviale). */
+export interface CreateCashierRequest {
+  display_name: string;
+  pin: string;
+}
+
+/** `PUT /api/admin/cashiers/{id}` — renommage et/ou (dés)activation. */
+export interface UpdateCashierRequest {
+  display_name?: string;
+  active?: boolean;
+}
+
+/** `PUT /api/admin/cashiers/{id}/pin`. */
+export interface UpdateCashierPinRequest {
+  pin: string;
+}
+
+/** Réglages `pos` (`GET/PUT /api/admin/settings/pos`) — quand
+ * `cashier_required` est vrai, plus une seule vente ni un seul mouvement
+ * sans vendeuse identifiée (422 `cashier_required`). */
+export interface PosSettings {
+  cashier_required: boolean;
 }
 
 // ---------------------------------------------------------------------------
