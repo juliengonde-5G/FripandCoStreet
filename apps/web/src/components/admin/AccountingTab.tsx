@@ -77,11 +77,17 @@ export default function AccountingTab() {
 // Comptes comptables (F1)
 // ---------------------------------------------------------------------------
 
-const ACCOUNT_FIELDS: { field: keyof AccountingSettings; label: string; help: string }[] = [
-  { field: "account_sales", label: "Compte ventes (707)", help: "Ventes de marchandises" },
-  { field: "account_tva", label: "Compte TVA collectée (44571)", help: "TVA collectée" },
-  { field: "account_cash", label: "Compte caisse (531)", help: "Encaissements en espèces" },
-  { field: "account_card", label: "Compte carte bancaire (512)", help: "Encaissements par carte" },
+/** Comptes avec un libellé éditable (F1, `AccountingSettingsIn` côté
+ * backend) — numéro + libellé forment une paire. */
+const LABELED_ACCOUNT_FIELDS: { field: keyof AccountingSettings; labelField: keyof AccountingSettings; title: string }[] = [
+  { field: "account_sales", labelField: "label_sales", title: "Ventes (707)" },
+  { field: "account_tva", labelField: "label_tva", title: "TVA collectée (44571)" },
+  { field: "account_cash", labelField: "label_cash", title: "Caisse (531)" },
+  { field: "account_card", labelField: "label_card", title: "Carte bancaire (512)" },
+];
+
+/** Comptes d'ajustement d'arrondi — pas de libellé éditable côté backend. */
+const ROUNDING_ACCOUNT_FIELDS: { field: keyof AccountingSettings; label: string; help: string }[] = [
   { field: "account_rounding_expense", label: "Compte d'arrondi en charge (658)", help: "Ajustement d'arrondi défavorable" },
   { field: "account_rounding_income", label: "Compte d'arrondi en produit (758)", help: "Ajustement d'arrondi favorable" },
 ];
@@ -89,9 +95,13 @@ const ACCOUNT_FIELDS: { field: keyof AccountingSettings; label: string; help: st
 const EMPTY_ACCOUNTING: AccountingSettings = {
   journal_code: "",
   account_sales: "",
+  label_sales: "",
   account_tva: "",
+  label_tva: "",
   account_cash: "",
+  label_cash: "",
   account_card: "",
+  label_card: "",
   account_rounding_expense: "",
   account_rounding_income: "",
 };
@@ -150,7 +160,34 @@ function AccountingSettingsCard() {
             />
           </label>
           <div className="grid gap-4 sm:grid-cols-2">
-            {ACCOUNT_FIELDS.map(({ field, label, help }) => (
+            {LABELED_ACCOUNT_FIELDS.map(({ field, labelField, title }) => (
+              <div key={field} className="rounded-fc-lg border border-fc-line p-3 space-y-3">
+                <span className="block text-sm font-semibold text-fc-ink">{title}</span>
+                <label className="block">
+                  <span className="block text-[11px] uppercase tracking-[0.12em] font-medium text-fc-ink-soft mb-1.5">Numéro de compte</span>
+                  <input
+                    value={form[field]}
+                    onChange={set(field)}
+                    maxLength={8}
+                    inputMode="numeric"
+                    className="w-full min-h-touch px-4 py-2.5 rounded-fc border border-fc-line bg-fc-surface text-fc-ink focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary font-mono"
+                  />
+                </label>
+                <label className="block">
+                  <span className="block text-[11px] uppercase tracking-[0.12em] font-medium text-fc-ink-soft mb-1.5">Libellé</span>
+                  <input
+                    value={form[labelField]}
+                    onChange={set(labelField)}
+                    maxLength={100}
+                    className="w-full min-h-touch px-4 py-2.5 rounded-fc border border-fc-line bg-fc-surface text-fc-ink focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
+                  />
+                </label>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            {ROUNDING_ACCOUNT_FIELDS.map(({ field, label, help }) => (
               <label key={field} className="block">
                 <span className="block text-[11px] uppercase tracking-[0.12em] font-medium text-fc-ink-soft mb-1.5">{label}</span>
                 <input

@@ -463,20 +463,23 @@ export interface DrawerKickResponse {
 // PR4 — exports comptables, archives fiscales (docs/ARCHITECTURE_PR4.md §4)
 // ---------------------------------------------------------------------------
 
-/** `GET/PUT /admin/settings/accounting` (F1) — comptes comptables et code
- * journal utilisés pour générer une écriture par clôture Z. Valeurs par
- * défaut du contrat : journal `VTE`, comptes `707100` / `44571` / `531000` /
- * `512000` / `658000` / `758000`. Les libellés de compte affichés dans le
- * formulaire (« Ventes marchandises », « TVA collectée »…) sont un texte fixe
- * du contrat, pas un champ éditable séparé — hypothèse de forme retenue en
- * l'absence de détail explicite du contrat sur un champ libellé par compte
- * (voir rapport de livraison). */
+/** `GET/PUT /admin/settings/accounting` (F1) — comptes comptables, leurs
+ * libellés et le code journal utilisés pour générer une écriture par
+ * clôture Z. Forme réconciliée avec `AccountingSettingsIn`
+ * (`apps/api/app/api/admin/router.py`) : chaque compte a un libellé
+ * éditable, sauf les comptes d'ajustement d'arrondi (658/758) qui n'en ont
+ * pas côté backend. Défauts identiques au backend : journal `VTE`, comptes
+ * `707100` / `44571` / `531000` / `512000` / `658000` / `758000`. */
 export interface AccountingSettings {
   journal_code: string;
   account_sales: string; // 707 — ventes de marchandises
+  label_sales: string;
   account_tva: string; // 44571 — TVA collectée
+  label_tva: string;
   account_cash: string; // 531 — caisse
+  label_cash: string;
   account_card: string; // 512 — carte bancaire (CB SumUp)
+  label_card: string;
   account_rounding_expense: string; // 658 — charges diverses (ajustement d'arrondi)
   account_rounding_income: string; // 758 — produits divers (ajustement d'arrondi)
 }

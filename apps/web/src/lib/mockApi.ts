@@ -196,14 +196,18 @@ let settings: {
     auto_print_on_sale: true,
     auto_kick_on_cash: true,
   },
-  // Défauts F1 (docs/ARCHITECTURE_PR4.md) — identiques à l'application
-  // source : journal des ventes, comptes 707/44571/531/512/658/758.
+  // Défauts F1 — réconciliés avec `AccountingSettingsIn`
+  // (apps/api/app/api/admin/router.py) : mêmes valeurs, mêmes libellés.
   accounting: {
     journal_code: "VTE",
     account_sales: "707100",
+    label_sales: "Ventes marchandises",
     account_tva: "44571",
+    label_tva: "TVA collectée 20%",
     account_cash: "531000",
+    label_cash: "Caisse",
     account_card: "512000",
+    label_card: "CB SumUp",
     account_rounding_expense: "658000",
     account_rounding_income: "758000",
   },
@@ -587,46 +591,55 @@ function createAccountingExportForZ(z: ZReport): AccountingExportDetail {
 
   const lines: AccountingExportLine[] = [];
   let n = 0;
+  // Libellés de compte = ceux du réglage (éditables, F1) — aligné sur
+  // `build_journal_lines` (apps/api/app/services/accounting_service.py) :
+  // `"{label} — {z_ref}"`, un signe négatif net devient un remboursement.
   if (cashNet !== 0) {
+    const label = cfg.label_cash;
     lines.push({
       line_number: ++n,
       account_number: cfg.account_cash,
-      account_label: "Caisse",
-      label: `Encaissements espèces ${piece}`,
-      debit: round2(cashNet),
-      credit: 0,
+      account_label: label,
+      label: cashNet > 0 ? `${label} — ${piece}` : `Remboursement ${label} — ${piece}`,
+      debit: cashNet > 0 ? round2(cashNet) : 0,
+      credit: cashNet > 0 ? 0 : round2(Math.abs(cashNet)),
       piece_reference: piece,
     });
   }
   if (cardNet !== 0) {
+    const label = cfg.label_card;
     lines.push({
       line_number: ++n,
       account_number: cfg.account_card,
-      account_label: "Carte bancaire",
-      label: `Encaissements carte ${piece}`,
-      debit: round2(cardNet),
-      credit: 0,
+      account_label: label,
+      label: cardNet > 0 ? `${label} — ${piece}` : `Remboursement ${label} — ${piece}`,
+      debit: cardNet > 0 ? round2(cardNet) : 0,
+      credit: cardNet > 0 ? 0 : round2(Math.abs(cardNet)),
       piece_reference: piece,
     });
   }
-  lines.push({
-    line_number: ++n,
-    account_number: cfg.account_sales,
-    account_label: "Ventes de marchandises",
-    label: `Ventes nettes ${piece}`,
-    debit: 0,
-    credit: round2(z.total_ht),
-    piece_reference: piece,
-  });
-  lines.push({
-    line_number: ++n,
-    account_number: cfg.account_tva,
-    account_label: "TVA collectée",
-    label: `TVA collectée ${piece}`,
-    debit: 0,
-    credit: round2(z.total_tva),
-    piece_reference: piece,
-  });
+  if (z.total_ht !== 0) {
+    lines.push({
+      line_number: ++n,
+      account_number: cfg.account_sales,
+      account_label: cfg.label_sales,
+      label: `${cfg.label_sales} — ${piece}`,
+      debit: z.total_ht > 0 ? 0 : round2(Math.abs(z.total_ht)),
+      credit: z.total_ht > 0 ? round2(z.total_ht) : 0,
+      piece_reference: piece,
+    });
+  }
+  if (z.total_tva !== 0) {
+    lines.push({
+      line_number: ++n,
+      account_number: cfg.account_tva,
+      account_label: cfg.label_tva,
+      label: `${cfg.label_tva} — ${piece}`,
+      debit: z.total_tva > 0 ? 0 : round2(Math.abs(z.total_tva)),
+      credit: z.total_tva > 0 ? round2(z.total_tva) : 0,
+      piece_reference: piece,
+    });
+  }
 
   let totalDebit = round2(lines.reduce((s, l) => s + l.debit, 0));
   let totalCredit = round2(lines.reduce((s, l) => s + l.credit, 0));
@@ -1010,13 +1023,17 @@ export async function mockFetchAPI<T = unknown>(
         fail(422, "Taux de TVA non autorisé.", "invalid_tva_rate");
       }
       if (key === "accounting") {
-        // Validation F1 : journal 1-5 caractères, comptes numériques 6-8
-        // chiffres.
+        // Validation F1 réconciliée avec `AccountingSettingsIn`
+        // (apps/api/app/api/admin/router.py, `_JOURNAL_CODE_RE` /
+        // `_ACCOUNT_NUMBER_RE`) : journal 1-5 caractères alphanumériques
+        // (mis en majuscules à l'enregistrement, comme le backend),
+        // comptes 3-8 chiffres (couvre le défaut 44571, 5 chiffres).
         const merged = { ...settings.accounting, ...body } as AccountingSettings;
         const journal = (merged.journal_code || "").trim();
-        if (journal.length < 1 || journal.length > 5) {
-          fail(422, "Le code journal doit contenir entre 1 et 5 caractères.", "invalid_journal_code");
+        if (!/^[A-Za-z0-9]{1,5}$/.test(journal)) {
+          fail(422, "Code journal invalide (1 à 5 caractères alphanumériques).", "invalid_journal_code");
         }
+        body.journal_code = journal.toUpperCase();
         const accountFields: (keyof AccountingSettings)[] = [
           "account_sales",
           "account_tva",
@@ -1027,8 +1044,8 @@ export async function mockFetchAPI<T = unknown>(
         ];
         for (const field of accountFields) {
           const value = String(merged[field] ?? "").trim();
-          if (!/^\d{6,8}$/.test(value)) {
-            fail(422, "Chaque numéro de compte doit contenir de 6 à 8 chiffres.", "invalid_account_number");
+          if (!/^\d{3,8}$/.test(value)) {
+            fail(422, `Numéro de compte invalide (${JSON.stringify(value)}) : 3 à 8 chiffres attendus.`, "invalid_account_number");
           }
         }
       }
@@ -1606,25 +1623,71 @@ function exportsForMonth(year: number, month: number): AccountingExportDetail[] 
   return accountingExports.filter((e) => e.export_date.startsWith(prefix)).sort((a, b) => a.z_number - b.z_number);
 }
 
+/** Échappement CSV (RFC 4180) — miroir de `_csv_field`
+ * (apps/api/app/services/accounting_service.py) : les libellés de compte
+ * sont désormais éditables et peuvent contenir un « ; ». */
+function csvField(value: string): string {
+  if (value.includes(";") || value.includes('"') || value.includes("\n") || value.includes("\r")) {
+    return `"${value.replaceAll('"', '""')}"`;
+  }
+  return value;
+}
+
+// En-tête et ordre des colonnes strictement alignés sur
+// `_PENNYLANE_CSV_COLUMNS` (apps/api/app/services/accounting_service.py) —
+// « Débit et/ou Crédit » et « Crédit » sont deux colonnes de montant
+// distinctes (une par ligne d'écriture), pas un signe combiné.
+const PENNYLANE_CSV_COLUMNS = [
+  "Date",
+  "Code Journal",
+  "Numéro de compte",
+  "Libellé de compte",
+  "Libellé de ligne",
+  "Taux de TVA du compte",
+  "Code pays du compte",
+  "Libellé de pièce",
+  "Numéro de pièce",
+  "Débit et/ou Crédit",
+  "Crédit",
+  "Famille de catégories",
+  "Catégorie",
+  "Identifiant de ligne",
+  "Identifiant de lettrage",
+];
+
 function buildMonthlyCsv(year: number, month: number): string {
-  const rows = ["Date;Journal;Compte;Libellé compte;Pièce;Libellé écriture;Débit;Crédit"];
+  const cfg = settings.accounting;
+  const rows = [PENNYLANE_CSV_COLUMNS.map(csvField).join(";")];
   for (const exp of exportsForMonth(year, month)) {
+    if (exp.lines.length === 0) continue;
+    const ecrDate = csvDateFr(exp.export_date);
+    const pieceNum = exp.lines[0].piece_reference;
+    const pieceLabel = `Clôture caisse ${pieceNum} du ${ecrDate}`;
     for (const line of exp.lines) {
       rows.push(
         [
-          csvDateFr(exp.export_date),
-          settings.accounting.journal_code,
+          ecrDate,
+          cfg.journal_code,
           line.account_number,
           line.account_label,
-          line.piece_reference,
           line.label,
-          line.debit > 0 ? csvAmount(line.debit) : "",
-          line.credit > 0 ? csvAmount(line.credit) : "",
-        ].join(";"),
+          "",
+          "",
+          pieceLabel,
+          pieceNum,
+          csvAmount(line.debit),
+          csvAmount(line.credit),
+          "",
+          "",
+          "",
+          "",
+        ]
+          .map(csvField)
+          .join(";"),
       );
     }
   }
-  return rows.join("\r\n");
+  return rows.join("\r\n") + "\r\n";
 }
 
 function isoDay(value: string | null | undefined): string {
