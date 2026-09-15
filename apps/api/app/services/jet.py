@@ -112,6 +112,18 @@ EVENT_BACKUP_DELETED = "backup.deleted"
 # piegee, cf. PR3/E4 et art. 17 RGPD).
 EVENT_CLIENT_UNLINKED = "client.unlinked"
 
+# PR8 — vendeuses identifiees par code PIN (docs/ARCHITECTURE_PR8.md J2/J3).
+# AUCUN de ces evenements ne porte de code PIN ni de hash de PIN : le JET est
+# immuable, un secret qui y tomberait ne pourrait plus jamais en sortir. Les
+# payloads se limitent a `cashier_id` (identifiant technique) et, pour les
+# refus, a la nature du refus.
+EVENT_CASHIER_CREATED = "cashier.created"
+EVENT_CASHIER_UPDATED = "cashier.updated"
+EVENT_CASHIER_PIN_CHANGED = "cashier.pin_changed"
+EVENT_CASHIER_IDENTIFIED = "cashier.identified"
+EVENT_CASHIER_RELEASED = "cashier.released"
+EVENT_CASHIER_PIN_REJECTED = "cashier.pin_rejected"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""
