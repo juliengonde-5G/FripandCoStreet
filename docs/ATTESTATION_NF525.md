@@ -39,10 +39,10 @@ appliquées vont de `0001` à `0005` (`apps/api/alembic/versions/`), la
 migration `0005_accounting_closures.py` ayant introduit les écritures
 comptables et les clôtures périodiques (voir §3.3 et §3.4). Les services
 correspondants (`accounting_service.py`, `fiscal_closure.py`,
-`fiscal_export.py`, `table_export.py`, `z_report_pdf.py`) étaient présents
-dans le code à cette date ; les routes d'API qui les exposent en
-administration n'y étaient, elles, pas encore toutes raccordées — voir la
-réserve précise en §3.3 et §3.4. Toute évolution du mécanisme de signature fiscale
+`fiscal_export.py`, `table_export.py`, `z_report_pdf.py`), les crons de
+clôture périodique et les routes d'administration et de caisse qui les
+exposent sont, à cette date, tous écrits et raccordés (voir §3.3 et §3.4
+pour le détail vérifié). Toute évolution du mécanisme de signature fiscale
 (payload signé, algorithme, colonnes couvertes) est une évolution fiscale
 majeure : elle impose un incrément de `FISCAL_SIGNATURE_VERSION`, une
 nouvelle `FISCAL_VERSION_DATE`, et une mise à jour de la présente
@@ -215,17 +215,24 @@ règle également énoncée dans `CLAUDE.md`).
 - **Vérifications d'intégrité** : chaque contrôle de la chaîne de vente
   lancé depuis l'administration (`fiscal.integrity_checked`).
 
-**Exports et téléchargements.** Le contrat d'architecture PR4
-(`docs/ARCHITECTURE_PR4.md` §1, décision F7) prévoit qu'aucun export ou
-téléchargement (CSV comptable, FEC, export brut, archive de clôture, export
-fiscal à la demande, PDF du Z) ne puisse avoir lieu sans une écriture JET
-`export.downloaded` correspondante. La constante d'événement
-(`EVENT_EXPORT_DOWNLOADED`, ainsi que `accounting.export_created`,
-`accounting.mismatch`, `closure.created`, `closure.failed`) est déclarée
-dans `apps/api/app/services/jet.py` ; son écriture effective par chaque
-route de téléchargement dépend des routes d'administration décrites au
-§3.3/§3.4, qui n'étaient pas toutes raccordées à la date de rédaction — ce
-point précis reste donc à vérifier une fois ce raccordement terminé.
+**Exports et téléchargements.** Aucun export ou téléchargement (CSV
+comptable, FEC, export brut, archive de clôture, export fiscal à la
+demande, PDF du Z) n'a lieu sans une écriture JET `export.downloaded`
+correspondante. Le helper commun `_record_export_downloaded`
+(`apps/api/app/api/admin/router.py:344-364`) journalise le type d'export,
+la période, l'empreinte SHA-256 du contenu servi et le nombre de lignes ; il
+est appelé par les six routes de téléchargement de l'administration (CSV
+mensuel, FEC journalier, FEC mensuel, export de table brute, archive de
+clôture, export fiscal JSON/XML — `admin/router.py:478, 505, 531, 579, 663,
+735`), et le téléchargement du PDF d'un Z l'appelle indépendamment depuis
+`apps/api/app/api/pos/router.py:937-976`. Les autres constantes
+d'événement PR4 (`accounting.export_created`, `accounting.mismatch`,
+`closure.created`, `closure.failed`) sont déclarées dans
+`apps/api/app/services/jet.py` et écrites respectivement par
+`AccountingService.create_export_for_z`/`verify_export`
+(`apps/api/app/services/accounting_service.py:247-360`) et
+`FiscalClosureService.close_period`
+(`apps/api/app/services/fiscal_closure.py`).
 
 **Accès.** Authentification JWT obligatoire sur l'ensemble des routes
 métier ; les routes de paramétrage, d'export et de clôture sont réservées
@@ -278,30 +285,64 @@ un motif obligatoire, un Z couvrant les transactions orphelines de la
 période — jamais antidaté, jamais recouvrant une session de caisse déjà
 couverte (`covered` rejeté en 409).
 
-**Clôtures mensuelle et annuelle, totaux perpétuels de période.** Le
-contrat d'architecture PR4 (`docs/ARCHITECTURE_PR4.md` §1, décisions F5,
-et §3) spécifie une clôture mensuelle (le 1er à 00:15 Europe/Paris) et
-annuelle (le 1er janvier à 00:30), plus une clôture manuelle à la demande.
+**Écriture comptable par Z, dans la même transaction que la clôture.** À
+chaque clôture d'un tiroir (`PosService.close_drawer`,
+`apps/api/app/services/pos.py:544-578`), à chaque clôture par la garde
+23:59 (`FiscalService.close_open_drawers`, `fiscal.py:653-686`) et à chaque
+régularisation a posteriori (`FiscalService.create_regularization_z`,
+`fiscal.py:748-812`), le Z tout juste scellé déclenche, **dans la même
+transaction SQL**, `AccountingService.create_export_for_z`
+(`apps/api/app/services/accounting_service.py:247-325`) : celui-ci ventile
+les encaissements nets par mode de paiement, les ventes nettes et la TVA
+collectée nette (plan de comptes §3.1/§4 ci-avant), avec un ajustement
+d'arrondi si nécessaire, et écrit les lignes dans `accounting_exports`/
+`accounting_export_lines` (migration `0005_accounting_closures.py`),
+protégées respectivement par les triggers `trg_protect_accounting_export`
+et `trg_protect_accounting_export_line`. Comme pour le Z lui-même, un
+Z sans écriture comptable associée ne peut donc pas exister : soit les deux
+sont écrits ensemble, soit la transaction SQL échoue et aucun des deux ne
+l'est. `AccountingService.verify_export` (`accounting_service.py:326-367`)
+recalcule une écriture et la compare à celle persistée ; une divergence
+journalise `accounting.mismatch` (jamais une réécriture silencieuse).
+
+**Clôtures mensuelle et annuelle, totaux perpétuels de période.** Deux
+crons planifiés, enregistrés dans `apps/api/app/jobs.py:176-185`,
+déclenchent une clôture mensuelle le 1er de chaque mois à 00:15
+(`run_monthly_fiscal_closure`, `jobs.py:119-140`, `CronTrigger(day=1,
+hour=0, minute=15)`) et une clôture annuelle le 1er janvier à 00:30
+(`run_annual_fiscal_closure`, `jobs.py:143-163`, `CronTrigger(month=1,
+day=1, hour=0, minute=30)`), toutes deux en heure de Paris ; une clôture
+manuelle est disponible à la demande. Les trois passent par
 `FiscalClosureService.close_period` (`apps/api/app/services/
-fiscal_closure.py`) implémente ce mécanisme : refus si une caisse est
-ouverte (`DrawerOpenError`, code `drawer_open`) ou si l'une des deux
-chaînes (ventes, Z) est rompue (`ChainInvalidError`, code `chain_invalid`),
-table `fiscal_closures` (migration `0005_accounting_closures.py`) protégée
-par le trigger `trg_protect_fiscal_closure`
-(`fripco_protect_fiscal_closure()`, immuabilité totale, sans exception),
-grand total de période et cumul chaîné à la clôture précédente via
-`previous_hash`. `verify_chain` (`fiscal_closure.py:331-357`) recalcule le
-maillage et compare l'empreinte SHA-256 de l'archive stockée à celle
-recalculée sur son contenu. Les crons correspondants
-(`monthly_fiscal_closure`, `annual_fiscal_closure`) et les routes
-d'administration qui exposent ce service (liste des clôtures, clôture
-manuelle, téléchargement de l'archive) n'étaient, à la date de rédaction,
-**pas encore raccordées dans `apps/api/app/api/admin/router.py`** : le
-mécanisme de clôture périodique est donc écrit et partiellement vérifié au
-niveau du service, mais **pas encore opérable de bout en bout par un
-manager**. Cette attestation doit être relue dès que ce raccordement sera
-livré, pour confirmer qu'aucun écart n'a été introduit entre le service et
-son exposition en API/administration.
+fiscal_closure.py`) : refus si une caisse est ouverte (`DrawerOpenError`,
+code `drawer_open`, `fiscal_closure.py:47-49`) ou si l'une des deux chaînes
+(ventes, Z) est rompue (`ChainInvalidError`, code `chain_invalid`,
+`fiscal_closure.py:55-57`) ; table `fiscal_closures` protégée par le
+trigger `trg_protect_fiscal_closure`
+(`fripco_protect_fiscal_closure()`, immuabilité totale, sans exception,
+migration `0005_accounting_closures.py:192-201`) ; grand total de période
+et cumul chaîné à la clôture précédente via `previous_hash`
+(`fiscal_closure.py:246`). L'échec d'un cron de clôture est journalisé
+(`EVENT_SYSTEM_JOB_FAILED`) et déclenche une alerte e-mail best-effort
+(`jobs.py`, mêmes garanties que la garde 23:59). `verify_chain`
+(`fiscal_closure.py:331-357`) recalcule le maillage et compare l'empreinte
+SHA-256 de chaque archive stockée à celle recalculée sur son contenu.
+
+Côté administration, `apps/api/app/api/admin/router.py` expose
+`POST /admin/fiscal-closures` (clôture manuelle, 201, refus 409 sur
+`drawer_open`/`chain_invalid`, `:602-615`), `GET /admin/fiscal-closures`
+(liste, `:618-625`), `GET /admin/fiscal-closures/integrity` (`:629-634`),
+`GET /admin/fiscal-closures/{id}` (`:637-645`) et
+`GET /admin/fiscal-closures/{id}/archive` (téléchargement gzip, en-têtes
+`X-Archive-SHA256` et `X-Closure-Hash`, `:651-682`) ; côté front,
+l'onglet **Archives fiscales** (`apps/web/src/components/admin/
+FiscalArchivesTab.tsx`) affiche la liste des clôtures (colonnes N°, Type,
+Période, Total période, Total perpétuel, Empreinte avec bouton
+**Copier**), le bouton **Clôturer maintenant** (avec double confirmation)
+et le bouton **Vérifier l'intégrité**. Le mécanisme de clôture périodique
+est donc, à la date de rédaction, écrit, raccordé de bout en bout
+(crons, routes, écran) et vérifiable par un manager sans intervention
+technique.
 
 **Horodatage.** Les horodatages proviennent de l'horloge du serveur
 applicatif (calculés côté application avant chaque écriture scellée, pour
@@ -311,75 +352,117 @@ Aucune détection de recul d'horloge n'est mise en œuvre : voir §4
 
 ### 3.4 Archivage
 
-**Ce qui existe et est vérifié à ce jour :**
+L'archivage repose sur quatre pièces qui se recoupent : la mention légale
+imprimée sur chaque ticket et chaque Z, les écritures comptables générées
+à chaque Z, les exports (comptables, bruts, fiscal à la demande) et
+l'archive gzip signée de chaque clôture périodique — décrits un à un
+ci-dessous, avec leurs références de code.
 
 - Le ticket de caisse embarque, en pied de page, la mention légale
   (décision D14 du contrat PR2, jamais « conforme NF525 ») :
   « Logiciel de caisse Frip & Co Street — auto-attestation art. 286 I-3° bis
   CGI, version fiscale {N} », ainsi que les 16 premiers caractères du hash
   de la transaction (`apps/api/app/services/receipt.py:100-107`).
-- La chaîne de vente et le JET sont chacun vérifiables intégralement et à
-  tout moment depuis l'administration (`verify_chain_integrity`,
-  `verify_z_chain_integrity`, `JournalService.verify_chain`), sans dépendre
-  d'un archivage préalable.
+- La chaîne de vente, la chaîne des Z, le JET et la chaîne des clôtures sont
+  chacun vérifiables intégralement et à tout moment depuis
+  l'administration (`verify_chain_integrity`, `verify_z_chain_integrity`,
+  `JournalService.verify_chain`, `FiscalClosureService.verify_chain`),
+  sans dépendre d'un archivage préalable — bouton **Vérifier l'intégrité**
+  de l'onglet Archives fiscales.
 
-**Ce qui est écrit dans le code à la date de rédaction, au niveau du
-service, mais pas encore exposé par une route d'administration** (voir la
-réserve d'opérabilité de bout en bout au §3.3) :
+**Écritures comptables par Z** (`apps/api/app/services/
+accounting_service.py`) : une écriture équilibrée par Z (créée dans la
+même transaction SQL que la clôture, voir §3.3), ventilant les
+encaissements nets par mode de paiement (comptes espèces `531000` / carte
+`512000`, défauts dans `apps/api/app/services/settings_service.py`, clé
+`accounting`), les ventes nettes (`707100`) et la TVA collectée nette
+(`44571`), avec ajustement d'arrondi (`658000`/`758000`) le cas échéant ;
+tables `accounting_exports` et `accounting_export_lines`
+(migration `0005_accounting_closures.py`), protégées respectivement par
+les triggers `trg_protect_accounting_export` et
+`trg_protect_accounting_export_line`.
 
-- **Écritures comptables par Z** (`apps/api/app/services/
-  accounting_service.py`) : une écriture équilibrée par Z, ventilant les
-  encaissements nets par mode de paiement (comptes espèces `531000` / carte
-  `512000`, défauts `apps/api/app/services/settings_service.py`, clé
-  `accounting`), les ventes nettes (`707100`) et la TVA collectée nette
-  (`44571`), avec ajustement d'arrondi (`658000`/`758000`) le cas échéant ;
-  tables `accounting_exports` et `accounting_export_lines`
-  (migration `0005_accounting_closures.py`), protégées respectivement par
-  les triggers `trg_protect_accounting_export` et
-  `trg_protect_accounting_export_line`.
-- **Export comptable mensuel (CSV)** et **FEC** (journalier et mensuel,
-  18 colonnes réglementaires), générés par `accounting_service.py` à partir
-  du même plan de comptes.
-- **Exports bruts** (`table_export.py`) : journal des ventes / journal de
-  caisse détaillés en CSV, sur liste blanche de tables, sans aucune donnée
-  client/PII.
-- **Clôtures périodiques archivées** (`fiscal_closure.py`) : snapshot JSON
-  canonique compressé gzip, avec l'horodatage interne de l'archive figé à
-  `mtime=0` pour la reproductibilité (`gzip.compress(..., mtime=0)`,
-  `fiscal_closure.py:213`), empreinte SHA-256 de l'archive
-  (`fiscal_closure.py:214`), manifeste chaîné à la clôture précédente via
-  `previous_hash` (`fiscal_closure.py:246`). Le contenu couvre transactions,
-  lignes, paiements, Z, mouvements de caisse et JET de la période, ainsi
-  qu'une notice française auto-descriptive de vérification
-  (`fiscal_closure.py:207`).
-- **Export fiscal à la demande** (`fiscal_export.py`) : construit un
-  instantané JSON/XML dont l'horodatage de génération (`generated_at`) est
-  **délibérément exclu du corps signé**, pour que le même appel sur la même
-  période produise toujours le même contenu et donc la même empreinte
-  (commentaire de tête du fichier, `fiscal_export.py:5-6`). La vérification
-  des deux chaînes avant de servir l'export, et l'en-tête HTTP
-  `X-Export-SHA256`, relèvent de la route d'administration qui appellera ce
-  service — non encore raccordée à la date de rédaction.
-- **PDF du rapport Z** (`z_report_pdf.py`) : généré par
-  `generate_z_report_pdf`, avec un canevas rendu invariant (pas
-  d'horodatage de génération dans le contenu, `z_report_pdf.py:70`) pour
-  que deux générations du même Z produisent le même document, donc le même
-  SHA-256 ; reprend les totaux, la ventilation par mode de paiement, les
-  montants de caisse, les mouvements, les cumuls perpétuels, le hash et le
-  `previous_hash`, et la mention D14 (« Auto-attestation art. 286 I-3° bis
-  CGI, version fiscale {N} », `z_report_pdf.py:274-285`) — jamais
-  « conforme NF525 ».
+**Export comptable mensuel (CSV Pennylane) et FEC.**
+`AccountingService.generate_monthly_csv` (`accounting_service.py:444-493`,
+colonnes `_PENNYLANE_CSV_COLUMNS` définies en `accounting_service.py:82`)
+et `generate_daily_fec`/`generate_monthly_fec`
+(`accounting_service.py:404-443`, FEC 18 colonnes réglementaires) sont
+exposés par
+`GET /admin/accounting/monthly-csv/{year}/{month}`,
+`GET /admin/accounting/fec/day/{date}` et
+`GET /admin/accounting/fec/month/{year}/{month}`
+(`apps/api/app/api/admin/router.py:464-546`) ; l'onglet **Comptabilité**
+(`apps/web/src/components/admin/AccountingTab.tsx`) porte les boutons
+**Télécharger le CSV Pennylane**, **Télécharger le fichier FEC du mois** et
+**Fichier FEC du jour**.
 
-**Ce qui reste à livrer et à vérifier avant que cette section soit
-considérée close** : les routes d'administration qui exposent ces cinq
-services (téléchargement du CSV/FEC, des exports bruts, de l'archive de
-clôture et du PDF du Z ; déclenchement d'une clôture manuelle ; liste des
-clôtures) dans `apps/api/app/api/admin/router.py` et
-`apps/api/app/api/pos/router.py`, l'écriture effective de
-`export.downloaded` à chaque téléchargement (§3.2), les deux crons
-`monthly_fiscal_closure`/`annual_fiscal_closure` dans `app/jobs.py`, et
-l'écran d'administration correspondant côté `apps/web`. Cette section devra
-être relue dès leur livraison (voir la procédure de mise à jour, §5).
+**Exports bruts** (`apps/api/app/services/table_export.py`) : liste
+blanche stricte de sept tables — `transactions`, `transaction_items`,
+`payments`, `z_reports`, `cash_movements`, `cash_drawers`,
+`journal_events` (`table_export.py:22-32`) — **aucune table
+client/consentement/communication** n'y figure, délibérément, pour ne
+jamais exposer de donnée personnelle par ce canal (l'export client existe
+déjà par fiche, `GET /admin/clients/{id}/export`). Exposé par
+`GET /admin/exports/table/{table}?from&to`
+(`admin/router.py:548-600`).
+
+**Clôtures périodiques archivées** (`apps/api/app/services/
+fiscal_closure.py`) : snapshot JSON canonique compressé gzip, avec
+l'horodatage interne de l'archive figé à `mtime=0` pour la reproductibilité
+(`gzip.compress(..., mtime=0)`, `fiscal_closure.py:213`), empreinte
+SHA-256 de l'archive (`fiscal_closure.py:214`), manifeste chaîné à la
+clôture précédente via `previous_hash` (`fiscal_closure.py:246`). Le
+contenu couvre transactions, lignes, paiements, Z, mouvements de caisse et
+JET de la période, ainsi qu'une notice française auto-descriptive de
+vérification (`fiscal_closure.py:207`). Téléchargeable depuis
+`GET /admin/fiscal-closures/{id}/archive`
+(`admin/router.py:651-682` — en-têtes `X-Archive-SHA256` et
+`X-Closure-Hash`) et depuis l'onglet **Archives fiscales**, bouton
+**Télécharger l'archive** ; l'empreinte affichée en colonne « Empreinte »
+se copie avec le bouton **Copier**.
+
+**Export fiscal à la demande** (`apps/api/app/services/fiscal_export.py`) :
+construit un instantané JSON/XML dont l'horodatage de génération
+(`generated_at`) est **délibérément exclu du corps signé**, pour que le
+même appel sur la même période produise toujours le même contenu et donc
+la même empreinte (commentaire de tête du fichier, `fiscal_export.py:5-6`).
+Le JET embarqué dans cet instantané **exclut lui-même l'événement
+`export.downloaded`** (`fiscal_export.py:68-77`) : chaque appel à cette
+route écrit un tel événement (§3.2), qui ne figurerait pas encore dans le
+corps qu'il vient de produire mais apparaîtrait au prochain appel — ce qui
+casserait la reproductibilité de l'empreinte d'un appel à l'autre ; c'est
+un événement opérationnel sur l'export lui-même, pas une donnée fiscale, et
+il reste consultable comme tout autre événement JET
+(`GET /admin/jet`). La route `GET /admin/fiscal-export`
+(`admin/router.py:685-737`) vérifie les deux chaînes avant de servir
+l'export (409 `chain_invalid` si l'une est rompue,
+`admin/router.py:706-713`) et renvoie l'empreinte SHA-256 du corps dans
+l'en-tête `X-Export-SHA256` (`admin/router.py:737`).
+
+**PDF du rapport Z** (`apps/api/app/services/z_report_pdf.py`) : généré par
+`generate_z_report_pdf`, avec un canevas rendu invariant (pas
+d'horodatage de génération dans le contenu, `z_report_pdf.py:70`) pour
+que deux générations du même Z produisent le même document, donc le même
+SHA-256 ; reprend les totaux, la ventilation par mode de paiement, les
+montants de caisse, les mouvements, les cumuls perpétuels, le hash et le
+`previous_hash`, et la mention D14, dont le texte exact est :
+« Auto-attestation art. 286 I-3° bis CGI, version fiscale 3 du
+2026-09-15. Document conservé 6 ans (art. L.102B LPF). »
+(`z_report_pdf.py:290-295`, valeurs interpolées depuis
+`FISCAL_SIGNATURE_VERSION` et `FISCAL_VERSION_DATE`, §1) — jamais
+« conforme NF525 ». Exposé par `GET /pos/z-reports/{id}/pdf`
+(`apps/api/app/api/pos/router.py:937-980`), qui journalise
+`export.downloaded` (kind `z_report_pdf`) avant de servir le fichier.
+
+À la date de rédaction, l'ensemble de cette section (services, migration
+`0005`, routes d'administration et de caisse, écran **Comptabilité** et
+écran **Archives fiscales**) est écrit, raccordé de bout en bout et
+utilisable par un manager sans intervention technique. Cette attestation
+n'a pas fait l'objet, à ce stade, d'un test manuel complet du parcours
+(téléchargement réel d'un CSV/FEC/archive, comparaison d'empreinte hors
+application) : cette vérification opérationnelle reste recommandée avant
+la première clôture mensuelle réelle (voir `docs/PROCEDURE_CLOTURE.md`
+§3).
 
 ## 4. Limites et choix déclarés
 
@@ -507,9 +590,11 @@ atteste que les mécanismes décrits dans la présente attestation ont été
 vérifiés dans le code source du logiciel de caisse Frip & Co Street à la
 date ci-dessous, dans les conditions et avec les limites exposées aux §3 et
 §4, et m'engage à faire réviser cette attestation à chaque évolution du
-mécanisme fiscal (§5) et, au plus tard, lorsque les routes d'administration
-et les crons encore décrits aux §3.3 et §3.4 comme non raccordés auront été
-livrés et mis en production.
+mécanisme fiscal (§5) et, au plus tard, après le premier test opérationnel
+complet du parcours de clôture périodique (téléchargement réel d'un
+CSV/FEC/archive et comparaison d'empreinte hors application, voir la fin
+du §3.4 et `docs/PROCEDURE_CLOTURE.md` §3), avant la première clôture
+mensuelle réelle de la boutique.
 
 Fait à _______________________, le _______________________
 

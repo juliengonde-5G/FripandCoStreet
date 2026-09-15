@@ -72,42 +72,43 @@ figure dans le Z produit.
 
 ## 3. Clôture mensuelle et annuelle (manager)
 
-*Les mécanismes de calcul et d'archivage décrits ci-dessous sont écrits au
-moment de la rédaction de cette procédure, mais leur déclenchement
-automatique et les écrans d'administration qui les affichent sont en cours
-de raccordement. Si l'écran « Archives fiscales » n'est pas encore visible,
-ou si une clôture attendue n'apparaît pas dans la liste, ne suppose pas
-qu'elle s'est produite silencieusement : vérifie auprès de l'équipe
-technique que le raccordement est terminé avant de t'appuyer sur
-l'automatisme décrit ci-dessous.*
-
-- **Automatique (une fois le raccordement terminé).** Le 1er de chaque mois
-  à 00:15 (heure de Paris), une **clôture mensuelle** est générée pour le
-  mois écoulé ; le 1er janvier à 00:30, une **clôture annuelle** l'est pour
-  l'année écoulée. Ces clôtures refusent de se produire si une caisse est
-  restée ouverte ou si la chaîne de preuve (ventes ou Z) est rompue — dans
-  ces cas, l'échec est journalisé et une alerte est envoyée à l'adresse
-  e-mail de la boutique. **Tant que ce raccordement n'est pas confirmé**,
-  demande à l'équipe technique de lancer une clôture manuelle (ci-dessous)
-  à chaque fin de mois, pour ne pas laisser de trou dans les archives.
+- **Automatique.** Le 1er de chaque mois à 00:15 (heure de Paris), une
+  **clôture mensuelle** est générée pour le mois écoulé ; le 1er janvier à
+  00:30, une **clôture annuelle** l'est pour l'année écoulée. Aucune action
+  n'est requise pour qu'elles se produisent. Ces clôtures refusent de se
+  produire si une caisse est restée ouverte ou si la chaîne de preuve
+  (ventes ou Z) est rompue — dans ces cas, l'échec est journalisé et une
+  alerte est envoyée à l'adresse e-mail de la boutique : si tu la reçois,
+  règle le problème signalé puis lance une clôture manuelle (ci-dessous)
+  pour ne pas laisser de trou dans les archives.
+- **Écriture comptable liée.** Chaque rapport Z, journalier comme généré
+  par une clôture, produit automatiquement sa propre écriture comptable
+  équilibrée (débit espèces/CB, crédit ventes et TVA) — aucune action
+  manuelle n'est nécessaire ; elle est visible dans l'onglet
+  **Comptabilité**.
 - **Contrôle.** Dans **Administration → Archives fiscales**, la liste des
-  clôtures affiche, pour chacune : sa séquence, sa période, ses totaux, son
-  **total perpétuel** (cumulé depuis l'origine) et une empreinte SHA-256
-  courte. Vérifie régulièrement qu'une clôture existe bien pour chaque mois
-  écoulé.
-- **Clôture manuelle.** En cas de besoin (contrôle, période particulière),
-  le bouton **Clôturer maintenant** permet de lancer une clôture à la
-  demande sur une période choisie, avec double confirmation.
+  clôtures affiche, pour chacune, en colonnes : **N°**, **Type**,
+  **Période**, **Total période**, **Total perpétuel** (cumulé depuis
+  l'origine) et **Empreinte** (SHA-256 courte, avec un bouton **Copier**).
+  Vérifie régulièrement qu'une clôture existe bien pour chaque mois écoulé.
+  Le bouton **Vérifier l'intégrité** relance un contrôle complet de la
+  continuité des ventes, des clôtures et des écritures comptables.
+- **Clôture manuelle.** En cas de besoin (contrôle, période particulière,
+  rattrapage après une alerte), la section **Clôturer maintenant** permet
+  de lancer une clôture à la demande sur une période choisie, avec double
+  confirmation — au-delà, plus aucune modification n'est possible sur
+  cette période.
 - **Télécharger l'archive.** Le bouton **Télécharger l'archive** fournit un
   fichier compressé (gzip) contenant l'intégralité des données de la
   période : ventes, tickets, rapports Z, mouvements de caisse, journal des
   événements techniques et réglages de la boutique.
-- **Vérifier l'empreinte.** L'écran affiche l'**empreinte SHA-256** de
-  l'archive au moment de sa création. Après téléchargement, recalcule
-  l'empreinte du fichier obtenu (n'importe quel outil de calcul SHA-256
-  convient, y compris hors de tout logiciel de caisse) et compare-la à
-  celle affichée : si elles sont identiques, le fichier n'a pas été altéré
-  depuis sa création.
+- **Vérifier l'empreinte.** La colonne **Empreinte** affiche le SHA-256 de
+  l'archive tel qu'il a été calculé à sa création (bouton **Copier** pour
+  l'empreinte complète). Après téléchargement, recalcule l'empreinte du
+  fichier obtenu (n'importe quel outil de calcul SHA-256 convient, y
+  compris hors de tout logiciel de caisse) et compare-la à celle affichée :
+  si elles sont identiques, le fichier n'a pas été altéré depuis sa
+  création.
 - **Copier hors site.** Les archives et les sauvegardes de la base de
   données résident sur le même serveur que les données de la boutique : un
   incident sur ce serveur menacerait donc les deux à la fois. **Copie
@@ -116,7 +117,13 @@ l'automatisme décrit ci-dessous.*
   coffre-fort numérique de l'entreprise) dès sa création, et conserve-la
   aussi longtemps que l'obligation légale de 6 ans.
 - **Envoyer le CSV/FEC au cabinet comptable.** Dans **Administration →
-  Comptabilité**, télécharge le **CSV Pennylane** du mois (format prêt à
-  l'import) et le **fichier FEC** du mois, et transmets-les au cabinet
-  (Talenz Alteis) selon le rythme convenu avec lui — généralement à chaque
-  clôture mensuelle.
+  Comptabilité**, télécharge le **CSV Pennylane** du mois, ou le **fichier
+  FEC du mois** (bouton **Télécharger le CSV Pennylane** / **Télécharger le
+  fichier FEC du mois** — un **Fichier FEC du jour** existe aussi pour un
+  contrôle ponctuel), et transmets-les au cabinet (Talenz Alteis) selon le
+  rythme convenu avec lui — généralement à chaque clôture mensuelle.
+- **Export fiscal à la demande.** Pour un contrôle ou une demande externe
+  sur une période libre, la section **Export fiscal à la demande** génère
+  un fichier JSON ou XML des ventes et clôtures de la période, avec son
+  empreinte — refusé si la chaîne de preuve n'est pas intègre, pour ne
+  jamais transmettre un export dont la validité n'a pas été vérifiée.
