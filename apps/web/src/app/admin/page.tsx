@@ -18,7 +18,7 @@ import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/api";
 import { downloadFile } from "@/lib/download";
-import { formatCurrency, formatDateTime } from "@/lib/format";
+import { formatClientName, formatCurrency, formatDateTime } from "@/lib/format";
 import { kickDrawer } from "@/lib/printing";
 import {
   TVA_RATES,
@@ -1235,7 +1235,7 @@ function ClientsSection() {
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[340px_1fr]">
-      <Card title="Clients" subtitle="Recherche par e-mail ou par nom.">
+      <Card title="Clients" subtitle="Recherche par e-mail, par nom ou par téléphone.">
         <div className="space-y-3">
           <Input
             label="Rechercher"
@@ -1244,7 +1244,7 @@ function ClientsSection() {
             onKeyDown={(e) => {
               if (e.key === "Enter") search(query);
             }}
-            placeholder="julie@exemple.fr ou Dupont"
+            placeholder="julie@exemple.fr, Dupont ou 06 12 34 56 78"
           />
           <Button variant="outline" size="sm" onClick={() => search(query)} disabled={loadingList}>
             {loadingList ? "Recherche…" : "Rechercher"}
@@ -1262,9 +1262,21 @@ function ClientsSection() {
                     selectedId === c.id ? "bg-fc-primary-soft text-fc-primary-deep" : "hover:bg-fc-bg-alt text-fc-ink"
                   }`}
                 >
-                  <div className="text-sm font-medium truncate">{c.anonymized_at ? "Client anonymisé" : c.email}</div>
+                  {/* PR7 (I3) : une fiche peut n'avoir qu'un téléphone —
+                      l'en-tête prend alors le nom, et la ligne de détail
+                      dit explicitement « Pas d'e-mail » plutôt que de
+                      laisser un vide. */}
+                  <div className="text-sm font-medium truncate">
+                    {c.anonymized_at
+                      ? "Client anonymisé"
+                      : c.email || formatClientName(c) || c.phone || "Fiche sans coordonnée"}
+                  </div>
                   <div className="text-xs text-fc-ink-mute truncate">
-                    {[c.first_name, c.last_name].filter(Boolean).join(" ") || "—"} ·{" "}
+                    {c.anonymized_at ? "—" : c.email ? formatClientName(c) || "—" : "Pas d'e-mail"}
+                    {" · "}
+                    {c.phone || "Pas de téléphone"}
+                  </div>
+                  <div className="text-xs text-fc-ink-mute truncate">
                     {c.newsletter_optin ? "Newsletter : oui" : "Newsletter : non"}
                   </div>
                 </button>
@@ -1344,7 +1356,10 @@ function ClientDetailCard({ clientId, onChanged }: { clientId: string; onChanged
 
   return (
     <div className="space-y-6">
-      <Card title={client.anonymized_at ? "Client anonymisé" : client.email} subtitle={client.anonymized_at ? undefined : fullName || undefined}>
+      <Card
+        title={client.anonymized_at ? "Client anonymisé" : client.email || fullName || "Pas d'e-mail"}
+        subtitle={client.anonymized_at || !client.email ? undefined : fullName || undefined}
+      >
         {client.anonymized_at ? (
           <div className="rounded-fc-lg bg-fc-bg-alt p-4 text-sm text-fc-ink-soft">
             Données supprimées le {formatDateTime(client.anonymized_at)}.
@@ -1352,6 +1367,16 @@ function ClientDetailCard({ clientId, onChanged }: { clientId: string; onChanged
         ) : (
           <div className="space-y-4">
             <ErrorNotice message={consentError} />
+            <dl className="grid gap-4 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-fc-ink-mute">E-mail</dt>
+                <dd className="break-all text-fc-ink">{client.email || "Pas d'e-mail"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-fc-ink-mute">Téléphone</dt>
+                <dd className="break-all text-fc-ink">{client.phone || "Pas de téléphone"}</dd>
+              </div>
+            </dl>
             <div className="flex flex-wrap items-center gap-4">
               <StatusPill ok={client.newsletter_optin} okLabel="Inscrit à la newsletter" koLabel="Non inscrit à la newsletter" />
               <span className="text-xs text-fc-ink-mute">Client depuis le {formatDateTime(client.created_at)}</span>
