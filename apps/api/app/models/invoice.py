@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -59,6 +59,13 @@ class Invoice(Base):
     city: Mapped[str] = mapped_column(String(length=80), nullable=False)
 
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Coordonnees de la BOUTIQUE figees a l'emission (nom, adresse,
+    # telephone, e-mail, SIRET, n° TVA). Le PDF se rend a partir de ce bloc
+    # et JAMAIS des reglages courants : sans cela, une modification des
+    # reglages boutique changerait le document rendu, et l'empreinte
+    # `pdf_sha256` scellee au premier telechargement ne correspondrait plus.
+    # Une facture doit rester reproductible a vie.
+    seller_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
     # Posee au premier rendu du PDF (deterministe : deux rendus du meme
     # document donnent la meme empreinte). Une fois posee, la ligne est
     # totalement figee.

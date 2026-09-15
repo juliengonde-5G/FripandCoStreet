@@ -14,24 +14,28 @@
 # plus, on refuse de servir le document (`pdf_mismatch`) au lieu de laisser
 # circuler deux versions d'une meme facture.
 #
+# Le rendu est une fonction PURE : il ne lit ni la base ni les reglages
+# boutique. Les coordonnees de l'emetteur viennent du bloc
+# `invoice.seller_snapshot`, fige a l'emission — sinon un simple changement
+# de nom commercial ou d'adresse dans les reglages changerait le document
+# rendu, et l'empreinte scellee au premier telechargement ne correspondrait
+# plus (500 `pdf_mismatch` sur une facture pourtant intacte). Une facture
+# doit rester reproductible a vie.
+#
 # Mentions legales portees par le document (facture entre professionnels) :
 # penalites de retard au taux d'interet legal, indemnite forfaitaire de
 # recouvrement de 40 €, exigibilite de la TVA a la livraison. Jamais la
 # mention « conforme NF525 » (CLAUDE.md) : la caisse s'auto-atteste.
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 from io import BytesIO
-from typing import Any
 from zoneinfo import ZoneInfo
-
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.invoice import Invoice, InvoiceKind
 from app.models.pos import Transaction, TransactionItem
-from app.services.settings_service import SettingsService
 from app.version import FISCAL_SIGNATURE_VERSION, FISCAL_VERSION_DATE
 
 _PARIS = ZoneInfo("Europe/Paris")
@@ -68,8 +72,20 @@ def _escape(value: str | None) -> str:
     )
 
 
-async def generate_invoice_pdf(db: AsyncSession, invoice: Invoice) -> bytes:
-    """Rend la facture (ou l'avoir) en PDF A4 — octets deterministes."""
+def render_invoice_pdf(
+    invoice: Invoice,
+    transaction: Transaction,
+    items: Sequence[TransactionItem],
+    *,
+    original_invoice_number: str | None = None,
+) -> bytes:
+    """Rend la facture (ou l'avoir) en PDF A4 — octets deterministes.
+
+    Fonction PURE : tout ce qui est imprime vient des objets recus (la
+    facture et son bloc vendeur fige, la vente signee et ses lignes). Rien
+    n'est relu en base au moment du rendu, donc rien de ce qui evolue
+    ailleurs dans l'application ne peut changer un document deja emis.
+    """
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -77,26 +93,11 @@ async def generate_invoice_pdf(db: AsyncSession, invoice: Invoice) -> bytes:
     from reportlab.pdfgen.canvas import Canvas
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-    transaction = (
-        await db.execute(select(Transaction).where(Transaction.id == invoice.transaction_id))
-    ).scalar_one()
-    items = (
-        await db.execute(
-            select(TransactionItem)
-            .where(TransactionItem.transaction_id == transaction.id)
-            .order_by(TransactionItem.position.asc())
-        )
-    ).scalars().all()
-    shop: dict[str, Any] = await SettingsService(db).get("shop")
+    # Bloc vendeur fige a l'emission (jamais les reglages courants).
+    seller = invoice.seller_snapshot if isinstance(invoice.seller_snapshot, dict) else {}
 
     is_credit_note = invoice.kind == InvoiceKind.credit_note
-    original_number: str | None = None
-    if is_credit_note and invoice.original_invoice_id is not None:
-        original_number = (
-            await db.execute(
-                select(Invoice.invoice_number).where(Invoice.id == invoice.original_invoice_id)
-            )
-        ).scalar_one_or_none()
+    original_number = original_invoice_number
 
     def _invariant_canvas(*args, **kwargs):
         kwargs["invariant"] = 1
@@ -132,19 +133,21 @@ async def generate_invoice_pdf(db: AsyncSession, invoice: Invoice) -> bytes:
     title = "AVOIR" if is_credit_note else "FACTURE"
     story.append(Paragraph(f"<b>{title} {_escape(invoice.invoice_number)}</b>", h1))
 
-    seller_lines = [f"<b>{_escape(shop.get('name') or 'Frip & Co Street')}</b>"]
+    seller_lines = [f"<b>{_escape(seller.get('name') or 'Frip & Co Street')}</b>"]
     for key in ("address_line1", "address_line2"):
-        if shop.get(key):
-            seller_lines.append(_escape(shop[key]))
-    city_line = f"{shop.get('postal_code', '')} {shop.get('city', '')}".strip()
+        if seller.get(key):
+            seller_lines.append(_escape(seller[key]))
+    city_line = f"{seller.get('postal_code', '')} {seller.get('city', '')}".strip()
     if city_line:
         seller_lines.append(_escape(city_line))
-    if shop.get("siret"):
-        seller_lines.append(f"SIRET {_escape(shop['siret'])}")
-    if shop.get("vat_number"):
-        seller_lines.append(f"N° TVA : {_escape(shop['vat_number'])}")
-    if shop.get("phone"):
-        seller_lines.append(f"Tél. {_escape(shop['phone'])}")
+    if seller.get("siret"):
+        seller_lines.append(f"SIRET {_escape(seller['siret'])}")
+    if seller.get("vat_number"):
+        seller_lines.append(f"N° TVA : {_escape(seller['vat_number'])}")
+    if seller.get("phone"):
+        seller_lines.append(f"Tél. {_escape(seller['phone'])}")
+    if seller.get("email"):
+        seller_lines.append(_escape(seller["email"]))
 
     buyer_lines = [
         "<b>Client</b>",

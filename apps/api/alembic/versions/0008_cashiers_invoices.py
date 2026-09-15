@@ -206,6 +206,7 @@ BEGIN
      OLD.postal_code IS DISTINCT FROM NEW.postal_code OR
      OLD.city IS DISTINCT FROM NEW.city OR
      OLD.issued_at IS DISTINCT FROM NEW.issued_at OR
+     OLD.seller_snapshot IS DISTINCT FROM NEW.seller_snapshot OR
      OLD.user_id IS DISTINCT FROM NEW.user_id THEN
     RAISE EXCEPTION 'NF525: facture immuable (seul pdf_sha256 peut etre pose une fois)';
   END IF;
@@ -360,6 +361,19 @@ def upgrade() -> None:
         sa.Column("postal_code", sa.String(length=10), nullable=False),
         sa.Column("city", sa.String(length=80), nullable=False),
         sa.Column("issued_at", sa.DateTime(timezone=True), nullable=False),
+        # Coordonnees de la BOUTIQUE (nom, adresse, telephone, e-mail,
+        # SIRET, n° TVA) figees a l'emission. Le PDF se rend uniquement a
+        # partir de ce bloc, jamais des reglages courants : sans lui, une
+        # modification des reglages boutique changerait le document rendu
+        # et l'empreinte `pdf_sha256` scellee au premier telechargement ne
+        # correspondrait plus — une facture deja remise deviendrait
+        # irreproductible. NOT NULL : une facture sans emetteur identifie
+        # n'a pas de sens (table neuve, aucune ligne a rattraper).
+        sa.Column(
+            "seller_snapshot",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+        ),
         # Empreinte du PDF, posee au premier rendu — seule colonne que le
         # trigger d'immuabilite laisse passer, et une seule fois.
         sa.Column("pdf_sha256", sa.String(length=64), nullable=True),

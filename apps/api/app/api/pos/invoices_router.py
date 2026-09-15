@@ -112,9 +112,7 @@ async def get_invoice_pdf(
     if invoice is None:
         raise InvoiceNotFound()
 
-    from app.services.invoice_pdf import generate_invoice_pdf
-
-    pdf_bytes = await generate_invoice_pdf(db, invoice)
+    pdf_bytes = await service.render_pdf(invoice)
     sha = hashlib.sha256(pdf_bytes).hexdigest()
 
     try:

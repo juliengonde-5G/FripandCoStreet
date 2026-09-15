@@ -411,6 +411,92 @@ async def test_invoice_pdf_mismatch_is_refused_and_alerts(client, auth_headers, 
         assert alerts[0].payload["invoice_number"] == invoice["invoice_number"]
 
 
+async def test_pdf_survives_a_change_of_shop_settings(client, auth_headers, open_drawer):
+    """Une facture doit rester reproductible A VIE : le PDF se rend depuis
+    le bloc vendeur FIGÉ à l'émission (`seller_snapshot`), jamais depuis les
+    réglages courants. Sans cela, un simple changement de nom commercial
+    après le premier téléchargement rendrait un document différent — et
+    l'empreinte scellée ne correspondrait plus (500 `pdf_mismatch`) sur une
+    facture pourtant intacte."""
+    sale = await _sell(client, auth_headers)
+    invoice = (await _issue(client, auth_headers, sale["id"])).json()["invoice"]
+    assert invoice["seller"]["name"]
+
+    first = await client.get(f"/api/pos/invoices/{invoice['id']}/pdf", headers=auth_headers)
+    assert first.status_code == 200, first.text
+
+    settings = await client.put(
+        "/api/admin/settings/shop",
+        json={
+            "name": "Frip & Co Street — enseigne renommée",
+            "address_line1": "99 avenue Nouvelle",
+            "postal_code": "76100",
+            "city": "Rouen",
+            "phone": "0200000000",
+            "siret": SIRET_OK_2,
+            "vat_number": "FR40303265045",
+        },
+        headers=auth_headers,
+    )
+    assert settings.status_code == 200, settings.text
+
+    again = await client.get(f"/api/pos/invoices/{invoice['id']}/pdf", headers=auth_headers)
+    assert again.status_code == 200, again.text
+    assert again.content == first.content
+    assert again.headers["x-pdf-sha256"] == first.headers["x-pdf-sha256"]
+    # Et le nouveau nom n'apparaît pas sur la facture déjà émise.
+    assert "enseigne renomm" not in again.content.decode("latin-1")
+
+
+async def test_credit_note_copies_the_seller_snapshot_of_the_invoice(
+    client, auth_headers, open_drawer
+):
+    """L'avoir est émis par le même vendeur, tel qu'il était identifié au
+    moment de la vente — pas tel que les réglages le décrivent le jour de
+    l'annulation."""
+    sale = await _sell(client, auth_headers)
+    invoice = (await _issue(client, auth_headers, sale["id"])).json()["invoice"]
+
+    await client.put(
+        "/api/admin/settings/shop",
+        json={"name": "Autre enseigne", "postal_code": "76000", "city": "Rouen"},
+        headers=auth_headers,
+    )
+    cancel = await client.post(
+        f"/api/pos/transactions/{sale['id']}/cancel",
+        json={"reason": "Retour marchandise"},
+        headers=auth_headers,
+    )
+    assert cancel.status_code == 201, cancel.text
+    credit_note = (
+        await client.get(
+            f"/api/pos/transactions/{cancel.json()['id']}/invoice", headers=auth_headers
+        )
+    ).json()["invoice"]
+    assert credit_note["seller"] == invoice["seller"]
+    assert credit_note["seller"]["name"] != "Autre enseigne"
+
+
+async def test_trigger_refuses_updating_the_seller_snapshot(client, auth_headers, open_drawer):
+    """Le bloc vendeur fait partie des colonnes gelées par
+    `fripco_protect_invoice` : une fois la facture émise, il ne bouge plus,
+    même par une écriture SQL directe."""
+    import sqlalchemy.exc
+
+    sale = await _sell(client, auth_headers)
+    invoice = (await _issue(client, auth_headers, sale["id"])).json()["invoice"]
+
+    async with async_session() as db:
+        with pytest.raises(sqlalchemy.exc.DBAPIError) as excinfo:
+            await db.execute(
+                Invoice.__table__.update()
+                .where(Invoice.__table__.c.id == uuid.UUID(invoice["id"]))
+                .values(seller_snapshot={"name": "Enseigne falsifiée"})
+            )
+            await db.commit()
+        assert "facture immuable" in str(excinfo.value)
+
+
 async def test_credit_note_pdf_mentions_the_original_invoice(client, auth_headers, open_drawer):
     sale = await _sell(client, auth_headers)
     invoice = (await _issue(client, auth_headers, sale["id"])).json()["invoice"]

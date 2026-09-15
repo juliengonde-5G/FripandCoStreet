@@ -44,6 +44,7 @@ from app.services.jet import (
     EVENT_INVOICE_ISSUED,
     JournalService,
 )
+from app.services.settings_service import SettingsService
 
 _PARIS = ZoneInfo("Europe/Paris")
 
@@ -221,6 +222,40 @@ def _optional(value: str | None, label: str, *, max_length: int) -> str | None:
     return text
 
 
+# Champs du bloc vendeur figes sur la facture. Liste explicite (et pas une
+# copie integrale des reglages `shop`) : le document n'a besoin que de ces
+# coordonnees, et une cle ajoutee plus tard aux reglages ne doit pas
+# changer la forme d'un bloc deja fige sur des factures existantes.
+SELLER_SNAPSHOT_FIELDS = (
+    "name",
+    "address_line1",
+    "address_line2",
+    "postal_code",
+    "city",
+    "phone",
+    "email",
+    "siret",
+    "vat_number",
+)
+
+DEFAULT_SELLER_NAME = "Frip & Co Street"
+
+
+def build_seller_snapshot(shop: dict | None) -> dict:
+    """Bloc vendeur fige a l'emission, a partir des reglages boutique.
+
+    C'est LUI, et jamais les reglages courants, qui sert a rendre le PDF :
+    une facture doit rester reproductible a vie, or la commercante peut
+    changer de nom commercial, d'adresse ou de telephone apres coup — le
+    document rendu changerait alors, et l'empreinte `pdf_sha256` scellee au
+    premier telechargement ne correspondrait plus.
+    """
+    shop = shop if isinstance(shop, dict) else {}
+    snapshot = {field: (shop.get(field) or "") for field in SELLER_SNAPSHOT_FIELDS}
+    snapshot["name"] = snapshot["name"] or DEFAULT_SELLER_NAME
+    return snapshot
+
+
 @dataclass(frozen=True)
 class InvoiceData:
     """Coordonnees du client professionnel, telles que saisies en caisse."""
@@ -286,10 +321,14 @@ class InvoiceService:
             raise InvoiceExists()
 
         issued_at = datetime.now(timezone.utc)
+        # Reglages boutique lus UNE fois, ici, et figes dans la ligne : le
+        # rendu du PDF n'ira jamais les relire (cf. `build_seller_snapshot`).
+        seller_snapshot = build_seller_snapshot(await SettingsService(self.db).get("shop"))
         invoice = Invoice(
             transaction_id=transaction.id,
             kind=InvoiceKind.invoice,
             invoice_number=await self._next_number(InvoiceKind.invoice, issued_at),
+            seller_snapshot=seller_snapshot,
             company_name=company_name,
             siret=siret,
             vat_number=vat_number,
@@ -369,6 +408,11 @@ class InvoiceService:
             address_line2=invoice.address_line2,
             postal_code=invoice.postal_code,
             city=invoice.city,
+            # Bloc vendeur RECOPIE de la facture d'origine : l'avoir est
+            # emis par le meme vendeur, tel qu'il etait identifie au moment
+            # de la vente — pas tel que les reglages le decrivent le jour
+            # de l'annulation.
+            seller_snapshot=invoice.seller_snapshot,
             issued_at=issued_at,
             user_id=user_id,
         )
@@ -441,6 +485,36 @@ class InvoiceService:
     async def transaction_for(self, invoice: Invoice) -> Transaction:
         return await self._get_transaction(invoice.transaction_id)
 
+    async def render_pdf(self, invoice: Invoice) -> bytes:
+        """Charge ce dont le rendu a besoin (la vente, ses lignes, et le
+        numero de la facture annulee s'il s'agit d'un avoir), puis appelle
+        le rendu — qui est une fonction PURE, sans acces base : tout ce
+        qu'il imprime vient de la facture elle-meme (bloc vendeur fige
+        inclus) et de la vente signee."""
+        from app.models.pos import TransactionItem
+        from app.services.invoice_pdf import render_invoice_pdf
+
+        transaction = await self.transaction_for(invoice)
+        items = (
+            await self.db.execute(
+                select(TransactionItem)
+                .where(TransactionItem.transaction_id == transaction.id)
+                .order_by(TransactionItem.position.asc())
+            )
+        ).scalars().all()
+        original_number = None
+        if invoice.original_invoice_id is not None:
+            original_number = (
+                await self.db.execute(
+                    select(Invoice.invoice_number).where(
+                        Invoice.id == invoice.original_invoice_id
+                    )
+                )
+            ).scalar_one_or_none()
+        return render_invoice_pdf(
+            invoice, transaction, items, original_invoice_number=original_number
+        )
+
     # ------------------------------------------------------------------
     # Empreinte du PDF (posee une fois, verifiee ensuite)
     # ------------------------------------------------------------------
@@ -509,6 +583,7 @@ class InvoiceService:
             "address_line2": invoice.address_line2,
             "postal_code": invoice.postal_code,
             "city": invoice.city,
+            "seller": invoice.seller_snapshot,
             "total_ht": _money(transaction.total_ht),
             "total_tva": _money(transaction.total_tva),
             "total_ttc": _money(transaction.total_ttc),
@@ -633,6 +708,7 @@ async def invoice_snapshot_dicts(
                 "address_line2": invoice.address_line2,
                 "postal_code": invoice.postal_code,
                 "city": invoice.city,
+                "seller": invoice.seller_snapshot,
                 "total_ht": _money(transaction.total_ht) if transaction is not None else "0.00",
                 "total_tva": _money(transaction.total_tva) if transaction is not None else "0.00",
                 "total_ttc": _money(transaction.total_ttc) if transaction is not None else "0.00",
