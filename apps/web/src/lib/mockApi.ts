@@ -60,7 +60,10 @@ import type {
   MessagingStatus,
   PaymentInput,
   PaymentOut,
+  AdminCashier,
+  PosCashier,
   PosClient,
+  PosSettings,
   PrinterStatus,
   PrintReceiptResponse,
   ReceiptSettings,
@@ -196,6 +199,101 @@ let backupConfig: DatabaseBackupConfig = { ...DEFAULT_BACKUP_CONFIG };
 let invoices: Invoice[] = [];
 let invoiceCounters: Record<string, number> = {};
 
+// --- PR8 (J2/J3) : vendeuses par code PIN ---------------------------------
+//
+// Le code est stocké EN CLAIR ici, et seulement ici : c'est un mock de
+// démonstration en mémoire du navigateur, sans réseau ni base. Le vrai
+// backend n'en garde qu'une empreinte bcrypt (`pin_hash`) et ne la ressort
+// jamais.
+interface MockCashier {
+  id: string;
+  display_name: string;
+  pin: string | null;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  deactivated_at: string | null;
+}
+
+/** Codes refusés par le serveur (J3) — liste courte de suites évidentes. */
+const WEAK_PINS = new Set([
+  "0000",
+  "1111",
+  "2222",
+  "3333",
+  "4444",
+  "5555",
+  "6666",
+  "7777",
+  "8888",
+  "9999",
+  "1234",
+  "2345",
+  "3456",
+  "4567",
+  "5678",
+  "6789",
+  "0123",
+  "9876",
+  "4321",
+]);
+
+/** Limite d'essais : 5 par vendeuse sur une fenêtre de 5 minutes (J2). */
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_WINDOW_MS = 5 * 60 * 1000;
+
+interface PinAttempts {
+  failures: number[];
+  blockedUntil: number | null;
+}
+
+const pinAttempts = new Map<string, PinAttempts>();
+
+function seedCashiers(): MockCashier[] {
+  const now = nowIso();
+  return [
+    { id: "cashier-lea", display_name: "Léa", pin: "2468", active: true, created_at: now, updated_at: now, deactivated_at: null },
+    { id: "cashier-chloe", display_name: "Chloé", pin: "1357", active: true, created_at: now, updated_at: now, deactivated_at: null },
+  ];
+}
+
+let cashiers: MockCashier[] = seedCashiers();
+/** Vendeuse posée sur le tiroir (état courant, mutable — jamais fiscal). */
+let currentCashierId: string | null = null;
+
+function cashierRefOf(cashier: MockCashier): { id: string; display_name: string } {
+  return { id: cashier.id, display_name: cashier.display_name };
+}
+
+function currentCashierRef(): { id: string; display_name: string } | null {
+  const found = cashiers.find((c) => c.id === currentCashierId);
+  return found ? cashierRefOf(found) : null;
+}
+
+function posCashierPayload(cashier: MockCashier): PosCashier {
+  return { id: cashier.id, display_name: cashier.display_name, has_pin: !!cashier.pin };
+}
+
+function adminCashierPayload(cashier: MockCashier): AdminCashier {
+  return {
+    id: cashier.id,
+    display_name: cashier.display_name,
+    has_pin: !!cashier.pin,
+    active: cashier.active,
+    created_at: cashier.created_at,
+    updated_at: cashier.updated_at,
+    deactivated_at: cashier.deactivated_at,
+  };
+}
+
+/** Refuse l'opération quand le réglage l'exige et que personne n'est
+ * identifié (J2 : 422 `cashier_required` sur ventes et mouvements). */
+function requireCashier(): void {
+  if (settings.pos.cashier_required && !currentCashierRef()) {
+    fail(422, "Identifiez la vendeuse avant d'encaisser.", "cashier_required");
+  }
+}
+
 // --- PR3 : clients, consentements, envois de ticket -----------------------
 let clients: Client[] = [];
 let consents: MockConsent[] = [];
@@ -231,6 +329,7 @@ const cbAttempts = new Map<string, CbAttempt>();
 const printCounts = new Map<string, number>();
 
 let settings: {
+  pos: PosSettings;
   shop: ShopSettings;
   fiscal: FiscalSettings;
   receipt: ReceiptSettings;
@@ -238,6 +337,10 @@ let settings: {
   accounting: AccountingSettings;
   targets: TargetsSettings;
 } = {
+  // PR8 (J2) — identification facultative par défaut, comme le contrat :
+  // la caisse d'une boutique qui tourne seule ne doit pas se bloquer du
+  // jour au lendemain.
+  pos: { cashier_required: false },
   shop: {
     name: "Frip & Co Street",
     address_line1: "12 rue du Gros-Horloge",
@@ -308,6 +411,9 @@ function reset(): void {
   fiscalClosures = [];
   closureSeq = 0;
   databaseBackups = seedDatabaseBackups();
+  cashiers = seedCashiers();
+  currentCashierId = null;
+  pinAttempts.clear();
   seedDemoSales();
   seedDemoClients();
   seedDemoInvoice();
@@ -337,6 +443,31 @@ function nowIso(): string {
 
 function fail(status: number, detail: string, code?: string): never {
   throw new ApiError(status, detail, code);
+}
+
+/** PR8 (J2) — blocage temporaire après cinq codes faux : 429 + le temps
+ * restant, à la fois en clair dans `detail` et dans `Retry-After` (que
+ * `lib/api.ts` recopie sur `ApiError.retryAfter`). */
+function failRateLimited(seconds: number): never {
+  const safe = Math.max(1, Math.round(seconds));
+  const minutes = Math.floor(safe / 60);
+  const rest = safe % 60;
+  const wait = minutes > 0 ? `${minutes} min ${String(rest).padStart(2, "0")} s` : `${rest} s`;
+  const error = new ApiError(429, `Trop de codes incorrects. Réessayez dans ${wait}.`, "too_many_attempts");
+  error.retryAfter = String(safe);
+  throw error;
+}
+
+/** Même règle que le serveur (J3) : exactement 4 chiffres, pas de suite
+ * évidente. */
+function validatePin(pin: unknown): void {
+  const value = String(pin ?? "");
+  if (!/^\d{4}$/.test(value)) {
+    fail(422, "Le code doit contenir exactement 4 chiffres.", "weak_pin");
+  }
+  if (WEAK_PINS.has(value)) {
+    fail(422, "Code trop simple : évitez les suites évidentes (0000, 1234, 1111…).", "weak_pin");
+  }
 }
 
 // --- PR4 : empreinte factice ------------------------------------------
@@ -1266,10 +1397,14 @@ export async function mockFetchAPI<T = unknown>(
 
   // --- Caisse espèces -------------------------------------------------
   if (path === "/api/pos/drawer/current" && method === "GET") {
-    if (!drawer) return { open: false } as unknown as T;
+    // PR8 (J2) : la vendeuse identifiée est un état du POSTE, pas de la
+    // vente — elle est donc renvoyée même caisse fermée (c'est ce qui
+    // permet de s'identifier AVANT d'ouvrir).
+    if (!drawer) return { open: false, current_cashier: currentCashierRef() } as unknown as T;
     const t = computeToday(drawer.opened_at);
     const resp: DrawerCurrentResponse = {
       open: true,
+      current_cashier: currentCashierRef(),
       drawer,
       today: {
         sales_count: t.sales_count,
@@ -1285,7 +1420,13 @@ export async function mockFetchAPI<T = unknown>(
 
   if (path === "/api/pos/drawer/open" && method === "POST") {
     if (drawer) fail(409, "Caisse déjà ouverte.", "drawer_already_open");
-    const body = parseBody<{ opening_amount: number }>(options);
+    const body = parseBody<{ opening_amount: number; cashier_id?: string | null }>(options);
+    // PR8 (J2) — la vendeuse qui ouvre est posée sur le tiroir.
+    if (body.cashier_id) {
+      const opener = cashiers.find((c) => c.id === body.cashier_id && c.active);
+      if (!opener) fail(404, "Vendeuse introuvable.", "cashier_not_found");
+      currentCashierId = opener!.id;
+    }
     drawer = { id: `drawer-${++drawerSeq}`, opened_at: nowIso(), opening_amount: round2(body.opening_amount || 0) };
     drawerHistory.unshift({ id: drawer.id, opened_at: drawer.opened_at, opening_amount: drawer.opening_amount, closed_at: null, closing_amount: null });
     logJet("drawer.opened", { opening_amount: drawer.opening_amount });
@@ -1349,6 +1490,7 @@ export async function mockFetchAPI<T = unknown>(
   }
 
   if (path === "/api/pos/cash-movements" && method === "POST") {
+    requireCashier();
     if (!drawer) fail(409, "Caisse fermée : ouvrez la caisse avant d'encaisser.", "drawer_closed");
     const body = parseBody<{ direction: "in" | "out"; amount: number; reason: CashMovementReason; note?: string | null }>(options);
     if (body.reason === "other" && !body.note?.trim()) {
@@ -1374,6 +1516,7 @@ export async function mockFetchAPI<T = unknown>(
   // --- Vente ------------------------------------------------------------
   if (path === "/api/pos/transactions" && method === "POST") {
     if (!drawer) fail(409, "Caisse fermée : ouvrez la caisse avant d'encaisser.", "drawer_closed");
+    requireCashier();
     const body = parseBody<CreateTransactionRequest>(options);
 
     const existing = transactions.find((t) => t.id === body.client_uuid || (t as unknown as { client_uuid?: string }).client_uuid === body.client_uuid);
@@ -1659,11 +1802,14 @@ export async function mockFetchAPI<T = unknown>(
   }
 
   // --- Administration ---------------------------------------------------
-  if ((m = path.match(/^\/api\/admin\/settings\/(shop|fiscal|receipt|hardware|accounting|targets)$/))) {
-    const key = m[1] as "shop" | "fiscal" | "receipt" | "hardware" | "accounting" | "targets";
+  if ((m = path.match(/^\/api\/admin\/settings\/(pos|shop|fiscal|receipt|hardware|accounting|targets)$/))) {
+    const key = m[1] as "pos" | "shop" | "fiscal" | "receipt" | "hardware" | "accounting" | "targets";
     if (method === "GET") return settings[key] as unknown as T;
     if (method === "PUT") {
       const body = parseBody<Record<string, unknown>>(options);
+      if (key === "pos" && typeof body.cashier_required !== "boolean") {
+        fail(422, "Réglage attendu : identification obligatoire vraie ou fausse.", "invalid_setting");
+      }
       if (key === "shop" && typeof body.siret === "string" && !/^\d{14}$/.test(body.siret)) {
         fail(422, "Le SIRET doit contenir exactement 14 chiffres.", "invalid_siret");
       }
@@ -2077,6 +2223,122 @@ export async function mockFetchAPI<T = unknown>(
       sha256: closure.archive_sha256,
     });
     return closure as unknown as T;
+  }
+
+  // --- PR8 (J2/J3) : vendeuses par code PIN ------------------------------
+
+  if (path === "/api/pos/cashiers" && method === "GET") {
+    return { cashiers: cashiers.filter((c) => c.active).map(posCashierPayload) } as unknown as T;
+  }
+
+  if (path === "/api/pos/cashiers/identify" && method === "POST") {
+    const body = parseBody<{ cashier_id: string; pin: string }>(options);
+    const cashier = cashiers.find((c) => c.id === body.cashier_id && c.active);
+    if (!cashier) fail(404, "Vendeuse introuvable.", "cashier_not_found");
+
+    const now = Date.now();
+    const attempts = pinAttempts.get(cashier!.id) ?? { failures: [], blockedUntil: null };
+    if (attempts.blockedUntil && attempts.blockedUntil > now) {
+      failRateLimited(Math.ceil((attempts.blockedUntil - now) / 1000));
+    }
+    if (attempts.blockedUntil && attempts.blockedUntil <= now) {
+      attempts.blockedUntil = null;
+      attempts.failures = [];
+    }
+
+    if (!cashier!.pin || cashier!.pin !== String(body.pin ?? "")) {
+      // Le code faux n'est JAMAIS journalisé (J2) : seulement le fait
+      // qu'un code a été refusé, et pour qui.
+      attempts.failures = [...attempts.failures.filter((t) => now - t < PIN_WINDOW_MS), now];
+      if (attempts.failures.length >= PIN_MAX_ATTEMPTS) {
+        attempts.blockedUntil = now + PIN_WINDOW_MS;
+      }
+      pinAttempts.set(cashier!.id, attempts);
+      logJet("cashier.pin_rejected", { cashier_id: cashier!.id });
+      if (attempts.blockedUntil) {
+        failRateLimited(Math.ceil((attempts.blockedUntil - now) / 1000));
+      }
+      fail(401, "Code incorrect.", "invalid_pin");
+    }
+
+    pinAttempts.delete(cashier!.id);
+    currentCashierId = cashier!.id;
+    logJet("cashier.identified", { cashier_id: cashier!.id });
+    return { cashier: cashierRefOf(cashier!) } as unknown as T;
+  }
+
+  if (path === "/api/pos/cashiers/release" && method === "POST") {
+    const previous = currentCashierId;
+    currentCashierId = null;
+    if (previous) logJet("cashier.released", { cashier_id: previous });
+    return {} as unknown as T;
+  }
+
+  if (path === "/api/admin/cashiers" && method === "GET") {
+    return { cashiers: cashiers.map(adminCashierPayload) } as unknown as T;
+  }
+
+  if (path === "/api/admin/cashiers" && method === "POST") {
+    const body = parseBody<{ display_name?: string; pin?: string }>(options);
+    const name = (body.display_name ?? "").trim();
+    if (!name || name.length > 60) {
+      fail(422, "Le prénom de la vendeuse est obligatoire (60 caractères maximum).", "invalid_display_name");
+    }
+    if (cashiers.some((c) => c.display_name.toLocaleLowerCase("fr") === name.toLocaleLowerCase("fr"))) {
+      fail(409, "Une vendeuse porte déjà ce prénom.", "cashier_exists");
+    }
+    validatePin(body.pin);
+    const created: MockCashier = {
+      id: uuid(),
+      display_name: name,
+      pin: String(body.pin),
+      active: true,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+      deactivated_at: null,
+    };
+    cashiers = [...cashiers, created];
+    logJet("cashier.created", { cashier_id: created.id });
+    return { cashier: adminCashierPayload(created) } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/cashiers\/([^/]+)\/pin$/)) && method === "PUT") {
+    const cashier = cashiers.find((c) => c.id === m![1]);
+    if (!cashier) fail(404, "Vendeuse introuvable.", "cashier_not_found");
+    const body = parseBody<{ pin?: string }>(options);
+    validatePin(body.pin);
+    cashier!.pin = String(body.pin);
+    cashier!.updated_at = nowIso();
+    pinAttempts.delete(cashier!.id);
+    // Ni le code ni son empreinte ne sont journalisés (J3).
+    logJet("cashier.pin_changed", { cashier_id: cashier!.id });
+    return { cashier: adminCashierPayload(cashier!) } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/cashiers\/([^/]+)$/)) && method === "PUT") {
+    const cashier = cashiers.find((c) => c.id === m![1]);
+    if (!cashier) fail(404, "Vendeuse introuvable.", "cashier_not_found");
+    const body = parseBody<{ display_name?: string; active?: boolean }>(options);
+    if (body.display_name !== undefined) {
+      const name = body.display_name.trim();
+      if (!name || name.length > 60) {
+        fail(422, "Le prénom de la vendeuse est obligatoire (60 caractères maximum).", "invalid_display_name");
+      }
+      if (cashiers.some((c) => c.id !== cashier!.id && c.display_name.toLocaleLowerCase("fr") === name.toLocaleLowerCase("fr"))) {
+        fail(409, "Une vendeuse porte déjà ce prénom.", "cashier_exists");
+      }
+      cashier!.display_name = name;
+    }
+    if (body.active !== undefined) {
+      cashier!.active = body.active;
+      cashier!.deactivated_at = body.active ? null : nowIso();
+      // Une vendeuse désactivée ne peut plus tenir la caisse : si c'est
+      // elle qui l'occupait, le poste redevient libre.
+      if (!body.active && currentCashierId === cashier!.id) currentCashierId = null;
+    }
+    cashier!.updated_at = nowIso();
+    logJet("cashier.updated", { cashier_id: cashier!.id });
+    return { cashier: adminCashierPayload(cashier!) } as unknown as T;
   }
 
   // --- PR7 (I3) : client en caisse (recherche, création, détachement) ---
