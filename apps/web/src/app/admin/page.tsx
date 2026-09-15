@@ -5,12 +5,14 @@
  * terminal de paiement, rapports de clôture, contrôle d'intégrité et
  * journal des événements (jamais nommé « JET » dans l'UI — CDC §3.2).
  */
-import React, { useEffect, useState } from "react";
+import React, { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import AccountingTab from "@/components/admin/AccountingTab";
 import BackupsTab from "@/components/admin/BackupsTab";
 import FiscalArchivesTab from "@/components/admin/FiscalArchivesTab";
-import AppShell from "@/components/layout/AppShell";
+import RequireAuth from "@/components/layout/RequireAuth";
+import Sidebar from "@/components/layout/Sidebar";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
@@ -40,32 +42,65 @@ import {
 } from "@/lib/types";
 import { findPairedUsbDevice, getStoredPrinter, isWebUsbSupported, pairUsbPrinter, sendBytes } from "@/lib/webusb-printer";
 
+/** Onglets de la page — l'ordre suit celui de la barre latérale (PR7, I1). */
+type Tab = "settings" | "hardware" | "clients" | "accounting" | "fiscal" | "backups";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "settings", label: "Réglages" },
+  { id: "hardware", label: "Matériel" },
+  { id: "clients", label: "Clients" },
+  { id: "accounting", label: "Comptabilité" },
+  { id: "fiscal", label: "Archives fiscales" },
+  { id: "backups", label: "Sauvegardes" },
+];
+
+/** Onglet ouvert par défaut quand l'URL ne porte pas de `?tab=`. */
+const DEFAULT_TAB: Tab = "settings";
+
+function isTab(value: string | null): value is Tab {
+  return !!value && TABS.some((t) => t.id === value);
+}
+
 export default function AdminPage() {
-  const [tab, setTab] = useState<"settings" | "hardware" | "clients" | "accounting" | "fiscal" | "backups">("settings");
+  return (
+    <RequireAuth>
+      <Sidebar />
+      <main className="md:ml-64 px-4 pt-16 pb-6 md:p-8">
+        {/* `useSearchParams` impose une frontière de rendu différé (Next 15). */}
+        <Suspense fallback={<p className="text-sm text-fc-ink-soft">Chargement…</p>}>
+          <AdminTabs />
+        </Suspense>
+      </main>
+    </RequireAuth>
+  );
+}
+
+/**
+ * PR7 (I1) : l'onglet actif vit dans l'URL (`/admin?tab=clients`), pour que
+ * les entrées de la barre latérale ouvrent directement le bon onglet et que
+ * la page reste partageable/rechargeable. Un clic sur un onglet met l'URL à
+ * jour sans empiler d'entrée d'historique (`replace`).
+ */
+function AdminTabs() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const param = searchParams.get("tab");
+  const tab: Tab = isTab(param) ? param : DEFAULT_TAB;
+
+  const selectTab = (next: Tab): void => {
+    router.replace(next === DEFAULT_TAB ? "/admin" : `/admin?tab=${next}`, { scroll: false });
+  };
 
   return (
-    <AppShell>
+    <>
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-fc-ink">Administration</h1>
         <div className="flex flex-wrap items-center gap-1 rounded-fc-lg bg-fc-bg-alt p-1">
-          <TabButton active={tab === "settings"} onClick={() => setTab("settings")}>
-            Réglages
-          </TabButton>
-          <TabButton active={tab === "hardware"} onClick={() => setTab("hardware")}>
-            Matériel
-          </TabButton>
-          <TabButton active={tab === "clients"} onClick={() => setTab("clients")}>
-            Clients
-          </TabButton>
-          <TabButton active={tab === "accounting"} onClick={() => setTab("accounting")}>
-            Comptabilité
-          </TabButton>
-          <TabButton active={tab === "fiscal"} onClick={() => setTab("fiscal")}>
-            Archives fiscales
-          </TabButton>
-          <TabButton active={tab === "backups"} onClick={() => setTab("backups")}>
-            Sauvegardes
-          </TabButton>
+          {TABS.map((t) => (
+            <TabButton key={t.id} active={tab === t.id} onClick={() => selectTab(t.id)}>
+              {t.label}
+            </TabButton>
+          ))}
         </div>
       </div>
 
@@ -96,7 +131,7 @@ export default function AdminPage() {
       {tab === "fiscal" && <FiscalArchivesTab />}
 
       {tab === "backups" && <BackupsTab />}
-    </AppShell>
+    </>
   );
 }
 

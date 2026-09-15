@@ -15,13 +15,11 @@
  *     (la vendeuse laisse l'écran ouvert toute la journée).
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
 
-import RequireAuth from "@/components/layout/RequireAuth";
 import { api, ApiError } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/format";
-import type { DashboardDay, DashboardResponse, ShopSettings } from "@/lib/types";
+import type { DashboardDay, DashboardResponse } from "@/lib/types";
 
 /** Intervalle de rafraîchissement automatique (H4). */
 const REFRESH_MS = 60_000;
@@ -242,7 +240,6 @@ function SevenDayChart({ days }: { days: DashboardDay[] }) {
 
 export default function DashboardHome() {
   const [data, setData] = useState<DashboardResponse | null>(null);
-  const [shopName, setShopName] = useState<string>("Frip & Co Street");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Évite de repasser l'écran en « Chargement… » à chaque rafraîchissement
@@ -275,17 +272,6 @@ export default function DashboardHome() {
     };
   }, [load]);
 
-  useEffect(() => {
-    // Nom de la boutique pour l'en-tête — chargement non bloquant : un échec
-    // laisse simplement le nom par défaut plutôt que de casser l'écran.
-    api
-      .get<ShopSettings>("/api/admin/settings/shop")
-      .then((s) => {
-        if (s?.name) setShopName(s.name);
-      })
-      .catch(() => undefined);
-  }, []);
-
   const today = data?.today;
   const month = data?.month;
   const days = data?.last_7_days ?? [];
@@ -293,152 +279,128 @@ export default function DashboardHome() {
   const monthTarget = amount(month?.target);
 
   return (
-    <RequireAuth>
-      <div className="flex min-h-screen flex-col bg-fc-bg">
-        <header className="flex-shrink-0 border-b border-fc-line bg-fc-surface">
-          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <Image
-                src="/brand/logo-mark.png"
-                alt=""
-                aria-hidden
-                width={40}
-                height={40}
-                className="h-10 w-10 flex-shrink-0 rounded-fc"
-              />
-              <span className="truncate font-semibold text-fc-ink">{shopName}</span>
-            </div>
-
-            <div className="flex-1" />
-
-            <Link
-              href="/admin"
-              className="inline-flex min-h-touch items-center rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
-            >
-              Administration
-            </Link>
-            <Link
-              href="/caisse"
-              className="inline-flex min-h-[56px] flex-1 items-center justify-center rounded-fc bg-fc-primary px-6 py-3 text-lg font-semibold text-white transition-colors hover:bg-fc-primary-deep focus:outline-none focus:ring-2 focus:ring-fc-primary focus:ring-offset-2 focus:ring-offset-fc-bg sm:flex-none"
-            >
-              Aller à la caisse
-            </Link>
-          </div>
-        </header>
-
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-5 sm:py-6">
-          <h1 className="sr-only">Tableau de bord</h1>
-
-          {error && (
-            <div
-              role="alert"
-              className="mb-5 rounded-fc border border-fc-danger/30 bg-fc-danger-soft px-3 py-2 text-sm text-fc-danger"
-            >
-              {error}
-            </div>
-          )}
-
-          {loading && !loadedOnce.current ? (
-            <p className="text-sm text-fc-ink-soft">Chargement…</p>
-          ) : !data || !today || !month ? (
-            <p className="text-sm text-fc-ink-soft">Aucune donnée à afficher pour le moment.</p>
-          ) : (
-            <div className="space-y-5">
-              <div className="grid gap-5 lg:grid-cols-2">
-                {/* ----------------------------------------------- Aujourd'hui */}
-                <Panel title="Aujourd'hui" subtitle={formatDate(parseDay(today.date))}>
-                  <div className="space-y-4">
-                    <div>
-                      <div className="font-mono text-4xl font-semibold tabular-nums leading-none text-fc-ink sm:text-5xl">
-                        {euros(today.net)}
-                      </div>
-                      <div className="mt-1.5 text-sm text-fc-ink-soft">
-                        {today.sales_count} {plural(today.sales_count, "vente")}
-                        {today.refunds_count > 0 && (
-                          <>
-                            {" · "}
-                            {today.refunds_count} {plural(today.refunds_count, "annulation")}
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {dailyTarget > 0 ? (
-                      <TargetProgress
-                        pct={today.progress_pct}
-                        target={today.target}
-                        label="Progression vers l'objectif du jour"
-                      />
-                    ) : (
-                      <NoTargetNotice what="journalier" />
-                    )}
-
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                      <Stat label="Panier moyen" value={euros(today.average_basket)} />
-                      <Stat label="Espèces" value={euros(today.cash)} />
-                      <Stat label="Carte" value={euros(today.card)} />
-                    </div>
-                  </div>
-                </Panel>
-
-                {/* -------------------------------------------------- Ce mois */}
-                <Panel title="Ce mois" subtitle={monthLabel(month.month)}>
-                  <div className="space-y-4">
-                    <div>
-                      <div className="font-mono text-4xl font-semibold tabular-nums leading-none text-fc-ink sm:text-5xl">
-                        {euros(month.net)}
-                      </div>
-                      <div className="mt-1.5 text-sm text-fc-ink-soft">
-                        {month.sales_count} {plural(month.sales_count, "vente")} · {month.days_open}{" "}
-                        {plural(month.days_open, "jour")} d&apos;ouverture
-                      </div>
-                    </div>
-
-                    {monthTarget > 0 ? (
-                      <TargetProgress
-                        pct={month.progress_pct}
-                        target={month.target}
-                        label="Progression vers l'objectif du mois"
-                      />
-                    ) : (
-                      <NoTargetNotice what="mensuel" />
-                    )}
-
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <Stat
-                        label="Jours restants"
-                        value={`${month.remaining_days} ${plural(month.remaining_days, "jour")}`}
-                        hint="Jour courant inclus"
-                      />
-                      <Stat
-                        label="Rythme nécessaire"
-                        value={monthTarget > 0 ? `${euros(month.required_daily)} / jour` : "—"}
-                        hint={monthTarget > 0 ? "Pour tenir l'objectif du mois" : "Aucun objectif du mois"}
-                      />
-                    </div>
-                  </div>
-                </Panel>
-              </div>
-
-              {/* --------------------------------------------- 7 derniers jours */}
-              <Panel title="7 derniers jours" subtitle="Ventes nettes par jour (annulations déduites).">
-                <SevenDayChart days={days} />
-                <p className="mt-4 text-sm text-fc-ink-soft">
-                  {month.best_day.date ? (
-                    <>
-                      Meilleur jour du mois :{" "}
-                      <span className="font-medium text-fc-ink">{longDayLabel(month.best_day.date)}</span> —{" "}
-                      <span className="font-mono tabular-nums text-fc-ink">{euros(month.best_day.net)}</span>
-                    </>
-                  ) : (
-                    <>Aucune vente enregistrée ce mois-ci pour l&apos;instant.</>
-                  )}
-                </p>
-              </Panel>
-            </div>
-          )}
-        </main>
+    <div className="mx-auto w-full max-w-6xl">
+      {/* PR7 (I1) : l'en-tête maison a disparu au profit de la barre
+          latérale ; il ne reste que le titre de page et l'accès direct à
+          la caisse, geste le plus fréquent de la journée. */}
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-bold text-fc-ink">Accueil</h1>
+        <Link
+          href="/caisse"
+          className="inline-flex min-h-[56px] items-center justify-center rounded-fc bg-fc-primary px-6 py-3 text-lg font-semibold text-white transition-colors hover:bg-fc-primary-deep focus:outline-none focus:ring-2 focus:ring-fc-primary focus:ring-offset-2 focus:ring-offset-fc-bg"
+        >
+          Aller à la caisse
+        </Link>
       </div>
-    </RequireAuth>
+
+      {error && (
+        <div
+          role="alert"
+          className="mb-5 rounded-fc border border-fc-danger/30 bg-fc-danger-soft px-3 py-2 text-sm text-fc-danger"
+        >
+          {error}
+        </div>
+      )}
+
+      {loading && !loadedOnce.current ? (
+        <p className="text-sm text-fc-ink-soft">Chargement…</p>
+      ) : !data || !today || !month ? (
+        <p className="text-sm text-fc-ink-soft">Aucune donnée à afficher pour le moment.</p>
+      ) : (
+        <div className="space-y-5">
+          <div className="grid gap-5 lg:grid-cols-2">
+            {/* ----------------------------------------------- Aujourd'hui */}
+            <Panel title="Aujourd'hui" subtitle={formatDate(parseDay(today.date))}>
+              <div className="space-y-4">
+                <div>
+                  <div className="font-mono text-4xl font-semibold tabular-nums leading-none text-fc-ink sm:text-5xl">
+                    {euros(today.net)}
+                  </div>
+                  <div className="mt-1.5 text-sm text-fc-ink-soft">
+                    {today.sales_count} {plural(today.sales_count, "vente")}
+                    {today.refunds_count > 0 && (
+                      <>
+                        {" · "}
+                        {today.refunds_count} {plural(today.refunds_count, "annulation")}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {dailyTarget > 0 ? (
+                  <TargetProgress
+                    pct={today.progress_pct}
+                    target={today.target}
+                    label="Progression vers l'objectif du jour"
+                  />
+                ) : (
+                  <NoTargetNotice what="journalier" />
+                )}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <Stat label="Panier moyen" value={euros(today.average_basket)} />
+                  <Stat label="Espèces" value={euros(today.cash)} />
+                  <Stat label="Carte" value={euros(today.card)} />
+                </div>
+              </div>
+            </Panel>
+
+            {/* -------------------------------------------------- Ce mois */}
+            <Panel title="Ce mois" subtitle={monthLabel(month.month)}>
+              <div className="space-y-4">
+                <div>
+                  <div className="font-mono text-4xl font-semibold tabular-nums leading-none text-fc-ink sm:text-5xl">
+                    {euros(month.net)}
+                  </div>
+                  <div className="mt-1.5 text-sm text-fc-ink-soft">
+                    {month.sales_count} {plural(month.sales_count, "vente")} · {month.days_open}{" "}
+                    {plural(month.days_open, "jour")} d&apos;ouverture
+                  </div>
+                </div>
+
+                {monthTarget > 0 ? (
+                  <TargetProgress
+                    pct={month.progress_pct}
+                    target={month.target}
+                    label="Progression vers l'objectif du mois"
+                  />
+                ) : (
+                  <NoTargetNotice what="mensuel" />
+                )}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Stat
+                    label="Jours restants"
+                    value={`${month.remaining_days} ${plural(month.remaining_days, "jour")}`}
+                    hint="Jour courant inclus"
+                  />
+                  <Stat
+                    label="Rythme nécessaire"
+                    value={monthTarget > 0 ? `${euros(month.required_daily)} / jour` : "—"}
+                    hint={monthTarget > 0 ? "Pour tenir l'objectif du mois" : "Aucun objectif du mois"}
+                  />
+                </div>
+              </div>
+            </Panel>
+          </div>
+
+          {/* --------------------------------------------- 7 derniers jours */}
+          <Panel title="7 derniers jours" subtitle="Ventes nettes par jour (annulations déduites).">
+            <SevenDayChart days={days} />
+            <p className="mt-4 text-sm text-fc-ink-soft">
+              {month.best_day.date ? (
+                <>
+                  Meilleur jour du mois :{" "}
+                  <span className="font-medium text-fc-ink">{longDayLabel(month.best_day.date)}</span> —{" "}
+                  <span className="font-mono tabular-nums text-fc-ink">{euros(month.best_day.net)}</span>
+                </>
+              ) : (
+                <>Aucune vente enregistrée ce mois-ci pour l&apos;instant.</>
+              )}
+            </p>
+          </Panel>
+        </div>
+      )}
+    </div>
   );
 }
