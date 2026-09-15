@@ -186,7 +186,12 @@ donc non vérifiables glyphe à glyphe).
 ### 3.1 Fichiers disponibles (voir §4 pour le détail technique)
 
 - `logo-fripco-street.png` — logo complet (« Frip&Co » + « STREET »), fond blanc, recadré fidèlement
-- `logo-mark.png` — disque bleu + esperluette seuls, fond blanc, recadré au carré
+- `logo-mark.png` — disque bleu + esperluette seuls, **256×256 px, RGBA fond
+  transparent** (régénéré depuis `logo-fripco-street.png` par
+  `scripts/regen_logo.py` : masque circulaire calculé avec 8 % de marge,
+  aucun débord du lettrage voisin — voir aussi la variante
+  `logo-mark-on-blue.png`, disque blanc + esperluette bleue, pour usage sur
+  fond `--fc-primary`)
 - `favicon-64.png` — 64×64 px, dérivé du mark
 - **Pas de version SVG** (voir §5 — le logo n'est pas vectoriel dans la source)
 
