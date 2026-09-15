@@ -8,7 +8,7 @@
  */
 
 import { ApiError, extractErrorCode, extractErrorDetail } from "./apiError";
-import { mockFetchAPI, isMockEnabled } from "./mockApi";
+import { mockFetchAPI, mockFetchBytes, mockFetchBytesWithHeaders, isMockEnabled } from "./mockApi";
 
 export { ApiError };
 
@@ -119,8 +119,133 @@ export async function fetchAPI<T = unknown>(
   return data as T;
 }
 
+/**
+ * Variante binaire de `fetchAPI` — pour les octets ESC/POS bruts
+ * (`GET /hardware/receipt/test-escpos`, `GET
+ * /pos/transactions/{id}/escpos`, `GET /pos/drawer/kick-escpos`), servis
+ * en mode WebUSB (tablette) : le corps n'est jamais du JSON, donc jamais
+ * envoyé à `fetchAPI` (qui suppose text/JSON). Même gestion d'erreurs
+ * (Bearer, timeout, 401, `ApiError`) que la variante JSON.
+ */
+export async function fetchBytes(endpoint: string, options?: FetchAPIOptions): Promise<Uint8Array> {
+  if (isMockEnabled()) {
+    return mockFetchBytes(endpoint, options);
+  }
+
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const controller = new AbortController();
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${endpoint}`, {
+      ...options,
+      signal: options?.signal ?? controller.signal,
+      headers: { ...headers, ...options?.headers },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 401) {
+    handleUnauthorized();
+  }
+
+  if (!res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    const data = contentType.includes("application/json")
+      ? await res.json().catch(() => null)
+      : await res.text().catch(() => null);
+    throw new ApiError(res.status, extractErrorDetail(data), extractErrorCode(data));
+  }
+
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+export interface BytesWithHeaders {
+  bytes: Uint8Array;
+  /** En-têtes de la réponse, clés en minuscules (comportement natif de
+   * `Headers`). Utilisé par `lib/download.ts` (PR4) pour lire l'empreinte
+   * (`X-Archive-SHA256`, `X-Export-SHA256`) d'un téléchargement — archive
+   * fiscale, export fiscal à la demande — sans requête supplémentaire. */
+  headers: Record<string, string>;
+}
+
+/**
+ * Variante de `fetchBytes` qui renvoie aussi les en-têtes de la réponse
+ * (PR4 : `X-Archive-SHA256` sur `/fiscal-closures/{id}/archive`,
+ * `X-Export-SHA256` sur `/admin/fiscal-export`). Les téléchargements qui
+ * n'ont pas besoin de l'empreinte (CSV, FEC, exports de table, PDF du Z)
+ * passent aussi par ici : le corps du helper `downloadFile` reste unique.
+ */
+export async function fetchBytesWithHeaders(
+  endpoint: string,
+  options?: FetchAPIOptions,
+): Promise<BytesWithHeaders> {
+  if (isMockEnabled()) {
+    return mockFetchBytesWithHeaders(endpoint, options);
+  }
+
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const controller = new AbortController();
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${endpoint}`, {
+      ...options,
+      signal: options?.signal ?? controller.signal,
+      headers: { ...headers, ...options?.headers },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 401) {
+    handleUnauthorized();
+  }
+
+  if (!res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    const data = contentType.includes("application/json")
+      ? await res.json().catch(() => null)
+      : await res.text().catch(() => null);
+    throw new ApiError(res.status, extractErrorDetail(data), extractErrorCode(data));
+  }
+
+  const responseHeaders: Record<string, string> = {};
+  res.headers.forEach((value, key) => {
+    responseHeaders[key] = value;
+  });
+
+  return { bytes: new Uint8Array(await res.arrayBuffer()), headers: responseHeaders };
+}
+
 export const api = {
   get: <T = unknown>(url: string) => fetchAPI<T>(url),
+  /** GET renvoyant des octets bruts (endpoints `*escpos*`, mode WebUSB). */
+  getBytes: (url: string) => fetchBytes(url),
+  /** GET renvoyant des octets bruts + en-têtes (PR4 : téléchargements avec
+   * empreinte SHA-256). */
+  getBytesWithHeaders: (url: string) => fetchBytesWithHeaders(url),
   post: <T = unknown>(url: string, data?: unknown) =>
     fetchAPI<T>(url, { method: "POST", body: data !== undefined ? JSON.stringify(data) : undefined }),
   put: <T = unknown>(url: string, data?: unknown) =>

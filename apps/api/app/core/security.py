@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/core/security.py) — compte unique, sans
+# Extrait de l'application source (apps/api/app/core/security.py) — compte unique, sans
 # role ni PIN caisse (RoleChecker et get_current_client retires).
 import uuid
 from datetime import datetime, timedelta, timezone

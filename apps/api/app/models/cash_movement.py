@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/models/cash_movement.py) — reason
+# Extrait de l'application source (apps/api/app/models/cash_movement.py) — reason
 # `personal_withdrawal` retire (hors perimetre CDC Frip & Co Street, §2 du
 # contrat PR2).
 from __future__ import annotations

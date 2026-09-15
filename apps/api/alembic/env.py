@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/alembic/env.py)
+# Extrait de l'application source (apps/api/alembic/env.py)
 import asyncio
 from logging.config import fileConfig
 

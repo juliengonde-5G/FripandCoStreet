@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/services/sumup_service.py, 1484 lignes) —
+# Extrait de l'application source (apps/api/app/services/sumup_service.py, 1484 lignes) —
 # réduit au strict périmètre PR2 (§4.5 ARCHITECTURE_PR2.md) :
 #
 # Conservé : is_configured, describe, ping_reader (pré-vol), _push_to_reader,
@@ -43,7 +43,7 @@ from app.core.config import settings
 _log = logging.getLogger("fripco")
 
 # ---------------------------------------------------------------------------
-# Network timeouts & retry policy — identiques à Vintiz.
+# Network timeouts & retry policy — identiques à l'application source.
 # ---------------------------------------------------------------------------
 CHECKOUT_TIMEOUT = float(os.getenv("SUMUP_CHECKOUT_TIMEOUT", "30"))  # push / refund
 STATUS_TIMEOUT = float(os.getenv("SUMUP_STATUS_TIMEOUT", "20"))      # poll status / lookups
@@ -77,7 +77,7 @@ def is_test_api_key(api_key: str) -> bool:
     """True si ``api_key`` est une clé SumUp de test (préfixe ``sup_sk_test_``).
 
     Utilisé par ``cb_router`` pour refuser une clé de test en production —
-    comme dans Vintiz (``is_sandbox`` y était une propriété d'instance ;
+    comme dans l'application source (``is_sandbox`` y était une propriété d'instance ;
     ici c'est une fonction pure, le concept de « double environnement » a
     été retiré du service lui-même, D12).
     """
@@ -85,7 +85,7 @@ def is_test_api_key(api_key: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# PII redaction pour les payloads d'erreur SumUp — copié tel quel de Vintiz
+# PII redaction pour les payloads d'erreur SumUp — copié tel quel de l'application source
 # (conforme PCI-DSS req. 3 + minimisation RGPD).
 # ---------------------------------------------------------------------------
 
@@ -173,7 +173,7 @@ class SumUpService:
         # un test de bout en bout crédible.
         self._api_base = (settings.SUMUP_API_BASE or "").strip().rstrip("/")
         # Override de transport httpx — ``None`` = réseau réel. Les tests
-        # injectent un ``httpx.MockTransport`` ici (comme Vintiz).
+        # injectent un ``httpx.MockTransport`` ici (comme dans l'application source).
         self._transport = None
 
     def _url(self, path: str) -> str:
@@ -317,7 +317,7 @@ class SumUpService:
         """Sonde le reader configuré et retourne un statut structuré.
 
         Distingue l'état d'appairage (``GET /readers/{id}``) de l'état live
-        Wi-Fi/4G (``GET /readers/{id}/status``), comme Vintiz — permet au
+        Wi-Fi/4G (``GET /readers/{id}/status``), comme l'application source — permet au
         bandeau caisse de distinguer « jamais appairé » de « appairé mais
         Wi-Fi coupé ».
         """

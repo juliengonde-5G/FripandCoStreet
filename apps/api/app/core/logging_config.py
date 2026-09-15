@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/core/logging_config.py)
+# Extrait de l'application source (apps/api/app/core/logging_config.py)
 """Configuration de logging centralisee pour l'API fripco-street.
 
 Utiliser `setup_logging()` une fois au demarrage. Formatteur JSON disponible

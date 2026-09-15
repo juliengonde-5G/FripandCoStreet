@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/core/exceptions.py)
+# Extrait de l'application source (apps/api/app/core/exceptions.py)
 """Hierarchie d'exceptions metier pour fripco-street.
 
 Les services levent ces exceptions plutot que HTTPException pour rester

@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/services/cash_payment_validator.py), copie
+# Extrait de l'application source (apps/api/app/services/cash_payment_validator.py), copie
 # fidele.
 """Validation des plafonds legaux de paiement en especes.
 

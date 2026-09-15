@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/tests/test_expected_db_revision.py)
+# Extrait de l'application source (apps/api/tests/test_expected_db_revision.py)
 """Garde-fou : EXPECTED_DB_REVISION doit suivre le head Alembic.
 
 En production, `app.main` refuse de demarrer si la revision de la base ne

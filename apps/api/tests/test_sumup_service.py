@@ -1,6 +1,7 @@
 # Tests `app/services/sumup_service.py` — aucune base de données, aucun
 # appel réseau réel : tout passe par un `httpx.MockTransport` injecté dans
-# `SumUpService._transport`, comme Vintiz (`tests/test_sumup_robustness.py`).
+# `SumUpService._transport`, comme le test équivalent de l'application
+# source (`tests/test_sumup_robustness.py`).
 from __future__ import annotations
 
 from decimal import Decimal

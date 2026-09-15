@@ -2,7 +2,7 @@
 
 /**
  * Écran de caisse (§6 PR2) — réécrit pour ce dépôt (l'exclusion explicite
- * porte sur `apps/pos/page.tsx` de Vintiz, 3 777 lignes catalogue +
+ * porte sur `apps/pos/page.tsx` de l'application source, 3 777 lignes catalogue +
  * douchette ; les modales et primitives, elles, sont extraites — voir
  * components/pos/*).
  *
@@ -10,6 +10,8 @@
  * panier défile. Aucun jargon technique visible (§3.2 CDC).
  */
 import React, { useEffect, useRef, useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
 
 import RequireAuth from "@/components/layout/RequireAuth";
 import Modal from "@/components/ui/Modal";
@@ -24,11 +26,14 @@ import TicketsPanel from "@/components/pos/TicketsPanel";
 import { api, ApiError } from "@/lib/api";
 import { formatCurrency } from "@/lib/format";
 import { clampDiscountValue, computeBrut, computeDiscountAmount } from "@/lib/posCalc";
+import { kickDrawer, loadHardwareSettings } from "@/lib/printing";
 import type {
   CbStatusConfig,
   DiscountInput,
   DrawerCurrentResponse,
+  HardwareSettings,
   PaymentInput,
+  ShopSettings,
   TransactionOut,
   ZReport,
 } from "@/lib/types";
@@ -69,10 +74,21 @@ export default function CaissePage() {
   const [successTx, setSuccessTx] = useState<TransactionOut | null>(null);
 
   const [cbConfig, setCbConfig] = useState<CbStatusConfig | null>(null);
+  // PR3 (E8) : e-mail affiché dans la mention RGPD du bloc « Envoyer le
+  // ticket par e-mail » — chargement non bloquant, un échec laisse
+  // simplement le bloc RGPD sans adresse plutôt que de casser la vente.
+  const [dpoEmail, setDpoEmail] = useState<string>("");
 
   const [ticketsOpen, setTicketsOpen] = useState(false);
   const [closeDrawerOpen, setCloseDrawerOpen] = useState(false);
   const [lastZ, setLastZ] = useState<ZReport | null>(null);
+
+  // PR3b — réglages matériel (imprimante ticket + tiroir-caisse).
+  // `undefined` tant que le chargement est en cours : `ReceiptPreviewCard`
+  // attend cette valeur pour décider de l'impression/l'ouverture
+  // automatique sans jamais conclure prématurément à « désactivée ».
+  const [hardware, setHardware] = useState<HardwareSettings | null | undefined>(undefined);
+  const [drawerKicking, setDrawerKicking] = useState(false);
 
   const clientUuidRef = useRef<string>(newUuid());
 
@@ -118,10 +134,30 @@ export default function CaissePage() {
     }
   };
 
+  const loadShopSettings = async (): Promise<void> => {
+    try {
+      const data = await api.get<ShopSettings>("/api/admin/settings/shop");
+      setDpoEmail(data.dpo_email ?? "");
+    } catch {
+      // Non bloquant (voir déclaration de l'état) — mention RGPD affichée
+      // sans adresse plutôt que d'empêcher la vente.
+    }
+  };
+
   useEffect(() => {
     void loadDrawer();
     void loadCbConfig();
+    void loadShopSettings();
+    void loadHardwareSettings().then(setHardware);
   }, []);
+
+  const handleKickDrawer = async (): Promise<void> => {
+    if (drawerKicking) return;
+    setDrawerKicking(true);
+    const result = await kickDrawer(hardware ?? null, "manual");
+    setDrawerKicking(false);
+    if (!result.ok) setBanner(result.message);
+  };
 
   const runGuarded = async (fn: () => Promise<void>): Promise<void> => {
     try {
@@ -262,9 +298,14 @@ export default function CaissePage() {
         {/* Barre haute */}
         <header className="flex-shrink-0 bg-fc-surface border-b border-fc-line px-4 py-2 flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2 min-w-0">
-            <div aria-hidden className="h-8 w-8 rounded-fc bg-fc-primary text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
-              F&amp;C
-            </div>
+            <Image
+              src="/brand/logo-mark.png"
+              alt=""
+              aria-hidden
+              width={40}
+              height={40}
+              className="h-10 w-10 rounded-fc flex-shrink-0"
+            />
             <span className="font-semibold text-fc-ink truncate">Frip &amp; Co Street</span>
           </div>
 
@@ -282,6 +323,16 @@ export default function CaissePage() {
           <div className="flex-1" />
 
           <CashMovementButton disabled={!drawerState?.open} onSubmit={handleCashMovement} />
+          {hardware?.drawer_enabled && (
+            <button
+              type="button"
+              onClick={() => void handleKickDrawer()}
+              disabled={drawerKicking || !drawerState?.open}
+              className="min-h-touch rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {drawerKicking ? "Ouverture…" : "Ouvrir le tiroir"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setTicketsOpen(true)}
@@ -296,12 +347,21 @@ export default function CaissePage() {
           >
             Clôturer la caisse
           </button>
+          {/* Correctif persona vendeuse : la navigation vers /admin avait
+              disparu de l'en-tête caisse depuis PR1 — /admin, lui, propose
+              déjà un lien « Caisse » (AppShell). */}
+          <Link
+            href="/admin"
+            className="min-h-touch inline-flex items-center rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
+          >
+            Administration
+          </Link>
         </header>
 
         {banner && (
-          <div role="alert" className="flex-shrink-0 bg-red-50 border-b border-red-200 px-4 py-2 flex items-center gap-3">
-            <span className="text-sm text-red-700 flex-1">{banner}</span>
-            <button type="button" onClick={() => setBanner(null)} className="text-red-700 text-sm font-medium hover:underline">
+          <div role="alert" className="flex-shrink-0 bg-fc-danger-soft border-b border-fc-danger/30 px-4 py-2 flex items-center gap-3">
+            <span className="text-sm text-fc-danger flex-1">{banner}</span>
+            <button type="button" onClick={() => setBanner(null)} className="text-fc-danger text-sm font-medium hover:underline">
               Fermer
             </button>
           </div>
@@ -309,12 +369,21 @@ export default function CaissePage() {
 
         {/* Corps */}
         {successTx ? (
-          <div className="flex-1 overflow-y-auto p-6 flex items-start justify-center">
-            <div className="w-full max-w-md">
+          // Correctif persona vendeuse : `items-stretch` (au lieu de
+          // `items-start`) + `max-w-5xl` donnent au wrapper une hauteur
+          // pleine sur laquelle `ReceiptPreviewCard` (grid `h-full`,
+          // 2 colonnes) peut s'appuyer — sans quoi le bloc e-mail + le
+          // bouton « Nouveau ticket » finissaient hors écran à 1024×768.
+          <div className="flex-1 min-h-0 overflow-hidden p-4 md:p-6 flex items-stretch justify-center">
+            <div className="w-full max-w-5xl">
               <ReceiptPreviewCard
+                transactionId={successTx.id}
                 ticketNumber={successTx.transaction_number}
                 totalTtc={successTx.total_ttc}
                 receiptText={successTx.receipt_text}
+                dpoEmail={dpoEmail}
+                hardware={hardware}
+                isCashSale={successTx.payments.some((p) => p.method === "cash")}
                 onNewSale={handleNewTicket}
               />
             </div>
@@ -353,7 +422,7 @@ export default function CaissePage() {
                   <div key={l.id} className="flex items-center gap-2 rounded-fc-lg border border-fc-line bg-fc-surface px-3 py-2">
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium text-fc-ink truncate">{l.label}</div>
-                      <div className="text-xs text-fc-ink-mute font-mono">{formatCurrency(l.unitPrice)} / pièce</div>
+                      <div className="text-xs text-fc-ink-mute font-mono tabular-nums">{formatCurrency(l.unitPrice)} / pièce</div>
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
                       <button
@@ -381,7 +450,7 @@ export default function CaissePage() {
                       type="button"
                       onClick={() => removeLine(l.id)}
                       aria-label="Retirer cet article"
-                      className="min-h-touch min-w-touch rounded-fc text-fc-danger hover:bg-red-50 flex items-center justify-center flex-shrink-0"
+                      className="min-h-touch min-w-touch rounded-fc text-fc-danger hover:bg-fc-danger-soft flex items-center justify-center flex-shrink-0"
                     >
                       ✕
                     </button>

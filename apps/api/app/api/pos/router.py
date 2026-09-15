@@ -3,11 +3,13 @@
 # `cb_router.py` (agent B) : voir le montage protege dans `app/main.py`.
 from __future__ import annotations
 
+import logging
 import uuid
-from datetime import datetime
-from typing import Annotated
+from datetime import datetime, timezone
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Response
+from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -18,10 +20,20 @@ from app.models.cash_movement import CashMovementDirection, CashMovementReason
 from app.models.pos import CashDrawer, Transaction, TransactionType, ZReport
 from app.models.receipt import Receipt
 from app.models.user import User
+from app.services import escpos_service
 from app.services.fiscal import FiscalService, PosServiceError
-from app.services.jet import EVENT_RECEIPT_DUPLICATE, EVENT_Z_REGULARIZATION, JournalService
+from app.services.jet import (
+    EVENT_DRAWER_KICKED,
+    EVENT_EXPORT_DOWNLOADED,
+    EVENT_PRINTER_UNREACHABLE,
+    EVENT_RECEIPT_DUPLICATE,
+    EVENT_RECEIPT_PRINTED,
+    EVENT_Z_REGULARIZATION,
+    JournalService,
+)
 from app.services.pos import PosService
 from app.services.refund import RefundService
+from app.services.settings_service import SettingsService
 
 from .schemas import (
     CancelTransactionRequest,
@@ -32,7 +44,28 @@ from .schemas import (
     RegularizationRequest,
 )
 
+logger = logging.getLogger("fripco")
+
 router = APIRouter(prefix="/pos", tags=["pos"])
+
+
+# ---------------------------------------------------------------------------
+# PR3 (§4 ARCHITECTURE_PR3.md) — client + ticket par e-mail. Schemas définis
+# ici (pas dans `schemas.py`, hors périmètre de cet agent — voir §6 du
+# contrat) plutôt que d'y toucher.
+# ---------------------------------------------------------------------------
+
+
+class AttachClientRequest(BaseModel):
+    email: str
+    first_name: str | None = None
+    last_name: str | None = None
+    newsletter_optin: bool = False
+    send_receipt: bool = True
+
+
+class ResendReceiptEmailRequest(BaseModel):
+    email: str | None = None
 
 
 def _raise(exc: PosServiceError):
@@ -103,6 +136,7 @@ def _serialize_transaction(
     receipt_text: str | None = None,
     refund_of_sale: dict[str, str] | None = None,
     original_number_by_refund_id: dict[str, int] | None = None,
+    clients_by_id: dict[str, dict] | None = None,
 ) -> dict:
     """Serialise une transaction.
 
@@ -114,9 +148,16 @@ def _serialize_transaction(
     - pour une ANNULATION : ``cancelled`` est toujours false (on n'annule
       pas une annulation, D4/`not_a_sale`), ``original_transaction_number``
       = le n° de la vente d'origine, pour l'affichage cote front.
+
+    ``clients_by_id`` (PR3, §4/complement client "Tickets du jour" —
+    voir `_load_clients`) mappe ``str(client_id) -> {id, email,
+    first_name, last_name}`` pour TOUTE la page appelante — jamais une
+    requete par transaction. ``client`` vaut ``None`` quand `client_id`
+    est absent, ou (defensif) quand l'appelant n'a pas fourni le mapping.
     """
     refund_of_sale = refund_of_sale or {}
     original_number_by_refund_id = original_number_by_refund_id or {}
+    clients_by_id = clients_by_id or {}
     tx_id = str(transaction.id)
     is_refund = transaction.transaction_type == TransactionType.refund
     refund_transaction_id = None if is_refund else refund_of_sale.get(tx_id)
@@ -126,6 +167,7 @@ def _serialize_transaction(
         "transaction_type": transaction.transaction_type.value,
         "user_id": str(transaction.user_id),
         "client_uuid": str(transaction.client_uuid) if transaction.client_uuid else None,
+        "client": clients_by_id.get(str(transaction.client_id)) if transaction.client_id else None,
         "original_transaction_id": (
             str(transaction.original_transaction_id) if transaction.original_transaction_id else None
         ),
@@ -258,6 +300,27 @@ async def _load_refund_links(
     return refund_of_sale, original_number_by_refund_id
 
 
+async def _load_clients(db: AsyncSession, client_ids: list[uuid.UUID | None]) -> dict[str, dict]:
+    """Charge, en UNE seule requete, les clients rattaches a une page de
+    transactions (PR3) — evite le N+1 que ferait une requete par
+    transaction. Utilise par `_serialize_transaction` (``clients_by_id``)."""
+    ids = {cid for cid in client_ids if cid is not None}
+    if not ids:
+        return {}
+    from app.models.client import Client
+
+    rows = (await db.execute(select(Client).where(Client.id.in_(ids)))).scalars().all()
+    return {
+        str(c.id): {
+            "id": str(c.id),
+            "email": c.email,
+            "first_name": c.first_name,
+            "last_name": c.last_name,
+        }
+        for c in rows
+    }
+
+
 # ---------------------------------------------------------------------------
 # Caisse espèces (§4.3)
 # ---------------------------------------------------------------------------
@@ -370,11 +433,13 @@ async def create_transaction(
     if not created:
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction.id])
+    clients_by_id = await _load_clients(db, [transaction.client_id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt.content if receipt else None,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
+        clients_by_id=clients_by_id,
     )
 
 
@@ -390,16 +455,18 @@ async def list_transactions(
     except ValueError as exc:
         raise PosServiceError(f"Date invalide : {exc}", code="invalid_date", status_code=422)
     # Une seule requete agregee pour toute la page (pas de N+1) — voir
-    # `_load_refund_links`.
+    # `_load_refund_links`/`_load_clients`.
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(
         db, [t.id for t in transactions]
     )
+    clients_by_id = await _load_clients(db, [t.client_id for t in transactions])
     return {
         "transactions": [
             _serialize_transaction(
                 t,
                 refund_of_sale=refund_of_sale,
                 original_number_by_refund_id=original_number_by_refund_id,
+                clients_by_id=clients_by_id,
             )
             for t in transactions
         ]
@@ -417,11 +484,13 @@ async def get_transaction(
         raise PosServiceError("Transaction introuvable.", code="not_found", status_code=404)
     receipt = await PosService(db).get_receipt(transaction_id)
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
+    clients_by_id = await _load_clients(db, [transaction.client_id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt.content if receipt else None,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
+        clients_by_id=clients_by_id,
     )
 
 
@@ -444,11 +513,13 @@ async def cancel_transaction(
     if not created:
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [refund_tx.id])
+    clients_by_id = await _load_clients(db, [refund_tx.client_id])
     return _serialize_transaction(
         refund_tx,
         receipt_text=receipt.content if receipt else None,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
+        clients_by_id=clients_by_id,
     )
 
 
@@ -481,6 +552,327 @@ async def get_receipt(
     )
     await db.commit()
     return {"text": receipt.content, "duplicate_count": receipt.duplicate_count}
+
+
+# ---------------------------------------------------------------------------
+# Impression physique des tickets (PR3b) — décision Julien, contraire au CDC
+# initial : la caisse imprime avec le MÊME matériel que l'application
+# source : imprimante MUNBYN 047P ESC/POS 80 mm en réseau (TCP 9100) ou en
+# USB-OTG via WebUSB depuis la tablette Android, tiroir-caisse Safescan
+# SD-4141 branché sur l'imprimante (impulsion `ESC p m`).
+#
+# Distinct de `GET /transactions/{id}/receipt` ci-dessus (texte du ticket,
+# `duplicate_count`, PR2) : ces endpoints impriment/exportent les OCTETS
+# ESC/POS et comptent les impressions PHYSIQUES via
+# `receipts.printed_count`/`printed_at` (migration 0004).
+# ---------------------------------------------------------------------------
+
+
+class PrintReceiptRequest(BaseModel):
+    # Ouvre le tiroir dans le même job d'impression (une seule connexion
+    # TCP) — seulement honoré si `hardware.drawer_enabled` est vrai.
+    kick: bool = False
+
+
+class DrawerKickRequest(BaseModel):
+    reason: Literal["cash_sale", "manual"] = "manual"
+
+
+async def _get_receipt_or_404(db: AsyncSession, transaction_id: uuid.UUID) -> Receipt:
+    receipt = (
+        await db.execute(select(Receipt).where(Receipt.transaction_id == transaction_id))
+    ).scalar_one_or_none()
+    if receipt is None:
+        raise PosServiceError("Ticket introuvable.", code="not_found", status_code=404)
+    return receipt
+
+
+def _drawer_kick_bytes(hardware: dict) -> bytes:
+    return escpos_service.build_drawer_kick(
+        pin=int(hardware.get("drawer_pin") or 0),
+    )
+
+
+async def _raise_printer_unreachable(
+    db: AsyncSession,
+    user: User,
+    exc: escpos_service.PrinterUnreachable,
+    *,
+    extra_payload: dict | None = None,
+) -> None:
+    """Journalise l'échec TCP (host/port seulement, jamais l'errno système)
+    et lève l'erreur métier générique attendue côté caisse (persona
+    vendeuse : pas d'IP, de port ni d'errno à l'écran). Le détail technique
+    complet (``str(exc)``) ne va qu'au log serveur."""
+    logger.warning("Imprimante injoignable (%s:%s) : %s", exc.host, exc.port, exc)
+    await JournalService(db).record(
+        EVENT_PRINTER_UNREACHABLE,
+        user_id=user.id,
+        payload={"host": exc.host, "port": exc.port, **(extra_payload or {})},
+    )
+    await db.commit()
+    raise PosServiceError(
+        escpos_service.PRINTER_UNREACHABLE_MESSAGE,
+        code="printer_unreachable",
+        status_code=502,
+    )
+
+
+async def _mark_printed(db: AsyncSession, receipt: Receipt) -> bool:
+    """Incrémente `printed_count`/`printed_at` et retourne ``True`` si cette
+    impression est un duplicata (`printed_count` était déjà > 0)."""
+    is_duplicate = receipt.printed_count > 0
+    receipt.printed_count += 1
+    receipt.printed_at = datetime.now(timezone.utc)
+    return is_duplicate
+
+
+@router.post("/transactions/{transaction_id}/print")
+async def print_receipt(
+    transaction_id: uuid.UUID,
+    body: PrintReceiptRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Imprime le ticket sur la MUNBYN réseau (TCP 9100).
+
+    409 `printer_webusb` si le matériel est configuré en mode tablette (le
+    front doit alors appeler `GET .../escpos`) ; 409 `printer_disabled` si
+    aucune imprimante n'est activée ; 502 `printer_unreachable` si le TCP
+    échoue. Le tiroir est kické dans le MÊME job d'impression quand
+    `kick=true` et que `hardware.drawer_enabled` est vrai.
+    """
+    receipt = await _get_receipt_or_404(db, transaction_id)
+    hardware = await SettingsService(db).get("hardware")
+    mode = hardware.get("printer_mode", "none")
+
+    if mode == "webusb":
+        raise PosServiceError(
+            "Imprimante configurée en mode tablette (WebUSB) : utilisez "
+            "l'impression depuis la caisse plutôt que ce point d'entrée réseau.",
+            code="printer_webusb",
+            status_code=409,
+        )
+    if mode != "network":
+        raise PosServiceError(
+            "Imprimante ticket désactivée : configurez-la dans Paramètres > Matériel.",
+            code="printer_disabled",
+            status_code=409,
+        )
+
+    host = hardware.get("printer_host") or ""
+    port = int(hardware.get("printer_port") or escpos_service.DEFAULT_PORT)
+    shop = await SettingsService(db).get("shop")
+    kick_bytes = _drawer_kick_bytes(hardware) if body.kick and hardware.get("drawer_enabled") else None
+    payload = escpos_service.build_receipt(
+        receipt.content, shop_name=shop.get("name") or "", kick=kick_bytes
+    )
+    try:
+        await escpos_service.send_to_printer(host, port, payload)
+    except escpos_service.PrinterUnreachable as exc:
+        await _raise_printer_unreachable(
+            db, user, exc, extra_payload={"transaction_id": str(transaction_id), "mode": "network"}
+        )
+
+    is_duplicate = await _mark_printed(db, receipt)
+    transaction_number = receipt.transaction.transaction_number if receipt.transaction else None
+    await JournalService(db).record(
+        EVENT_RECEIPT_PRINTED,
+        user_id=user.id,
+        payload={
+            "transaction_id": str(transaction_id),
+            "number": transaction_number,
+            "mode": "network",
+            "duplicate": is_duplicate,
+        },
+    )
+    if kick_bytes is not None:
+        # L'impulsion tiroir a effectivement ete incluse dans ce job
+        # d'impression (kick=true + hardware.drawer_enabled) : journalisee
+        # dans la MEME transaction SQL que `receipt.printed`, comme
+        # `POST /pos/drawer/kick` le fait pour une impulsion seule.
+        await JournalService(db).record(
+            EVENT_DRAWER_KICKED,
+            user_id=user.id,
+            payload={
+                "reason": "cash_sale",
+                "with_print": True,
+                "transaction_number": transaction_number,
+            },
+        )
+    await db.commit()
+    return {"printed": True, "printed_count": receipt.printed_count, "duplicate": is_duplicate}
+
+
+@router.get("/transactions/{transaction_id}/escpos")
+async def get_transaction_escpos(
+    transaction_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    kick: bool = Query(default=False),
+):
+    """Octets ESC/POS bruts du ticket, pour l'impression WebUSB (tablette).
+
+    Ne dépend pas du mode matériel configuré : c'est la tablette qui décide
+    quand les envoyer à l'imprimante via USB-OTG. Compte comme une
+    impression physique au même titre que `POST .../print` ci-dessus.
+    """
+    receipt = await _get_receipt_or_404(db, transaction_id)
+    hardware = await SettingsService(db).get("hardware")
+    shop = await SettingsService(db).get("shop")
+    kick_bytes = _drawer_kick_bytes(hardware) if kick and hardware.get("drawer_enabled") else None
+    payload = escpos_service.build_receipt(
+        receipt.content, shop_name=shop.get("name") or "", kick=kick_bytes
+    )
+
+    is_duplicate = await _mark_printed(db, receipt)
+    transaction_number = receipt.transaction.transaction_number if receipt.transaction else None
+    await JournalService(db).record(
+        EVENT_RECEIPT_PRINTED,
+        user_id=user.id,
+        payload={
+            "transaction_id": str(transaction_id),
+            "number": transaction_number,
+            "mode": "webusb",
+            "duplicate": is_duplicate,
+        },
+    )
+    if kick_bytes is not None:
+        # Meme regle que POST .../print ci-dessus : l'impulsion tiroir a
+        # ete incluse dans les octets renvoyes (kick=1 + drawer_enabled) —
+        # journalisee dans la meme transaction SQL que `receipt.printed`.
+        await JournalService(db).record(
+            EVENT_DRAWER_KICKED,
+            user_id=user.id,
+            payload={
+                "reason": "cash_sale",
+                "with_print": True,
+                "transaction_number": transaction_number,
+            },
+        )
+    await db.commit()
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/drawer/kick")
+async def kick_drawer_network(
+    body: DrawerKickRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Impulsion seule du tiroir-caisse via l'imprimante réseau (sans
+    imprimer de ticket) — encaissement espèces ou ouverture manuelle."""
+    hardware = await SettingsService(db).get("hardware")
+    if hardware.get("printer_mode") != "network" or not hardware.get("drawer_enabled"):
+        raise PosServiceError(
+            "Tiroir-caisse indisponible : imprimante réseau et tiroir activé requis "
+            "(Paramètres > Matériel).",
+            code="drawer_unavailable",
+            status_code=409,
+        )
+    host = hardware.get("printer_host") or ""
+    port = int(hardware.get("printer_port") or escpos_service.DEFAULT_PORT)
+    try:
+        await escpos_service.send_to_printer(host, port, _drawer_kick_bytes(hardware))
+    except escpos_service.PrinterUnreachable as exc:
+        await _raise_printer_unreachable(db, user, exc, extra_payload={"reason": body.reason})
+    await JournalService(db).record(
+        EVENT_DRAWER_KICKED, user_id=user.id, payload={"reason": body.reason}
+    )
+    await db.commit()
+    return {"kicked": True}
+
+
+@router.get("/drawer/kick-escpos")
+async def kick_drawer_escpos(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Octets d'impulsion seuls (`ESC p m`), pour l'ouverture du tiroir
+    depuis la tablette en mode WebUSB."""
+    hardware = await SettingsService(db).get("hardware")
+    if not hardware.get("drawer_enabled"):
+        raise PosServiceError(
+            "Tiroir-caisse désactivé (Paramètres > Matériel).",
+            code="drawer_unavailable",
+            status_code=409,
+        )
+    payload = _drawer_kick_bytes(hardware)
+    await JournalService(db).record(
+        EVENT_DRAWER_KICKED, user_id=user.id, payload={"reason": "manual"}
+    )
+    await db.commit()
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Client + ticket par e-mail (PR3, §3/§4 ARCHITECTURE_PR3.md)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/transactions/{transaction_id}/client")
+async def attach_client(
+    transaction_id: uuid.UUID,
+    body: AttachClientRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    transaction = await PosService(db).get_transaction(transaction_id)
+    if transaction is None:
+        raise PosServiceError("Vente introuvable.", code="not_found", status_code=404)
+    try:
+        result = await PosService(db).attach_client_and_send_receipt(
+            transaction=transaction,
+            email=body.email,
+            first_name=body.first_name,
+            last_name=body.last_name,
+            newsletter_optin=body.newsletter_optin,
+            send_receipt=body.send_receipt,
+            user_id=user.id,
+        )
+    except PosServiceError as exc:
+        _raise(exc)
+    await db.commit()
+    client = result["client"]
+    return {
+        "client": {
+            "id": str(client.id),
+            "email": client.email,
+            "first_name": client.first_name,
+            "last_name": client.last_name,
+            "newsletter_optin": client.newsletter_optin,
+        },
+        "receipt_email": result["receipt_email"],
+        "brevo": result["brevo"],
+    }
+
+
+@router.post("/transactions/{transaction_id}/receipt/email")
+async def resend_receipt_email(
+    transaction_id: uuid.UUID,
+    body: ResendReceiptEmailRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    transaction = await PosService(db).get_transaction(transaction_id)
+    if transaction is None:
+        raise PosServiceError("Vente introuvable.", code="not_found", status_code=404)
+    try:
+        result = await PosService(db).resend_receipt_email(
+            transaction=transaction, email=body.email, user_id=user.id
+        )
+    except PosServiceError as exc:
+        _raise(exc)
+    await db.commit()
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +932,51 @@ async def create_regularization(
         _raise(exc)
     await db.commit()
     return _serialize_z_report(z_report)
+
+
+@router.get("/z-reports/{z_report_id}/pdf")
+async def get_z_report_pdf(
+    z_report_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """PDF deterministe du rapport Z (PR4, F8, docs/ARCHITECTURE_PR4.md).
+
+    Deux appels sur le meme Z renvoient des octets identiques (voir
+    `services/z_report_pdf.py`) — le SHA-256 journalise (`export.downloaded`,
+    F7) est donc stable, verifiable hors application."""
+    z = (await db.execute(select(ZReport).where(ZReport.id == z_report_id))).scalar_one_or_none()
+    if z is None:
+        raise PosServiceError("Z introuvable.", code="not_found", status_code=404)
+
+    from app.services.z_report_pdf import generate_z_report_pdf
+
+    pdf_bytes = await generate_z_report_pdf(db, z)
+
+    import hashlib
+
+    sha = hashlib.sha256(pdf_bytes).hexdigest()
+    await JournalService(db).record(
+        EVENT_EXPORT_DOWNLOADED,
+        user_id=user.id,
+        payload={
+            "kind": "z_report_pdf",
+            "period_start": None,
+            "period_end": None,
+            "sha256": sha,
+            "rows": 1,
+            "z_number": z.report_number,
+        },
+    )
+    await db.commit()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="Z{z.report_number:04d}.pdf"',
+            "X-PDF-SHA256": sha,
+        },
+    )
 
 
 @router.get("/z-reports/{z_report_id}")

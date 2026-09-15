@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/main.py) — perimetre PR1 (auth + JET) :
+# Extrait de l'application source (apps/api/app/main.py) — perimetre PR1 (auth + JET) :
 # pas d'APScheduler, pas de create_all en dev (schema migration-owned des
 # la premiere revision, y compris le trigger d'immuabilite NF525), pas de
 # handler AuditContextMiddleware (retire, cf. app/core/middleware.py).
@@ -13,6 +13,8 @@ from sqlalchemy import text
 
 from app.api.admin.router import router as admin_router
 from app.api.auth.router import router as auth_router
+from app.api.brevo.router import router as brevo_router
+from app.api.hardware.router import router as hardware_router
 from app.api.health import router as health_router
 from app.api.pos.cb_router import router as cb_router
 from app.api.pos.router import router as pos_router
@@ -224,3 +226,5 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(pos_router, prefix="/api")
 app.include_router(cb_router, prefix="/api")
+app.include_router(brevo_router, prefix="/api")
+app.include_router(hardware_router, prefix="/api")

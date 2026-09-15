@@ -7,8 +7,9 @@ PostgreSQL) et toute modification de ces mécanismes est une évolution fiscale.
 
 ## Règles non négociables
 
-- **Aucune dépendance runtime vers Vintiz** : le code est copié, jamais appelé.
-  Pas d'hôte `*.vintiz.fr`, pas de conteneur `vintiz-*` (test `tests/test_isolation.py`).
+- **Aucune dépendance runtime vers l'application source** : le code est copié,
+  jamais appelé. Aucun hôte ni conteneur de l'application source
+  (test `tests/test_isolation.py`).
 - **Schéma piloté par Alembic** : jamais `create_all`. Les triggers
   d'inaltérabilité vivent dans les migrations. L'API refuse de démarrer si
   `alembic_version` ≠ `app/version.py::EXPECTED_DB_REVISION`.
@@ -36,6 +37,13 @@ PostgreSQL) et toute modification de ces mécanismes est une évolution fiscale.
   `{"detail": "…", "code": "snake_case"}` ; le front affiche `detail` tel quel.
 - Secrets (SumUp, Brevo) : variables d'environnement uniquement, jamais en base ni en
   réponse d'API (`describe()` masque tout).
+- **Données personnelles (PR3)** : le compte Brevo est partagé avec la boutique
+  de Vernon → la caisse n'écrit que sur sa liste dédiée (`BREVO_LIST_ID`), jamais sur la blocklist globale,
+  jamais `DELETE /v3/contacts`. Contact poussé uniquement si consentement newsletter.
+  Consentements append-only (trigger). Suppression RGPD = anonymisation de la fiche
+  (jamais de suppression de ligne, jamais de modification d'une vente hors `client_id`).
+  **Aucun e-mail ni nom dans les payloads JET** (journal immuable). E-mail du ticket
+  sans image ni lien de suivi ; envoi Brevo conditionné à `BREVO_ANONYMOUS_TRACKING=true`.
 
 ## Stack
 

@@ -161,6 +161,13 @@ export interface TransactionOut {
   /** id de la transaction `refund` qui a annulé celle-ci, quand
    * `cancelled` est vrai. */
   refund_transaction_id?: string | null;
+  /** Client rattaché (PR3, `POST /pos/transactions/{id}/client`) —
+   * absent/`null` tant qu'aucun client n'a été lié. Hypothèse de forme :
+   * le contrat §4 (ARCHITECTURE_PR3.md) ne détaille pas explicitement
+   * l'embarquement sur GET/POST vente, mais le prévoit implicitement pour
+   * « Tickets du jour → détail » (§5), qui doit préremplir l'e-mail du
+   * client lié et afficher son adresse partiellement masquée. */
+  client?: ClientRef | null;
 }
 
 /** Ligne allégée pour la liste « Tickets du jour ». */
@@ -227,6 +234,9 @@ export interface ShopSettings {
   vat_number: string;
   phone: string;
   email: string;
+  /** PR3 (E8) : e-mail affiché dans la mention RGPD pour l'exercice des
+   * droits (accès, suppression) — DPO ou responsable désigné. */
+  dpo_email?: string;
 }
 
 export interface FiscalSettings {
@@ -253,6 +263,11 @@ export interface FiscalIntegrityResponse {
   transactions: FiscalIntegrityCheck;
   z_reports: FiscalIntegrityCheck;
   jet: FiscalIntegrityCheck;
+  /** PR4 (F5/F6) : `/admin/fiscal/integrity` est étendu aux clôtures
+   * fiscales et aux écritures comptables — absent sur un backend qui ne le
+   * fournit pas encore (compatibilité ascendante, cf. IntegrityCard). */
+  closures?: FiscalIntegrityCheck;
+  accounting?: FiscalIntegrityCheck;
 }
 
 /** Une ligne du journal des événements (JET) — jargon interne « JET »,
@@ -270,3 +285,299 @@ export interface JetListResponse {
   events: JetEvent[];
   next_before_seq?: number | null;
 }
+
+// ---------------------------------------------------------------------------
+// Client, e-mail (Brevo), newsletter, RGPD — PR3 (docs/ARCHITECTURE_PR3.md §4)
+// ---------------------------------------------------------------------------
+
+/** Référence légère à un client, embarquée sur une vente. */
+export interface ClientRef {
+  id: string;
+  email: string;
+}
+
+export interface Client {
+  id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  newsletter_optin: boolean;
+  created_at: string;
+  /** Posée par la suppression RGPD (E4) — fiche anonymisée dès que non nul. */
+  anonymized_at?: string | null;
+}
+
+export interface ClientListResponse {
+  clients: Client[];
+}
+
+export type ConsentPurpose = "newsletter";
+export type ConsentSource = "pos" | "webhook" | "admin" | "rgpd";
+
+/** Ligne du journal de consentement — append-only côté backend (E5). */
+export interface ConsentEntry {
+  id: string;
+  purpose: ConsentPurpose;
+  granted: boolean;
+  source: ConsentSource;
+  policy_version: string;
+  note?: string | null;
+  created_at: string;
+}
+
+export type CommunicationProvider = "brevo" | "smtp" | "simulated";
+export type CommunicationStatus = "sent" | "failed" | "simulated";
+
+/** Ligne du journal des envois de ticket par e-mail. */
+export interface CommunicationEntry {
+  id: string;
+  kind: "receipt";
+  channel: "email";
+  recipient: string;
+  subject: string;
+  provider: CommunicationProvider;
+  status: CommunicationStatus;
+  provider_message_id?: string | null;
+  error?: string | null;
+  created_at: string;
+}
+
+/** Ticket lié à un client, tel qu'affiché dans sa fiche admin. */
+export interface ClientTransactionRef {
+  id: string;
+  transaction_number: number;
+  created_at: string;
+  total_ttc: number;
+}
+
+/** Réponse de `GET /admin/clients/{id}` (et de `POST …/anonymize`, qui
+ * renvoie la fiche à jour — §4). */
+export interface ClientFull {
+  client: Client;
+  consents: ConsentEntry[];
+  communications: CommunicationEntry[];
+  transactions: ClientTransactionRef[];
+}
+
+export interface AttachClientRequest {
+  email: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  newsletter_optin: boolean;
+  send_receipt?: boolean;
+}
+
+export interface AttachClientResponse {
+  client: Client;
+  receipt_email: { status: CommunicationStatus; provider: CommunicationProvider } | null;
+  /** `null` quand la case newsletter n'était pas cochée (E2 : pas de
+   * contact Brevo créé sans consentement). */
+  brevo: { status: "ok" | "failed" | "skipped" } | null;
+}
+
+export interface SendReceiptEmailRequest {
+  email?: string;
+}
+
+export interface SendReceiptEmailResponse {
+  status: CommunicationStatus;
+  provider: CommunicationProvider;
+}
+
+export interface ConsentUpdateRequest {
+  purpose: ConsentPurpose;
+  granted: boolean;
+  note?: string;
+}
+
+export interface AnonymizeRequest {
+  reason: string;
+}
+
+/** `GET /admin/messaging/status` — aucun secret, uniquement de l'état. */
+export interface MessagingStatus {
+  email: {
+    provider: CommunicationProvider;
+    anonymous_tracking: boolean;
+    from: string;
+  };
+  brevo_contacts: {
+    configured: boolean;
+    list_id_set: boolean;
+    webhook_token_set: boolean;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Matériel — imprimante ticket MUNBYN 047P + tiroir-caisse Safescan
+// SD-4141 (PR3b). Aucun secret : uniquement de la config réseau/USB/tiroir
+// (`GET/PUT /admin/settings/hardware`).
+// ---------------------------------------------------------------------------
+
+export type PrinterMode = "network" | "webusb" | "none";
+
+export interface HardwareSettings {
+  printer_mode: PrinterMode;
+  printer_host: string;
+  printer_port: number;
+  drawer_enabled: boolean;
+  /** 0 ou 1 — broche d'impulsion du tiroir sur le connecteur RJ-12. */
+  drawer_pin: 0 | 1;
+  auto_print_on_sale: boolean;
+  auto_kick_on_cash: boolean;
+}
+
+/** `GET /hardware/printer/status` — pastille 🟢/🔴 de l'écran Matériel.
+ * `online`/`latency_ms` valent `null` hors mode réseau (aucune sonde
+ * serveur possible pour une imprimante branchée en USB sur la tablette). */
+export interface PrinterStatus {
+  mode: PrinterMode;
+  host: string | null;
+  port: number;
+  online: boolean | null;
+  latency_ms: number | null;
+}
+
+/** `POST /hardware/receipt/test` — ticket de test envoyé à l'imprimante réseau. */
+export interface ReceiptTestResponse {
+  printed: boolean;
+  host: string;
+  port: number;
+}
+
+/** `POST /pos/transactions/{id}/print` — impression réseau du ticket de vente. */
+export interface PrintReceiptResponse {
+  printed: boolean;
+  printed_count: number;
+  duplicate: boolean;
+}
+
+export type DrawerKickReason = "cash_sale" | "manual";
+
+/** `POST /pos/drawer/kick` — impulsion seule du tiroir-caisse (réseau). */
+export interface DrawerKickResponse {
+  kicked: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// PR4 — exports comptables, archives fiscales (docs/ARCHITECTURE_PR4.md §4)
+// ---------------------------------------------------------------------------
+
+/** `GET/PUT /admin/settings/accounting` (F1) — comptes comptables, leurs
+ * libellés et le code journal utilisés pour générer une écriture par
+ * clôture Z. Forme réconciliée avec `AccountingSettingsIn`
+ * (`apps/api/app/api/admin/router.py`) : chaque compte a un libellé
+ * éditable, sauf les comptes d'ajustement d'arrondi (658/758) qui n'en ont
+ * pas côté backend. Défauts identiques au backend : journal `VTE`, comptes
+ * `707100` / `44571` / `531000` / `512000` / `658000` / `758000`. */
+export interface AccountingSettings {
+  journal_code: string;
+  account_sales: string; // 707 — ventes de marchandises
+  label_sales: string;
+  account_tva: string; // 44571 — TVA collectée
+  label_tva: string;
+  account_cash: string; // 531 — caisse
+  label_cash: string;
+  account_card: string; // 512 — carte bancaire (CB SumUp)
+  label_card: string;
+  account_rounding_expense: string; // 658 — charges diverses (ajustement d'arrondi)
+  account_rounding_income: string; // 758 — produits divers (ajustement d'arrondi)
+}
+
+/** Liste blanche des tables exportables (F4) — jamais de table client/PII. */
+export const EXPORTABLE_TABLES = [
+  { value: "transactions", label: "Ventes" },
+  { value: "transaction_items", label: "Lignes de vente" },
+  { value: "payments", label: "Paiements" },
+  { value: "z_reports", label: "Clôtures de caisse (Z)" },
+  { value: "cash_movements", label: "Mouvements de caisse" },
+  { value: "cash_drawers", label: "Sessions de caisse" },
+  { value: "journal_events", label: "Journal des événements" },
+] as const;
+
+export type ExportableTable = (typeof EXPORTABLE_TABLES)[number]["value"];
+
+/** Ligne du détail d'une écriture comptable (F2, §2 `accounting_export_lines`). */
+export interface AccountingExportLine {
+  line_number: number;
+  account_number: string;
+  account_label: string;
+  label: string;
+  debit: number;
+  credit: number;
+  piece_reference: string;
+}
+
+/** Une écriture comptable par clôture Z (§2 `accounting_exports`) — ligne de
+ * la liste du mois (`GET /admin/accounting/exports`). */
+export interface AccountingExportSummary {
+  id: string;
+  z_report_id: string;
+  z_number: number;
+  export_date: string;
+  total_sales_ht: number;
+  total_tva: number;
+  total_ttc: number;
+  total_debit: number;
+  total_credit: number;
+  rounding_adjustment: number;
+  /** `true` si Σdébit == Σcrédit (à l'arrondi près) — pastille ✔/⚠. */
+  balanced: boolean;
+}
+
+export interface AccountingExportsMonthResponse {
+  exports: AccountingExportSummary[];
+}
+
+/** `GET /admin/accounting/exports/{z_id}` — écriture détaillée avec lignes. */
+export interface AccountingExportDetail extends AccountingExportSummary {
+  lines: AccountingExportLine[];
+}
+
+export type FiscalClosureType = "manual" | "monthly" | "annual";
+
+export const FISCAL_CLOSURE_TYPE_LABELS: Record<FiscalClosureType, string> = {
+  manual: "Manuelle",
+  monthly: "Mensuelle",
+  annual: "Annuelle",
+};
+
+/** `GET /admin/fiscal-closures` (§2 `fiscal_closures`, F5) — une ligne = une
+ * clôture scellée, immuable (trigger UPDATE/DELETE interdits côté base). */
+export interface FiscalClosure {
+  id: string;
+  sequence_number: number;
+  closure_type: FiscalClosureType;
+  period_start: string;
+  period_end: string;
+  transaction_count: number;
+  grand_total_sales: number;
+  grand_total_refunds: number;
+  grand_total_net: number;
+  perpetual_sales: number;
+  perpetual_refunds: number;
+  perpetual_net: number;
+  perpetual_transaction_count: number;
+  archive_sha256: string;
+  archive_size: number;
+  hash: string;
+  previous_hash: string | null;
+  signature_version: number;
+  created_at: string;
+}
+
+export interface FiscalClosureListResponse {
+  closures: FiscalClosure[];
+}
+
+export interface CreateFiscalClosureRequest {
+  closure_type: FiscalClosureType;
+  period_start: string;
+  period_end: string;
+}
+
+/** `GET /admin/fiscal-closures/integrity` — agrégat unique sur la chaîne des
+ * clôtures (même forme que `FiscalIntegrityCheck`, réutilisée telle quelle). */
+export type ClosuresIntegrityResponse = FiscalIntegrityCheck;
+
+export type FiscalExportFormat = "json" | "xml";

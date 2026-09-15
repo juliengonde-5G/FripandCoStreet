@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/tests/test_tva_service.py), adapte a la
+# Extrait de l'application source (apps/api/tests/test_tva_service.py), adapte a la
 # signature PR2 (`discount_amount` en euros, pas `discount_percent`).
 from decimal import Decimal
 

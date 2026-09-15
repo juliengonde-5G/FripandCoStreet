@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/models/pos.py), reduit au perimetre PR2
+# Extrait de l'application source (apps/api/app/models/pos.py), reduit au perimetre PR2
 # (vente espece/CB, ticket, Z) — voir docs/ARCHITECTURE_PR2.md §2 pour le
 # detail des colonnes retenues/ecartees. Signature fiscale v3 (D3) : pas de
 # branche legacy v1/v2 a porter, nouvelle installation.
@@ -42,8 +42,8 @@ class Transaction(Base):
     )
     # Idempotence (genere par le front avant l'envoi) — un replay reseau /
     # double-clic renvoie la transaction existante au lieu d'en creer une
-    # seconde (cf. PosService.create_transaction, extrait de Vintiz
-    # test_pos_idempotence.py).
+    # seconde (cf. PosService.create_transaction, extrait du test équivalent
+    # de l'application source test_pos_idempotence.py).
     client_uuid: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), unique=True, nullable=True
     )
@@ -52,6 +52,16 @@ class Transaction(Base):
         UUID(as_uuid=True), ForeignKey("transactions.id"), nullable=True
     )
     refund_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # PR3 (E3, migration 0003) — SEULE colonne mutable hors hash sur une
+    # transaction deja signee (avec `updated_at`) : le trigger
+    # `fripco_protect_signed_transaction` l'exclut explicitement de sa
+    # comparaison OLD/NEW. Hors payload signe (`fiscal.py::_transaction_payload`
+    # ne la reference pas) : rattacher un client apres coup ne casse jamais
+    # `verify_chain_integrity`.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), nullable=True
+    )
 
     # Remise globale (D2) — ventilee au prorata sur les lignes, tracee dans
     # le payload signe (`fiscal.py::_transaction_payload`).
@@ -202,7 +212,8 @@ class ZReport(Base):
     last_transaction_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     payment_totals: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    # Montants de caisse scelles dans le Z (D9 — corrige C-1/C-4/C-5 Vintiz).
+    # Montants de caisse scelles dans le Z (D9 — corrige C-1/C-4/C-5 de
+    # l'application source).
     opening_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     closing_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     expected_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)

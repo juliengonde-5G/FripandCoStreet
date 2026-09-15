@@ -1,4 +1,4 @@
-# Extrait de Vintiz (structure inspiree de apps/api/alembic/versions/0072_security_loyalty_nf525.py)
+# Extrait de l'application source (structure inspiree de apps/api/alembic/versions/0072_security_loyalty_nf525.py)
 """Revision initiale — users + journal_events (JET) + trigger d'immuabilite
 
 Revision ID: 0001
@@ -93,7 +93,8 @@ def upgrade() -> None:
     # prepare un statement a la fois et refuse les chaines contenant
     # plusieurs commandes top-level ; le corps de la fonction peut contenir
     # des points-virgules, mais chaque CREATE/DROP est execute separement
-    # (meme contrainte que Vintiz alembic/versions/0072_security_loyalty_nf525.py:225-230).
+    # (meme contrainte que le module équivalent de l'application source
+    # alembic/versions/0072_security_loyalty_nf525.py:225-230).
     conn = op.get_bind()
     trigger_statements = (
         """

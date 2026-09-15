@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/core/rate_limit.py) — implementation
+# Extrait de l'application source (apps/api/app/core/rate_limit.py) — implementation
 # en memoire uniquement (le backend Redis a ete retire : mono-conteneur,
 # mono-utilisateur, pas de partage de compteur entre workers necessaire).
 from __future__ import annotations

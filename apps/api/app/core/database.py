@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/core/database.py)
+# Extrait de l'application source (apps/api/app/core/database.py)
 from collections.abc import AsyncGenerator
 from typing import TypeVar
 

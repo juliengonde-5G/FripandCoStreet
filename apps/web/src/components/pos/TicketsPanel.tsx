@@ -2,7 +2,7 @@
 
 /**
  * Panneau « Tickets du jour » (§6 PR2) — écrit pour ce dépôt (pas
- * d'équivalent direct réutilisable côté Vintiz sans le catalogue/fidélité).
+ * d'équivalent direct réutilisable côté application source sans le catalogue/fidélité).
  * Liste du jour → détail → « Annuler ce ticket » avec motif obligatoire.
  *
  * Correctifs testeur/persona vendeuse : badge « Annulé » dans la liste ;
@@ -10,13 +10,18 @@
  * d'une annulation → référence le ticket d'origine ; confirmation explicite
  * après annulation (« Remettez X € en espèces… » / « … renvoyé sur la
  * carte par le terminal »).
+ *
+ * PR3b : « Réimprimer » dans le détail — même branchement réseau/USB que
+ * l'écran de fin de vente (`lib/printing.ts`), sans kick automatique (le
+ * tiroir a déjà été ouvert, le cas échéant, à la vente d'origine).
  */
 import React, { useEffect, useState } from "react";
 
 import Modal from "@/components/ui/Modal";
 import { api, ApiError } from "@/lib/api";
-import { formatCurrency, formatDateTime } from "@/lib/format";
-import type { TransactionOut, TransactionSummary } from "@/lib/types";
+import { formatCurrency, formatDateTime, isValidEmail, maskEmail } from "@/lib/format";
+import { loadHardwareSettings, printReceipt } from "@/lib/printing";
+import type { HardwareSettings, SendReceiptEmailResponse, TransactionOut, TransactionSummary } from "@/lib/types";
 
 interface Props {
   open: boolean;
@@ -38,6 +43,18 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
    * remboursement par moyen de paiement. */
   const [cancelledResult, setCancelledResult] = useState<TransactionOut | null>(null);
 
+  // PR3 — renvoi du ticket par e-mail depuis le détail.
+  const [emailDraft, setEmailDraft] = useState("");
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [emailSentTo, setEmailSentTo] = useState<string | null>(null);
+
+  // PR3b — réimpression physique depuis le détail.
+  const [hardware, setHardware] = useState<HardwareSettings | null>(null);
+  const [reprinting, setReprinting] = useState(false);
+  const [reprintError, setReprintError] = useState<string | null>(null);
+  const [reprinted, setReprinted] = useState(false);
+
   const loadList = async (): Promise<TransactionSummary[]> => {
     const data = await api.get<{ transactions: TransactionSummary[] }>("/api/pos/transactions");
     setList(data.transactions);
@@ -50,11 +67,15 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
     setReason("");
     setCancelError(null);
     setCancelledResult(null);
+    setEmailDraft("");
+    setEmailError(null);
+    setEmailSentTo(null);
     setLoading(true);
     setError(null);
     loadList()
       .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les tickets du jour."))
       .finally(() => setLoading(false));
+    void loadHardwareSettings().then(setHardware);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -70,12 +91,45 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
   const openDetail = async (id: string): Promise<void> => {
     setCancelError(null);
     setReason("");
+    setEmailError(null);
+    setEmailSentTo(null);
+    setReprintError(null);
+    setReprinted(false);
     try {
       const tx = await api.get<TransactionOut>(`/api/pos/transactions/${id}`);
       setDetail(tx);
+      setEmailDraft(tx.client?.email ?? "");
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "Impossible de charger ce ticket.");
     }
+  };
+
+  const handleSendEmail = async (): Promise<void> => {
+    if (!detail || !isValidEmail(emailDraft) || emailSending) return;
+    setEmailSending(true);
+    setEmailError(null);
+    try {
+      await api.post<SendReceiptEmailResponse>(`/api/pos/transactions/${detail.id}/receipt/email`, {
+        email: emailDraft.trim(),
+      });
+      setEmailSentTo(emailDraft.trim());
+    } catch (err) {
+      setEmailError(err instanceof ApiError ? err.detail : "Échec de l'envoi du ticket.");
+    } finally {
+      setEmailSending(false);
+    }
+  };
+
+  const handleReprint = async (): Promise<void> => {
+    if (!detail || reprinting) return;
+    setReprinting(true);
+    setReprintError(null);
+    // Jamais de kick ici : une réimpression n'ouvre pas le tiroir (le cash
+    // a déjà été traité à la vente d'origine).
+    const result = await printReceipt(detail.id, hardware, { kick: false });
+    setReprinting(false);
+    if (result.ok) setReprinted(true);
+    else setReprintError(result.message);
   };
 
   const handleCancel = async (): Promise<void> => {
@@ -104,7 +158,7 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
 
   return (
     <Modal open={open} onClose={onClose} title="Tickets du jour" closeOnBackdrop={!cancelling}>
-      {error && <div role="alert" className="mb-3 rounded-fc-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">{error}</div>}
+      {error && <div role="alert" className="mb-3 rounded-fc-lg bg-fc-danger-soft border border-fc-danger/30 p-3 text-sm text-fc-danger">{error}</div>}
 
       {cancelledResult ? (
         <div className="space-y-4">
@@ -193,6 +247,77 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
             </ul>
           </div>
 
+          {hardware && hardware.printer_mode !== "none" && (
+            <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-4 space-y-2">
+              {reprintError && (
+                <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 p-2 flex items-center justify-between gap-3">
+                  <span className="text-sm text-fc-danger">Impression impossible : {reprintError}</span>
+                </div>
+              )}
+              {reprinted && !reprintError && <p className="text-xs font-medium text-fc-primary-deep">Ticket réimprimé.</p>}
+              <button
+                type="button"
+                onClick={() => void handleReprint()}
+                disabled={reprinting}
+                className="w-full min-h-touch rounded-fc-lg border border-fc-line bg-fc-surface px-4 py-3 text-sm font-semibold text-fc-ink hover:bg-fc-bg-alt disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {reprinting ? "Impression…" : "Réimprimer"}
+              </button>
+            </div>
+          )}
+
+          <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-4 space-y-2">
+            <p className="text-sm font-medium text-fc-ink">Ticket par e-mail</p>
+            {detail.client && (
+              <p className="text-xs text-fc-ink-mute">Client lié : {maskEmail(detail.client.email)}</p>
+            )}
+            {emailSentTo ? (
+              <p className="text-sm font-medium text-fc-primary-deep">Ticket envoyé à {emailSentTo}.</p>
+            ) : (
+              <>
+                {emailError && (
+                  <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 p-2 flex items-center justify-between gap-3">
+                    <span className="text-sm text-fc-danger">Envoi impossible : {emailError}</span>
+                    <button
+                      type="button"
+                      onClick={() => void handleSendEmail()}
+                      disabled={emailSending}
+                      className="text-xs font-semibold text-fc-danger underline flex-shrink-0 disabled:opacity-50 disabled:no-underline"
+                    >
+                      {emailSending ? "Envoi…" : "Réessayer"}
+                    </button>
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <input
+                      type="email"
+                      inputMode="email"
+                      autoComplete="email"
+                      value={emailDraft}
+                      onChange={(e) => setEmailDraft(e.target.value)}
+                      placeholder="adresse@exemple.fr"
+                      aria-label="Adresse e-mail du ticket"
+                      aria-invalid={emailDraft.length > 0 && !isValidEmail(emailDraft)}
+                      className="w-full min-h-touch px-3 py-2 rounded-fc border border-fc-line bg-fc-surface text-fc-ink placeholder-fc-ink-mute text-sm focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary"
+                    />
+                    {emailDraft.length > 0 && !isValidEmail(emailDraft) && (
+                      <p className="mt-1 text-xs text-fc-danger">Adresse e-mail incomplète</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!isValidEmail(emailDraft) || emailSending}
+                    onClick={() => void handleSendEmail()}
+                    className="min-h-touch flex-shrink-0 rounded-fc-lg bg-fc-primary px-4 text-sm font-semibold text-white hover:bg-fc-primary-deep disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {emailSending ? "Envoi…" : "Envoyer par e-mail"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
           {detail.transaction_type === "refund" && (
             <div className="rounded-fc-lg bg-fc-bg-alt p-4">
               <p className="text-sm text-fc-ink-soft">
@@ -214,7 +339,7 @@ export default function TicketsPanel({ open, onClose, onCancelled }: Props) {
           {detail.transaction_type === "sale" && !detail.cancelled && (
             <div className="rounded-fc-lg border border-fc-line bg-fc-surface p-4 space-y-3">
               <p className="text-sm font-medium text-fc-ink">Annuler ce ticket</p>
-              {cancelError && <div role="alert" className="rounded-fc bg-red-50 border border-red-200 p-2 text-sm text-red-700">{cancelError}</div>}
+              {cancelError && <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 p-2 text-sm text-fc-danger">{cancelError}</div>}
               <textarea
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}

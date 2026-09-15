@@ -1,4 +1,4 @@
-# Extrait de Vintiz (structure de tests inspiree de la suite NF525), adapte
+# Extrait de l'application source (structure de tests inspiree de la suite NF525), adapte
 # aux 6 groupes de triggers de la migration 0002 (§2/§8 du contrat) :
 # transactions ; transaction_items+payments ; z_reports ; cash_drawers ;
 # cash_movements ; receipts. Chaque UPDATE/DELETE interdit doit lever une

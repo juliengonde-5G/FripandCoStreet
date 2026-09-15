@@ -15,6 +15,15 @@ async def test_get_shop_settings_defaults(client, auth_headers):
     assert r.json()["name"] == "Frip & Co Street"
 
 
+async def test_get_shop_settings_defaults_include_dpo_email(client, auth_headers):
+    # PR3 (E8) : `dpo_email` est déclaré par `ShopSettingsIn` — il doit être
+    # renvoyé (vide) même avant tout PUT sur la clé `shop`, comme les autres
+    # champs par défaut.
+    r = await client.get("/api/admin/settings/shop", headers=auth_headers)
+    assert r.status_code == 200
+    assert r.json()["dpo_email"] == ""
+
+
 async def test_get_fiscal_settings_defaults_to_20_percent(client, auth_headers):
     r = await client.get("/api/admin/settings/fiscal", headers=auth_headers)
     assert r.status_code == 200

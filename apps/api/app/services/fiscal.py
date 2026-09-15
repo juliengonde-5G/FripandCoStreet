@@ -1,7 +1,7 @@
-# Extrait de Vintiz (apps/api/app/services/fiscal.py) — signature v3 (D3) :
+# Extrait de l'application source (apps/api/app/services/fiscal.py) — signature v3 (D3) :
 # aucune branche legacy v1/v2, nouvelle installation. Verrou de caisse
 # partage entre vente et cloture (D10) : une seule cle avisory Postgres pour
-# les deux, contrairement a Vintiz qui en utilisait deux distinctes.
+# les deux, contrairement a l'application source qui en utilisait deux distinctes.
 from __future__ import annotations
 
 import hashlib
@@ -678,6 +678,13 @@ class FiscalService:
                     "expected_amount": float(z_report.expected_amount),
                 },
             )
+            # PR4 (F2, docs/ARCHITECTURE_PR4.md §1/§3) — meme regle que
+            # `pos.py::close_drawer` : l'ecriture comptable du Z est creee
+            # dans la MEME transaction SQL que la cloture automatique.
+            from app.services.accounting_service import AccountingService
+
+            await AccountingService(self.db).create_export_for_z(z_report, user_id=user_id)
+            await self.db.flush()
             reports.append(z_report)
         return reports
 
@@ -786,10 +793,23 @@ class FiscalService:
         )
         self.db.add(drawer)
         await self.db.flush()
-        return await self.generate_z_report(
+        z_report = await self.generate_z_report(
             drawer,
             user_id,
             counted=False,
             is_regularization=True,
             regularization_reason=reason,
         )
+
+        # PR4 (F2, docs/ARCHITECTURE_PR4.md §1/§3) — meme regle que
+        # `pos.py::close_drawer` et `close_open_drawers` ci-dessus : sans
+        # cet appel, un Z de regularisation resterait absent du CSV mensuel
+        # et du FEC (la journee regularisee serait silencieusement
+        # incomplete cote comptabilite, alors que la vente y figure bien
+        # fiscalement). Meme transaction SQL que la creation du Z.
+        from app.services.accounting_service import AccountingService
+
+        await AccountingService(self.db).create_export_for_z(z_report, user_id=user_id)
+        await self.db.flush()
+
+        return z_report

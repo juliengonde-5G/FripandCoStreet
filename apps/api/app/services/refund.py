@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/services/refund.py), reduit a l'annulation
+# Extrait de l'application source (apps/api/app/services/refund.py), reduit a l'annulation
 # TOTALE exposee par l'UI (D4 du contrat PR2 — le service accepte aussi un
 # sous-ensemble de lignes, capacite non exposee par le router PR2).
 from __future__ import annotations

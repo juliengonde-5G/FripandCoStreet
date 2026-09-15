@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import Button from "@/components/ui/Button";
@@ -41,12 +42,14 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         <header className="bg-fc-surface border-b border-fc-line">
           <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 min-w-0">
-              <div
+              <Image
+                src="/brand/logo-mark.png"
+                alt=""
                 aria-hidden
-                className="h-9 w-9 rounded-fc bg-fc-primary text-white flex items-center justify-center text-sm font-bold flex-shrink-0"
-              >
-                F&amp;C
-              </div>
+                width={40}
+                height={40}
+                className="h-10 w-10 rounded-fc flex-shrink-0"
+              />
               <span className="font-semibold text-fc-ink truncate">Frip &amp; Co Street</span>
             </div>
 
