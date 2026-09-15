@@ -112,6 +112,20 @@ EVENT_BACKUP_DELETED = "backup.deleted"
 # piegee, cf. PR3/E4 et art. 17 RGPD).
 EVENT_CLIENT_UNLINKED = "client.unlinked"
 
+# PR8 — facture B2B et avoir (docs/ARCHITECTURE_PR8.md, J5). Payload :
+# IDENTIFIANTS SEULEMENT (`invoice_id`, `transaction_id`, `invoice_number`).
+# Une raison sociale et un SIRET ne sont pas des donnees personnelles, mais
+# le JET est immuable : on s'y tient au principe « des identifiants, jamais
+# du contenu », comme pour `client.linked`.
+EVENT_INVOICE_ISSUED = "invoice.issued"
+EVENT_INVOICE_CREDIT_NOTE_ISSUED = "invoice.credit_note_issued"
+# Incident d'integrite constate en servant un document scelle (aujourd'hui :
+# un PDF de facture dont l'empreinte ne correspond plus a celle posee au
+# premier telechargement). L'evenement est journalise ET COMMITE avant que
+# la requete n'echoue — un incident de ce type ne doit jamais disparaitre
+# avec le rollback.
+EVENT_SYSTEM_INTEGRITY_ALERT = "system.integrity_alert"
+
 # PR8 — vendeuses identifiees par code PIN (docs/ARCHITECTURE_PR8.md J2/J3).
 # AUCUN de ces evenements ne porte de code PIN ni de hash de PIN : le JET est
 # immuable, un secret qui y tomberait ne pourrait plus jamais en sortir. Les

@@ -236,6 +236,18 @@ class RefundService:
             },
         )
 
+        # PR8/J5 — vente FACTUREE : l'annulation emet automatiquement
+        # l'avoir correspondant (`A-AAAA-NNNN`), dans la meme transaction
+        # SQL et sous le meme verrou fiscal (deja tenu ici). Ne fait rien
+        # si la vente n'etait pas facturee, ce qui est le cas courant ;
+        # refuse (409 `invoiced_partial_refund`) si l'annulation ne solde
+        # pas la vente entiere, un avoir partiel n'etant pas au perimetre.
+        from app.services.invoice_service import InvoiceService
+
+        await InvoiceService(self.db).credit_note_for_cancellation(
+            original, refund_tx, user_id=user_id
+        )
+
         await self.db.flush()
         # Cf. commentaire equivalent dans PosService.create_transaction :
         # recharge via `select()` pour que `items`/`payments` (lazy=selectin)
