@@ -17,10 +17,12 @@ from sqlalchemy.orm import aliased
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.cash_movement import CashMovementDirection, CashMovementReason
+from app.models.client import ConsentPurpose, ConsentSource
 from app.models.pos import CashDrawer, Transaction, TransactionType, ZReport
 from app.models.receipt import Receipt
 from app.models.user import User
 from app.services import escpos_service
+from app.services.client_service import ClientService, mask_email, mask_phone
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.jet import (
     EVENT_DRAWER_KICKED,
@@ -66,6 +68,24 @@ class AttachClientRequest(BaseModel):
 
 class ResendReceiptEmailRequest(BaseModel):
     email: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# PR7 (docs/ARCHITECTURE_PR7.md, I3) — client en caisse, sans fidelite.
+# Schemas definis ici, comme ceux de PR3 ci-dessus.
+# ---------------------------------------------------------------------------
+
+
+class CreatePosClientRequest(BaseModel):
+    first_name: str | None = None
+    last_name: str | None = None
+    # Aucun des deux n'est obligatoire PRIS ISOLEMENT, mais l'un des deux
+    # l'est : la regle est portee par le service (`contact_required`) et par
+    # la base (contrainte CHECK, migration 0007), jamais par Pydantic — pour
+    # que l'erreur soit une erreur METIER `{detail, code}` lisible en caisse.
+    email: str | None = None
+    phone: str | None = None
+    newsletter_optin: bool = False
 
 
 def _raise(exc: PosServiceError):
@@ -425,6 +445,7 @@ async def create_transaction(
             items=body.items,
             discount=body.discount,
             payments=body.payments,
+            client_id=body.client_id,
         )
     except PosServiceError as exc:
         _raise(exc)
@@ -810,6 +831,123 @@ async def kick_drawer_escpos(
         content=payload,
         media_type="application/octet-stream",
         headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Client en caisse (PR7, I3) — recherche, creation, detachement
+# ---------------------------------------------------------------------------
+
+
+def _serialize_pos_client(client, stats: dict[str, dict] | None = None) -> dict:
+    """Fiche cliente telle qu'elle apparait EN CAISSE.
+
+    Coordonnees MASQUEES (`mask_email`/`mask_phone`) : la vendeuse a besoin
+    de reconnaitre la bonne cliente, pas de lire son adresse ni son numero
+    en entier devant la file d'attente. La fiche complete reste en
+    back-office (`/admin/clients/{id}`).
+    """
+    stats = (stats or {}).get(str(client.id), {})
+    return {
+        "id": str(client.id),
+        "first_name": client.first_name,
+        "last_name": client.last_name,
+        "email_masked": mask_email(client.email),
+        "phone_masked": mask_phone(client.phone),
+        "newsletter_optin": client.newsletter_optin,
+        "last_visit_at": stats.get("last_visit_at"),
+        "visits_count": stats.get("visits_count", 0),
+    }
+
+
+@router.get("/clients/search")
+async def search_pos_clients(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    q: str = Query(min_length=2),
+):
+    """Recherche par nom, prenom, e-mail ou telephone (I3).
+
+    Les fiches anonymisees (RGPD) sont exclues : elles ne portent plus
+    aucune donnee personnelle et n'ont donc plus rien a identifier.
+    """
+    service = ClientService(db)
+    clients = await service.search(q, limit=20, include_anonymized=False)
+    stats = await service.visit_stats([c.id for c in clients])
+    return {"clients": [_serialize_pos_client(c, stats) for c in clients]}
+
+
+@router.post("/clients", status_code=201)
+async def create_pos_client(
+    body: CreatePosClientRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Cree (ou retrouve) une fiche depuis la caisse.
+
+    Toujours 201, meme quand la fiche existait deja : `created` dit lequel
+    des deux cas s'est produit, et la caisse enchaine pareil dans les deux
+    cas. Le consentement newsletter n'est enregistre QUE s'il est coche
+    (case jamais pre-cochee cote front, E2/E8 de PR3) et porte la source
+    `pos`.
+    """
+    service = ClientService(db)
+    try:
+        client, created = await service.create_or_get(
+            email=body.email,
+            phone=body.phone,
+            first_name=body.first_name,
+            last_name=body.last_name,
+            user_id=user.id,
+        )
+        if body.newsletter_optin:
+            await service.record_consent(
+                client=client,
+                purpose=ConsentPurpose.newsletter,
+                granted=True,
+                source=ConsentSource.pos,
+                user_id=user.id,
+            )
+            # Sans e-mail, `sync_brevo` est un no-op journalise : Brevo est
+            # un carnet d'adresses e-mail (I3).
+            await service.sync_brevo(client, user_id=user.id)
+    except PosServiceError as exc:
+        _raise(exc)
+    await db.commit()
+    stats = await service.visit_stats([client.id])
+    return {"client": _serialize_pos_client(client, stats), "created": created}
+
+
+@router.delete("/transactions/{transaction_id}/client")
+async def detach_client(
+    transaction_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Detache la cliente d'une vente (I3).
+
+    `client_id` est la seule colonne mutable hors hash d'une transaction
+    signee (E3) : ni les montants, ni les paiements, ni la signature ne
+    bougent. Idempotent — detacher une vente qui n'a pas de cliente ne
+    journalise rien et renvoie la vente telle quelle.
+    """
+    transaction = await PosService(db).get_transaction(transaction_id)
+    if transaction is None:
+        raise PosServiceError("Vente introuvable.", code="not_found", status_code=404)
+    try:
+        await ClientService(db).unlink_transaction(transaction=transaction, user_id=user.id)
+    except PosServiceError as exc:
+        _raise(exc)
+    await db.commit()
+    transaction = await PosService(db).get_transaction(transaction_id)
+    receipt = await PosService(db).get_receipt(transaction_id)
+    refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
+    return _serialize_transaction(
+        transaction,
+        receipt_text=receipt.content if receipt else None,
+        refund_of_sale=refund_of_sale,
+        original_number_by_refund_id=original_number_by_refund_id,
+        clients_by_id={},
     )
 
 

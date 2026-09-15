@@ -32,6 +32,13 @@ class CreateTransactionRequest(BaseModel):
     items: list[CartItemIn] = Field(min_length=1, max_length=50)
     discount: DiscountIn | None = None
     payments: list[PaymentIn] = Field(min_length=1)
+    # PR7/I3 — fiche cliente choisie en caisse AVANT l'encaissement. Le
+    # rattachement est pose des l'INSERT et reste HORS SIGNATURE (comme le
+    # rattachement a posteriori de PR3) : `client_id` n'entre pas dans
+    # `fiscal.py::_transaction_payload`. Ne pas confondre avec
+    # `client_uuid`, qui est la cle d'idempotence generee par le navigateur
+    # et qui, elle, est signee.
+    client_id: uuid.UUID | None = None
 
 
 class DenominationIn(BaseModel):

@@ -14,15 +14,38 @@ _PARIS = ZoneInfo("Europe/Paris")
 _WIDTH = 42
 
 
+def format_client_label(first_name: str | None, last_name: str | None) -> str | None:
+    """« Prenom N. » — le seul identifiant client imprime sur un ticket (PR7,
+    I3).
+
+    Le ticket est un document remis en main propre, potentiellement oublie
+    sur le comptoir : il ne porte JAMAIS l'e-mail ni le telephone de la
+    cliente, seulement son prenom et l'initiale de son nom. Sans prenom,
+    rien n'est imprime (``None``) — une ligne « Client : » vide n'aiderait
+    personne.
+    """
+    first = (first_name or "").strip()
+    if not first:
+        return None
+    last = (last_name or "").strip()
+    label = f"{first} {last[0].upper()}." if last else first
+    return label[:_WIDTH - 9]
+
+
 class ReceiptService:
     """Genere le texte formate d'un ticket (80 mm, 42 colonnes)."""
 
     def generate(
-        self, transaction: Transaction, *, shop: dict[str, Any], original_number: int | None = None
+        self,
+        transaction: Transaction,
+        *,
+        shop: dict[str, Any],
+        original_number: int | None = None,
+        client_label: str | None = None,
     ) -> str:
         if transaction.transaction_type == TransactionType.refund:
             return self.generate_refund_text(transaction, shop=shop, original_number=original_number)
-        return self.generate_sale_text(transaction, shop=shop)
+        return self.generate_sale_text(transaction, shop=shop, client_label=client_label)
 
     def _header(self, shop: dict[str, Any]) -> list[str]:
         lines: list[str] = []
@@ -49,11 +72,18 @@ class ReceiptService:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(_PARIS)
 
-    def generate_sale_text(self, transaction: Transaction, *, shop: dict[str, Any]) -> str:
+    def generate_sale_text(
+        self, transaction: Transaction, *, shop: dict[str, Any], client_label: str | None = None
+    ) -> str:
         lines = self._header(shop)
         dt = self._local_dt(transaction)
         lines.append(f"Ticket #{transaction.transaction_number}")
         lines.append(f"Date: {dt.strftime('%d/%m/%Y %H:%M')}")
+        # PR7/I3 — « Prenom N. » sous l'en-tete quand une cliente est
+        # rattachee a la vente. Jamais son e-mail ni son telephone
+        # (`format_client_label`).
+        if client_label:
+            lines.append(f"Client : {client_label}")
         lines.append("-" * _WIDTH)
 
         for item in sorted(transaction.items or [], key=lambda i: i.position):
