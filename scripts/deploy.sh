@@ -65,9 +65,9 @@ echo "============================================"
 # ------------------------------------------------------------ 0. vérifications
 step "0/5" "Vérification de l'environnement…"
 [ -f "$ENV_FILE" ] || { err "Fichier .env manquant (cp .env.example .env)"; exit 1; }
-if grep -q "CHANGER_MOI" "$ENV_FILE"; then
+if grep -vE '^[[:space:]]*#' "$ENV_FILE" | grep -q "CHANGER_MOI"; then
   err "Le fichier .env contient encore des valeurs CHANGER_MOI :"
-  grep -n "CHANGER_MOI" "$ENV_FILE" | sed 's/=.*/=…/' | sed 's/^/  ligne /'
+  grep -vE '^[[:space:]]*#' "$ENV_FILE" | grep -n "CHANGER_MOI" | sed 's/=.*/=…/' | sed 's/^/  ligne /'
   exit 1
 fi
 [ "$(read_env_value ENVIRONMENT)" = "production" ] || { err "ENVIRONMENT=production est obligatoire dans .env"; exit 1; }
