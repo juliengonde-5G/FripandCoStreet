@@ -1005,6 +1005,9 @@ def _serialize_client_summary(client: Client) -> dict:
     return {
         "id": str(client.id),
         "email": client.email,
+        # PR7/I3 — le telephone figure dans la liste ET dans la fiche : une
+        # cliente peut n'avoir que ca.
+        "phone": client.phone,
         "first_name": client.first_name,
         "last_name": client.last_name,
         "newsletter_optin": client.newsletter_optin,
@@ -1020,6 +1023,8 @@ async def list_clients(
     q: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ):
+    """Recherche admin : e-mail, prenom, nom — et telephone (PR7/I3, la
+    recherche porte alors sur les chiffres, cf. `ClientService.search`)."""
     clients = await ClientService(db).search(q, limit=limit)
     return {"clients": [_serialize_client_summary(c) for c in clients]}
 
