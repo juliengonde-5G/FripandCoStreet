@@ -2,7 +2,7 @@
 import type { NextConfig } from "next";
 
 // En production, Caddy sert le site et route /api/* vers l'API sur la même
-// origine (https://street.fripco.fr) : aucune rewrite n'est nécessaire.
+// origine (https://app.lloomi.fr) : aucune rewrite n'est nécessaire.
 //
 // En développement, le front (ex. port 3120) et l'API (ex. port 8020)
 // tournent sur des ports séparés. Sans same-origin, deux problèmes :

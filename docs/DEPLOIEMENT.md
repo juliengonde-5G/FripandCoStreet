@@ -1,13 +1,13 @@
 # Déploiement — Frip & Co Street
 
 Caisse isolée hébergée sur le VPS existant, derrière le reverse-proxy Caddy
-déjà en place. Sous-domaine : **https://street.fripco.fr**.
+déjà en place. Sous-domaine : **https://app.lloomi.fr**.
 
 ## 1. Ce qui est partagé, ce qui ne l'est pas
 
 | Composant | Statut |
 |---|---|
-| Reverse-proxy Caddy (ports 80/443) | **Partagé** — seul point de contact. Il est rattaché au réseau externe `fripco-network` et proxifie `street.fripco.fr` vers `fripco-web` (/) et `fripco-api` (/api/*). |
+| Reverse-proxy Caddy (ports 80/443) | **Partagé** — seul point de contact. Il est rattaché au réseau externe `fripco-network` et proxifie `app.lloomi.fr` vers `fripco-web` (/) et `fripco-api` (/api/*). |
 | Réseau Docker | Dédié : `fripco-network` (externe, créé une fois). Aucun service de la caisse ne rejoint un autre réseau. |
 | Base PostgreSQL | Dédiée : conteneur `fripco-db`, volume `postgres_data` de la stack, non publié sur l'hôte. |
 | Secrets | Dédiés : `/opt/fripco-street/.env`. |
@@ -16,7 +16,7 @@ déjà en place. Sous-domaine : **https://street.fripco.fr**.
 
 ## 2. Pré-requis (une fois)
 
-1. **DNS** : enregistrement `A` (et `AAAA` si IPv6) `street.fripco.fr` → IP du VPS, **avant** d'activer le bloc Caddy (sinon Caddy retente l'obtention du certificat en boucle, sans bloquer les autres sites).
+1. **DNS** : enregistrement `A` (et `AAAA` si IPv6) `app.lloomi.fr` → IP du VPS, **avant** d'activer le bloc Caddy (sinon Caddy retente l'obtention du certificat en boucle, sans bloquer les autres sites).
 2. **Réseau externe** : `docker network create fripco-network` (idempotent ; `scripts/deploy.sh` le fait aussi).
 3. **Reverse-proxy** : ajouter le bloc de `docker/Caddyfile.fragment` au Caddyfile du VPS et rattacher le conteneur Caddy au réseau `fripco-network` (dans sa stack : `networks: [ …, fripco-network ]` + `networks: fripco-network: external: true`), puis recharger Caddy.
 4. **Clone** : `git clone <dépôt fripco-street> /opt/fripco-street` (tant que le code vit dans le dépôt Vintiz : `/opt/vintiz/fripco-street` fonctionne aussi, `deploy.sh` est relatif à lui-même et ne touche pas à git sans `--pull`).
@@ -40,7 +40,7 @@ docker exec -it fripco-api python scripts/create_manager.py --username <nom> --e
 Vérifications :
 
 ```bash
-curl -s https://street.fripco.fr/api/health
+curl -s https://app.lloomi.fr/api/health
 docker compose -f docker/docker-compose.prod.yml --env-file .env ps
 ```
 
