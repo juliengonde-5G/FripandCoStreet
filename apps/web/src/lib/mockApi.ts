@@ -17,6 +17,7 @@
  */
 import { ApiError } from "./apiError";
 import { isValidEmail, maskEmail } from "./format";
+import { normalizeSiret, normalizeVatNumber, validateSiret, validateVatNumber } from "./siret";
 import { EXPORTABLE_TABLES, TVA_RATES } from "./types";
 import type {
   AccountingExportDetail,
@@ -53,6 +54,8 @@ import type {
   FiscalClosureType,
   FiscalSettings,
   HardwareSettings,
+  Invoice,
+  IssueInvoiceRequest,
   JetEvent,
   MessagingStatus,
   PaymentInput,
@@ -181,6 +184,18 @@ let databaseBackups: DatabaseBackup[] = seedDatabaseBackups();
 const DEFAULT_BACKUP_CONFIG: DatabaseBackupConfig = { retention_days: 60, nightly_enabled: true, alert_email: "" };
 let backupConfig: DatabaseBackupConfig = { ...DEFAULT_BACKUP_CONFIG };
 
+// --- PR8 : factures pro et avoirs (J5/J6) ---------------------------------
+//
+// Numérotation séquentielle PAR ANNÉE et PAR NATURE de document :
+// `F-AAAA-NNNN` pour les factures, `A-AAAA-NNNN` pour les avoirs. Le
+// backend attribue ces numéros sous le verrou fiscal ; ici, un simple
+// compteur en mémoire suffit à exercer le parcours front (n° affiché,
+// PDF, liste admin). Une vente ne porte qu'une facture (409
+// `invoice_exists`), et annuler une vente facturée émet l'avoir
+// automatiquement.
+let invoices: Invoice[] = [];
+let invoiceCounters: Record<string, number> = {};
+
 // --- PR3 : clients, consentements, envois de ticket -----------------------
 let clients: Client[] = [];
 let consents: MockConsent[] = [];
@@ -287,12 +302,15 @@ function reset(): void {
   consents = [];
   communications = [];
   drawerHistory = [];
+  invoices = [];
+  invoiceCounters = {};
   accountingExports = [];
   fiscalClosures = [];
   closureSeq = 0;
   databaseBackups = seedDatabaseBackups();
   seedDemoSales();
   seedDemoClients();
+  seedDemoInvoice();
   // `backupConfig` n'est pas remis à zéro, comme `settings` — un réglage
   // édité par la personne reste après un reset (état applicatif, pas une
   // donnée transactionnelle du jeu de démo).
@@ -774,6 +792,102 @@ function attachCancelInfo(tx: TransactionOut): TransactionOut {
   };
 }
 
+// --- PR8 : factures pro et avoirs (J5) ---------------------------------
+
+/** Compteur séquentiel par nature de document et par année civile. */
+function nextInvoiceNumber(kind: Invoice["kind"], year: number): string {
+  const prefix = kind === "credit_note" ? "A" : "F";
+  const key = `${prefix}-${year}`;
+  const next = (invoiceCounters[key] ?? 0) + 1;
+  invoiceCounters[key] = next;
+  return `${prefix}-${year}-${String(next).padStart(4, "0")}`;
+}
+
+function invoiceOfTransaction(transactionId: string): Invoice | undefined {
+  return invoices.find((inv) => inv.transaction_id === transactionId);
+}
+
+/** Crée le document (facture ou avoir) et le colle sur sa transaction
+ * (`invoice_number`, lu par le détail d'un ticket côté front). */
+function createInvoiceDocument(
+  tx: TransactionOut,
+  data: {
+    company_name: string;
+    siret: string;
+    vat_number: string | null;
+    address_line1: string;
+    address_line2: string | null;
+    postal_code: string;
+    city: string;
+  },
+  kind: Invoice["kind"],
+  originalInvoiceId: string | null,
+  issuedAt?: string,
+): Invoice {
+  const issued_at = issuedAt ?? nowIso();
+  const invoice: Invoice = {
+    id: uuid(),
+    kind,
+    invoice_number: nextInvoiceNumber(kind, new Date(issued_at).getFullYear()),
+    transaction_id: tx.id,
+    transaction_number: tx.transaction_number,
+    original_invoice_id: originalInvoiceId,
+    company_name: data.company_name,
+    siret: data.siret,
+    vat_number: data.vat_number,
+    address_line1: data.address_line1,
+    address_line2: data.address_line2,
+    postal_code: data.postal_code,
+    city: data.city,
+    total_ht: money(tx.total_ht),
+    total_tva: money(tx.total_tva),
+    total_ttc: money(tx.total_ttc),
+    issued_at,
+  };
+  invoices.unshift(invoice);
+  tx.invoice_number = invoice.invoice_number;
+  logJet("invoice.issued", {
+    invoice_id: invoice.id,
+    transaction_id: tx.id,
+    invoice_number: invoice.invoice_number,
+  });
+  return invoice;
+}
+
+/** Texte du PDF de démonstration — déterministe (aucun horodatage de
+ * génération), comme le PDF du Z : deux appels donnent le même contenu.
+ * Ce n'est pas un vrai PDF binaire, mais il commence bien par `%PDF-` pour
+ * que le navigateur et les contrôles de bout en bout le reconnaissent. */
+function buildInvoicePdfText(invoice: Invoice): string {
+  const shop = settings.shop;
+  const label = invoice.kind === "credit_note" ? "AVOIR" : "FACTURE";
+  return [
+    "%PDF-1.4",
+    `% ${label} de démonstration (mode démo — pas un vrai PDF binaire)`,
+    `${label} n° ${invoice.invoice_number}`,
+    `Émise le ${invoice.issued_at}`,
+    `Ticket associé n° ${invoice.transaction_number}`,
+    "",
+    `${shop.name} — ${shop.address_line1}, ${shop.postal_code} ${shop.city}`,
+    `SIRET ${shop.siret} — TVA ${shop.vat_number}`,
+    "",
+    "Client :",
+    invoice.company_name,
+    `SIRET ${invoice.siret}`,
+    invoice.vat_number ? `TVA ${invoice.vat_number}` : "TVA : non communiquée",
+    invoice.address_line2 ? `${invoice.address_line1}, ${invoice.address_line2}` : invoice.address_line1,
+    `${invoice.postal_code} ${invoice.city}`,
+    "",
+    `Total HT   ${invoice.total_ht} EUR`,
+    `TVA        ${invoice.total_tva} EUR`,
+    `Total TTC  ${invoice.total_ttc} EUR`,
+    "",
+    "En cas de retard de paiement : pénalités au taux d'intérêt légal majoré",
+    "de 10 points et indemnité forfaitaire pour frais de recouvrement de 40 €.",
+    "%%EOF",
+  ].join("\n");
+}
+
 // --- PR4 : écriture comptable par Z (F2) ------------------------------
 
 /** Construit et enregistre l'écriture comptable d'un Z, dans le même
@@ -1014,6 +1128,33 @@ function seedDemoClients(): void {
     tx.client = clientRefOf(client);
     tx.receipt_text = buildReceiptText(tx);
   });
+}
+
+/** Une facture pro de démonstration (PR8, J6), posée sur une vente
+ * ancienne du jeu de démo : la carte « Factures » de l'administration et
+ * le détail d'un ticket facturé ne sont jamais vides au premier coup
+ * d'œil, sans manipulation préalable. La vente du jour, elle, reste
+ * vierge : le parcours « Facture pro » en caisse est inchangé. */
+function seedDemoInvoice(): void {
+  const candidate = transactions.find(
+    (t) => t.transaction_type === "sale" && !cancelledToRefund.has(t.id) && !t.invoice_number,
+  );
+  if (!candidate) return;
+  createInvoiceDocument(
+    candidate,
+    {
+      company_name: "Atelier Belleville SARL",
+      siret: "73282932000074",
+      vat_number: "FR40732829320",
+      address_line1: "18 rue des Capucins",
+      address_line2: null,
+      postal_code: "76000",
+      city: "Rouen",
+    },
+    "invoice",
+    null,
+    candidate.created_at,
+  );
 }
 
 /** Net d'un jour civil : Σ ventes − Σ annulations (H2). */
@@ -1333,6 +1474,27 @@ export async function mockFetchAPI<T = unknown>(
     transactions.unshift(refund);
     cancelledToRefund.set(tx!.id, refund.id);
     logJet("sale.cancelled", { number: refund.transaction_number, original_number: tx!.transaction_number, reason: body.reason.trim() });
+    // PR8 (J5) : annuler une vente FACTURÉE émet automatiquement l'avoir
+    // correspondant, avec les mêmes coordonnées de société et un lien vers
+    // la facture d'origine.
+    const original = invoiceOfTransaction(tx!.id);
+    if (original) {
+      createInvoiceDocument(
+        refund,
+        {
+          company_name: original.company_name,
+          siret: original.siret,
+          vat_number: original.vat_number,
+          address_line1: original.address_line1,
+          address_line2: original.address_line2,
+          postal_code: original.postal_code,
+          city: original.city,
+        },
+        "credit_note",
+        original.id,
+      );
+      refund.receipt_text = `${refund.receipt_text}\nAvoir : ${refund.invoice_number}`;
+    }
     return attachCancelInfo(refund) as unknown as T;
   }
 
@@ -1343,6 +1505,58 @@ export async function mockFetchAPI<T = unknown>(
     const dup = (tx as unknown as { _dup?: number })._dup!;
     if (dup > 1) logJet("receipt.duplicate", { number: tx!.transaction_number });
     return { text: tx!.receipt_text, duplicate_count: Math.max(0, dup - 1) } as unknown as T;
+  }
+
+  // --- PR8 : facture pro d'une vente (J5/J6) -----------------------------
+  if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/invoice$/)) && method === "POST") {
+    const tx = transactions.find((t) => t.id === m![1]);
+    if (!tx) fail(404, "Ticket introuvable.", "not_found");
+    if (tx!.transaction_type !== "sale") fail(409, "Une facture ne peut être émise que sur une vente.", "not_a_sale");
+    if (cancelledToRefund.has(tx!.id)) fail(409, "Ce ticket a été annulé : aucune facture ne peut être émise.", "transaction_cancelled");
+    if (invoiceOfTransaction(tx!.id)) fail(409, "Une facture a déjà été émise pour ce ticket.", "invoice_exists");
+
+    const body = parseBody<IssueInvoiceRequest>(options);
+    const company = (body.company_name ?? "").trim();
+    const address1 = (body.address_line1 ?? "").trim();
+    const postal = (body.postal_code ?? "").trim();
+    const city = (body.city ?? "").trim();
+    if (!company || !address1 || !postal || !city) {
+      fail(422, "Raison sociale, adresse, code postal et ville sont obligatoires.", "invalid_invoice");
+    }
+    const siret = normalizeSiret(body.siret);
+    if (!validateSiret(siret)) {
+      fail(422, "Le SIRET saisi n'est pas valide (14 chiffres et clé de contrôle).", "invalid_siret");
+    }
+    const vat = normalizeVatNumber(body.vat_number);
+    if (!validateVatNumber(vat)) {
+      fail(422, "Le numéro de TVA n'est pas au bon format (ex. FR40123456789).", "invalid_vat_number");
+    }
+
+    const invoice = createInvoiceDocument(
+      tx!,
+      {
+        company_name: company,
+        siret,
+        vat_number: vat || null,
+        address_line1: address1,
+        address_line2: (body.address_line2 ?? "").trim() || null,
+        postal_code: postal,
+        city,
+      },
+      "invoice",
+      null,
+    );
+    // Le ticket porte désormais « Facture : F-AAAA-NNNN » (J5).
+    tx!.receipt_text = `${tx!.receipt_text}\nFacture : ${invoice.invoice_number}`;
+    return { invoice } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/invoice$/)) && method === "GET") {
+    const tx = transactions.find((t) => t.id === m![1]);
+    if (!tx) fail(404, "Ticket introuvable.", "not_found");
+    const invoice = invoiceOfTransaction(tx!.id);
+    if (!invoice) fail(404, "Aucune facture n'a été émise pour ce ticket.", "not_found");
+    return { invoice } as unknown as T;
   }
 
   if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)$/)) && method === "GET") {
@@ -1527,6 +1741,17 @@ export async function mockFetchAPI<T = unknown>(
       logJet("config.changed", { key, diff: body });
       return settings[key] as unknown as T;
     }
+  }
+
+  // --- PR8 : liste des factures et avoirs (J5/J6) -------------------------
+  if (path === "/api/admin/invoices" && method === "GET") {
+    const yearParam = query.get("year");
+    const year = yearParam ? parseInt(yearParam, 10) : new Date().getFullYear();
+    const list = invoices
+      .filter((inv) => new Date(inv.issued_at).getFullYear() === year)
+      .slice()
+      .sort((a, b) => (a.issued_at < b.issued_at ? 1 : -1));
+    return { invoices: list } as unknown as T;
   }
 
   // --- PR5 : sauvegardes de la base ---------------------------------------
@@ -2605,6 +2830,15 @@ export async function mockFetchBytesWithHeaders(endpoint: string, options?: Fetc
     });
   }
 
+  if ((m = path.match(/^\/api\/pos\/invoices\/([^/]+)\/pdf$/)) && method === "GET") {
+    const invoice = invoices.find((inv) => inv.id === m![1]);
+    if (!invoice) fail(404, "Facture introuvable.", "not_found");
+    logJet("export.downloaded", { kind: "invoice_pdf", invoice_number: invoice!.invoice_number });
+    return asResult(buildInvoicePdfText(invoice!), "application/pdf", {
+      "content-disposition": `attachment; filename="${invoice!.invoice_number}.pdf"`,
+    });
+  }
+
   if ((m = path.match(/^\/api\/pos\/z-reports\/([^/]+)\/pdf$/)) && method === "GET") {
     const z = zReports.find((zr) => zr.id === m![1]);
     if (!z) fail(404, "Rapport Z introuvable.", "not_found");
@@ -2626,6 +2860,7 @@ export async function mockFetchBytesWithHeaders(endpoint: string, options?: Fetc
 // toucher à la journée en cours (ventes datées d'hier et avant).
 seedDemoSales();
 seedDemoClients();
+seedDemoInvoice();
 
 // Expose un reset pour d'éventuels tests / Playwright (état frais par page load
 // de toute façon, car le module vit en mémoire côté navigateur).
