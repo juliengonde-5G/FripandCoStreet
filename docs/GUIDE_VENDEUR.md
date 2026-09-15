@@ -86,3 +86,11 @@ En haut à droite de l'écran de caisse : **Accueil** (le tableau de bord),
 ces trois boutons sont regroupés sous le bouton **⋯**.
 Sortir de la caisse ne la ferme pas : tu la retrouveras telle quelle en
 revenant — pense quand même à la **clôturer** le soir.
+
+## Facture pour un professionnel
+Après la vente, touche **Facture pro** (ou **Tickets du jour** → le ticket
+→ **Facture pro**). Saisis la raison sociale, le SIRET (l'écran dit s'il
+est valide), le n° de TVA s'il y en a un, puis l'adresse, et touche
+**Émettre la facture** : le numéro s'affiche et **Télécharger le PDF** le
+donne à la cliente. Une vente ne se facture qu'une fois ; si tu annules un
+ticket facturé, l'avoir est créé tout seul.
