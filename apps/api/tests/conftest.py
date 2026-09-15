@@ -134,7 +134,12 @@ def _truncate_tables():
 async def _truncate() -> None:
     async with engine.begin() as conn:
         await conn.execute(
-            text("TRUNCATE users, journal_events RESTART IDENTITY CASCADE")
+            text(
+                "TRUNCATE users, journal_events, app_settings, transactions, "
+                "transaction_items, payments, cash_drawers, z_reports, "
+                "cash_movements, payment_attempts, receipts "
+                "RESTART IDENTITY CASCADE"
+            )
         )
 
 
@@ -176,3 +181,14 @@ async def auth_headers(client: AsyncClient, manager: User) -> dict[str, str]:
     assert response.status_code == 200, response.text
     token = response.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+async def open_drawer(client: AsyncClient, auth_headers: dict[str, str]) -> dict:
+    """Ouvre une caisse (fond 100 €) — la plupart des tests POS/PR2 exigent
+    une caisse ouverte (D1)."""
+    response = await client.post(
+        "/api/pos/drawer/open", json={"opening_amount": "100.00"}, headers=auth_headers
+    )
+    assert response.status_code == 200, response.text
+    return response.json()

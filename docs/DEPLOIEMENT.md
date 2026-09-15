@@ -76,7 +76,17 @@ gunzip -c backups/fripco_YYYYMMDD_HHMMSS.sql.gz | docker exec -i fripco-db psql 
 Une restauration complète doit être **testée une fois avant l'ouverture**
 (critère d'acceptation §6 du CDC) et son procès-verbal conservé.
 
-## 6. Déploiement automatique
+## 6. TPE SumUp Solo (PR2)
+
+Variables `.env` : `SUMUP_API_KEY` (clé **de production** `sup_sk_…`, une clé de
+test est refusée en production), `SUMUP_MERCHANT_CODE`, `SUMUP_READER_ID`
+(identifiant du Solo enrôlé : `GET https://api.sumup.com/v0.1/merchants/{code}/readers`
+avec la clé en Bearer). Le TPE se connecte au Wi-Fi de la boutique et à SumUp ;
+l'API pousse le montant sur le TPE via l'API SumUp, aucune saisie sur le TPE.
+Sans ces trois variables ou TPE hors ligne, la caisse n'accepte que les espèces.
+État visible dans l'écran Administration.
+
+## 7. Déploiement automatique
 
 `.github/workflows/deploy.yml` (actif dans le dépôt dédié) : après une CI verte
 sur `main`, connexion SSH et `./scripts/deploy.sh --pull`. Secrets à créer dans

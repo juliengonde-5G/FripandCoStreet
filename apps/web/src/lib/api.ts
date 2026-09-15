@@ -7,6 +7,11 @@
  * l'API locale (http://localhost:8000 par défaut).
  */
 
+import { ApiError, extractErrorCode, extractErrorDetail } from "./apiError";
+import { mockFetchAPI, isMockEnabled } from "./mockApi";
+
+export { ApiError };
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 // Timeout par requête (ms). Assez long pour ne pas couper une requête
@@ -32,18 +37,6 @@ function handleUnauthorized() {
   }
 }
 
-export class ApiError extends Error {
-  status: number;
-  detail: string;
-
-  constructor(status: number, detail: string) {
-    super(detail);
-    this.name = "ApiError";
-    this.status = status;
-    this.detail = detail;
-  }
-}
-
 export interface FetchAPIOptions extends RequestInit {
   timeoutMs?: number;
 }
@@ -56,6 +49,14 @@ export async function fetchAPI<T = unknown>(
   endpoint: string,
   options?: FetchAPIOptions,
 ): Promise<T> {
+  // Mode démo PR2 — NEXT_PUBLIC_MOCK_API=1 : aucune requête réseau n'est
+  // émise, tout passe par lib/mockApi.ts (routes §5 simulées en mémoire).
+  // Complètement séparé du chemin réel ci-dessous, jamais actif sans la
+  // variable d'environnement.
+  if (isMockEnabled()) {
+    return mockFetchAPI<T>(endpoint, options);
+  }
+
   const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
   const headers: Record<string, string> = {};
   const isFormEncoded =
@@ -101,15 +102,16 @@ export async function fetchAPI<T = unknown>(
     : await res.text().catch(() => null);
 
   if (!res.ok) {
-    const detail =
-      data && typeof data === "object" && "detail" in data
-        ? String((data as { detail?: unknown }).detail ?? "Erreur inconnue")
-        : "Erreur inconnue";
-    const error = new ApiError(res.status, detail);
+    // Jamais String(objet) : voir extractErrorDetail (apiError.ts) — un
+    // detail objet/tableau (validation Pydantic, backend qui imbrique
+    // {message,code}…) ne doit jamais s'afficher « [object Object] ».
+    const detail = extractErrorDetail(data);
+    const code = extractErrorCode(data);
+    const error = new ApiError(res.status, detail, code);
     // Retry-After est utilisé par la page de connexion pour le rate-limit.
     const retryAfter = res.headers.get("Retry-After");
     if (retryAfter) {
-      (error as ApiError & { retryAfter?: string }).retryAfter = retryAfter;
+      error.retryAfter = retryAfter;
     }
     throw error;
   }

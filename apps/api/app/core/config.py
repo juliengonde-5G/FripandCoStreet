@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     # Identite boutique
     SHOP_NAME: str = "Frip & Co Street"
 
+    # SumUp CB — TPE Solo, push reader uniquement (pas de mode « lien de
+    # paiement », D7). Secrets exclusivement en variables d'environnement
+    # (D12) : jamais dans app_settings, jamais saisis depuis l'admin.
+    # SUMUP_API_BASE est la RACINE de l'hote SumUp, SANS suffixe de version :
+    # tous les appels (v0.1 readers/checkouts, v2.1 transactions, v1.0
+    # refunds) sont construits a partir d'elle (app/services/sumup_service.py
+    # ::_url). A ne changer que pour les tests (ex. un faux serveur local
+    # exercant le flux complet push -> poll -> PAID -> refund) ; en
+    # production, laisser la valeur par defaut.
+    SUMUP_API_KEY: str = ""
+    SUMUP_MERCHANT_CODE: str = ""
+    SUMUP_READER_ID: str = ""
+    SUMUP_API_BASE: str = "https://api.sumup.com"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [s.strip() for s in self.CORS_ORIGINS.split(",") if s.strip()]
