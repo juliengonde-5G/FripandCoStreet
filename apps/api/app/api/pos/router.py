@@ -8,8 +8,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query, Response
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -22,6 +23,12 @@ from app.models.pos import CashDrawer, Transaction, TransactionType, ZReport
 from app.models.receipt import Receipt
 from app.models.user import User
 from app.services import escpos_service
+from app.services.cashier_service import (
+    CashierService,
+    PinRateLimited,
+    sales_by_cashier,
+    serialize_cashier,
+)
 from app.services.client_service import ClientService, mask_email, mask_phone
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.jet import (
@@ -86,6 +93,16 @@ class CreatePosClientRequest(BaseModel):
     email: str | None = None
     phone: str | None = None
     newsletter_optin: bool = False
+
+
+def _client_ip(request: Request) -> str | None:
+    """IP client en tenant compte de X-Forwarded-For (Caddy est en frontal)
+    — meme extraction que `api/auth/router.py`, utilisee ici pour le
+    rate-limit du code PIN (PR8/J2)."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
 
 
 def _raise(exc: PosServiceError):
@@ -227,6 +244,14 @@ def _serialize_drawer(drawer: CashDrawer) -> dict:
         "is_open": drawer.is_open,
         "closed_by_guard": drawer.closed_by_guard,
         "z_report_id": str(drawer.z_report_id) if drawer.z_report_id else None,
+        # PR8/J2 — identites de caisse : qui a ouvert, qui tient la caisse
+        # en ce moment (la releve change la seconde, jamais la premiere).
+        "opened_by_cashier_id": (
+            str(drawer.opened_by_cashier_id) if drawer.opened_by_cashier_id else None
+        ),
+        "current_cashier_id": (
+            str(drawer.current_cashier_id) if drawer.current_cashier_id else None
+        ),
     }
 
 
@@ -242,7 +267,13 @@ def _serialize_movement(movement) -> dict:
     }
 
 
-def _serialize_z_report(z: ZReport) -> dict:
+def _serialize_z_report(z: ZReport, by_cashier: list[dict] | None = None) -> dict:
+    """Serialise un Z. `by_cashier` (PR8/J2) est la ventilation des ventes
+    par vendeuse, recalculee a la lecture (voir
+    `cashier_service.sales_by_cashier`) : elle n'est pas scellee dans le Z,
+    parce qu'elle se rededuit exactement des ventes de la periode, qui sont
+    immuables — et qu'ajouter un champ au payload signe serait une
+    evolution fiscale majeure."""
     return {
         "id": str(z.id),
         "report_number": z.report_number,
@@ -276,6 +307,8 @@ def _serialize_z_report(z: ZReport) -> dict:
         "hash": z.hash,
         "previous_hash": z.previous_hash,
         "created_at": z.created_at.isoformat() if z.created_at else None,
+        "cashier_id": str(z.cashier_id) if z.cashier_id else None,
+        "by_cashier": by_cashier if by_cashier is not None else [],
     }
 
 
@@ -346,6 +379,105 @@ async def _load_clients(db: AsyncSession, client_ids: list[uuid.UUID | None]) ->
 # ---------------------------------------------------------------------------
 
 
+async def _by_cashier(db: AsyncSession, z: ZReport) -> list[dict]:
+    """Ventilation des ventes par vendeuse d'UN Z (PR8/J2)."""
+    return (await sales_by_cashier(db, [z])).get(str(z.id), [])
+
+
+# ---------------------------------------------------------------------------
+# Vendeuses en caisse (PR8, docs/ARCHITECTURE_PR8.md J2) — identification
+# par code PIN et releve. Ce ne sont PAS des comptes : la route reste
+# protegee par le JWT du compte manager unique, le PIN ne fait qu'identifier
+# QUI encaisse derriere ce compte.
+# ---------------------------------------------------------------------------
+
+
+class IdentifyCashierRequest(BaseModel):
+    cashier_id: uuid.UUID
+    # 4 chiffres — la validation reelle (et le refus des suites triviales a
+    # la definition) vit dans `cashier_service.validate_pin`. Ici, on borne
+    # seulement la taille pour ne pas hacher n'importe quoi.
+    pin: str = Field(min_length=1, max_length=16)
+
+
+@router.get("/cashiers")
+async def list_pos_cashiers(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Vendeuses ACTIVES, pour les cartes de l'ecran d'identification.
+
+    `has_pin` permet au front de griser une vendeuse dont le code n'a pas
+    encore ete defini par le manager. Le hash, lui, ne sort jamais.
+    """
+    cashiers = await CashierService(db).list(only_active=True)
+    return {
+        "cashiers": [
+            {
+                "id": str(c.id),
+                "display_name": c.display_name,
+                "has_pin": c.pin_hash is not None,
+            }
+            for c in cashiers
+        ]
+    }
+
+
+@router.post("/cashiers/identify")
+async def identify_cashier(
+    body: IdentifyCashierRequest,
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Identifie une vendeuse par son code PIN (J2).
+
+    Le `db.commit()` du chemin d'ERREUR n'est pas un oubli : le refus vient
+    d'ecrire `cashier.pin_rejected` au JET, et le rollback implicite de
+    `get_db` effacerait cet evenement de securite (meme discipline que
+    `/auth/login`).
+    """
+    try:
+        cashier = await CashierService(db).identify(
+            cashier_id=body.cashier_id,
+            pin=body.pin,
+            ip=_client_ip(request),
+            user_id=user.id,
+        )
+    except PinRateLimited as exc:
+        await db.commit()
+        # `Retry-After` en plus du corps `{detail, code}` : l'ecran de
+        # caisse affiche un compte a rebours plutot qu'un message fige.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": str(exc), "code": exc.code, "retry_after": exc.retry_after},
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+    except PosServiceError as exc:
+        await db.commit()
+        _raise(exc)
+    await db.commit()
+    return {"cashier": serialize_cashier(cashier)}
+
+
+@router.post("/cashiers/release")
+async def release_cashier(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Releve : plus personne n'est identifie en caisse (J2).
+
+    Toujours 200, meme si personne ne tenait la caisse : l'etat voulu est
+    atteint. `released` dit si une identite a effectivement ete retiree.
+    """
+    cashier = await CashierService(db).release(user_id=user.id)
+    await db.commit()
+    return {
+        "released": cashier is not None,
+        "cashier": serialize_cashier(cashier) if cashier is not None else None,
+    }
+
+
 @router.get("/drawer/current")
 async def drawer_current(
     _user: Annotated[User, Depends(get_current_user)],
@@ -354,9 +486,18 @@ async def drawer_current(
     pos = PosService(db)
     drawer = await pos.get_open_drawer()
     if drawer is None:
-        return {"open": False}
+        # Caisse fermee : il n'existe aucun tiroir ou inscrire l'identite
+        # courante (PR8/J2) — le front conserve la vendeuse identifiee
+        # avant l'ouverture et la renvoie dans `POST /pos/drawer/open`.
+        return {"open": False, "current_cashier": None}
     today = await pos.drawer_snapshot(drawer)
-    return {"open": True, "drawer": _serialize_drawer(drawer), "today": today}
+    cashier = await CashierService(db).current_for_drawer(drawer)
+    return {
+        "open": True,
+        "drawer": _serialize_drawer(drawer),
+        "today": today,
+        "current_cashier": serialize_cashier(cashier) if cashier is not None else None,
+    }
 
 
 @router.post("/drawer/open")
@@ -370,6 +511,7 @@ async def drawer_open(
             user_id=user.id,
             opening_amount=body.opening_amount,
             breakdown=[d.model_dump() for d in body.breakdown] if body.breakdown else None,
+            cashier_id=body.cashier_id,
         )
     except PosServiceError as exc:
         _raise(exc)
@@ -393,7 +535,7 @@ async def drawer_close(
     except PosServiceError as exc:
         _raise(exc)
     await db.commit()
-    return _serialize_z_report(z_report)
+    return _serialize_z_report(z_report, await _by_cashier(db, z_report))
 
 
 @router.post("/cash-movements")
@@ -1046,7 +1188,10 @@ async def list_z_reports(
     reports = (
         await db.execute(select(ZReport).order_by(ZReport.report_number.desc()).limit(limit))
     ).scalars().all()
-    return {"z_reports": [_serialize_z_report(z) for z in reports]}
+    grouped = await sales_by_cashier(db, list(reports))
+    return {
+        "z_reports": [_serialize_z_report(z, grouped.get(str(z.id), [])) for z in reports]
+    }
 
 
 @router.get("/z-reports/regularization/preview")
@@ -1088,7 +1233,7 @@ async def create_regularization(
     except PosServiceError as exc:
         _raise(exc)
     await db.commit()
-    return _serialize_z_report(z_report)
+    return _serialize_z_report(z_report, await _by_cashier(db, z_report))
 
 
 @router.get("/z-reports/{z_report_id}/pdf")
@@ -1145,4 +1290,4 @@ async def get_z_report(
     z = (await db.execute(select(ZReport).where(ZReport.id == z_report_id))).scalar_one_or_none()
     if z is None:
         raise PosServiceError("Z introuvable.", code="not_found", status_code=404)
-    return _serialize_z_report(z)
+    return _serialize_z_report(z, await _by_cashier(db, z))

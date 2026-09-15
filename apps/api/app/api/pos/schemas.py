@@ -49,6 +49,11 @@ class DenominationIn(BaseModel):
 class OpenDrawerRequest(BaseModel):
     opening_amount: Decimal = Field(ge=0, decimal_places=2)
     breakdown: list[DenominationIn] | None = None
+    # PR8/J2 — vendeuse identifiee AVANT l'ouverture (il n'existe alors
+    # aucun tiroir ou inscrire l'identite courante) : le front la conserve
+    # apres `POST /pos/cashiers/identify` et la renvoie ici. Elle devient
+    # `opened_by_cashier_id` (fige) ET `current_cashier_id` (etat courant).
+    cashier_id: uuid.UUID | None = None
 
 
 class CloseDrawerRequest(BaseModel):
