@@ -1,5 +1,10 @@
 # Frip & Co Street — stack de développement local (base seule).
 # L'API et le front tournent hors Docker (uvicorn --reload, npm run dev).
+#
+# `name` explicite : voir docker-compose.prod.yml (isolation du nom de projet
+# vis-à-vis d'autres stacks dont le compose vivrait aussi dans un dossier `docker/`).
+name: fripco-street-dev
+
 services:
   db:
     image: postgres:16-alpine

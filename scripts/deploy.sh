@@ -45,7 +45,8 @@ for arg in "$@"; do
   esac
 done
 
-compose() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+PROJECT_NAME="fripco-street"
+compose() { docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
 
 read_env_value() {
   local key="$1" line
