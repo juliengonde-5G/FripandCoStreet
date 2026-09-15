@@ -4,10 +4,17 @@
 # HTTPS n'est PAS dans cette stack : c'est le Caddy déjà présent sur le VPS
 # (stack voisine) qui publie 80/443 et qui est rattaché à `fripco-network`
 # (réseau externe, créé une fois par scripts/deploy.sh). Voir
-# docs/DEPLOIEMENT.md pour le bloc Caddyfile `lloomi.fr`.
+# docs/DEPLOIEMENT.md pour le bloc Caddyfile `app.lloomi.fr`.
 #
 # Isolation : aucun service de cette stack ne rejoint un autre réseau, aucun
 # port n'est publié sur l'hôte, secrets et volumes sont propres à cette stack.
+#
+# `name` explicite obligatoire : sans lui, Compose dérive le nom du projet du
+# dossier contenant ce fichier (`docker`), un nom générique que d'autres
+# applications du VPS peuvent aussi utiliser pour leur propre dossier
+# `docker/` — Compose confondrait alors leurs conteneurs/volumes avec ceux-ci
+# (vécu : un service `db` d'une autre stack a été recréé à la place de celui-ci).
+name: fripco-street
 
 services:
   db:

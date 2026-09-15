@@ -9,7 +9,7 @@
 #
 # Pré-requis serveur : Docker Engine 24+ avec Compose v2, un fichier .env
 # rempli (cp .env.example .env), le reverse-proxy du VPS rattaché au réseau
-# `fripco-network` avec le bloc `lloomi.fr` (docker/Caddyfile.fragment).
+# `fripco-network` avec le bloc `app.lloomi.fr` (docker/Caddyfile.fragment).
 #
 # Le script fonctionne aussi bien depuis un clone dédié (/opt/fripco-street)
 # que depuis le sous-dossier fripco-street/ d'un autre dépôt : tous les
@@ -45,7 +45,8 @@ for arg in "$@"; do
   esac
 done
 
-compose() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+PROJECT_NAME="fripco-street"
+compose() { docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
 
 read_env_value() {
   local key="$1" line
@@ -65,9 +66,9 @@ echo "============================================"
 # ------------------------------------------------------------ 0. vérifications
 step "0/5" "Vérification de l'environnement…"
 [ -f "$ENV_FILE" ] || { err "Fichier .env manquant (cp .env.example .env)"; exit 1; }
-if grep -q "CHANGER_MOI" "$ENV_FILE"; then
+if grep -vE '^[[:space:]]*#' "$ENV_FILE" | grep -q "CHANGER_MOI"; then
   err "Le fichier .env contient encore des valeurs CHANGER_MOI :"
-  grep -n "CHANGER_MOI" "$ENV_FILE" | sed 's/=.*/=…/' | sed 's/^/  ligne /'
+  grep -vE '^[[:space:]]*#' "$ENV_FILE" | grep -n "CHANGER_MOI" | sed 's/=.*/=…/' | sed 's/^/  ligne /'
   exit 1
 fi
 [ "$(read_env_value ENVIRONMENT)" = "production" ] || { err "ENVIRONMENT=production est obligatoire dans .env"; exit 1; }
@@ -144,4 +145,4 @@ if [ -z "$(docker exec fripco-db psql -U "$(read_env_value POSTGRES_USER)" -d "$
   warn "Aucun compte : créer l'unique manager avec"
   echo "    docker exec -it fripco-api python scripts/create_manager.py --username <nom> --email <email>"
 fi
-log "Déploiement terminé — https://lloomi.fr"
+log "Déploiement terminé — https://app.lloomi.fr"

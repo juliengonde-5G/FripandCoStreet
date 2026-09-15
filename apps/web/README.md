@@ -6,7 +6,7 @@ Tailwind CSS 3.4, TypeScript.
 ## Développement
 
 En prod, le site et l'API sont servis sur la même origine (Caddy route
-`/api/*` vers l'API derrière `https://lloomi.fr`). En dev, le front
+`/api/*` vers l'API derrière `https://app.lloomi.fr`). En dev, le front
 et l'API tournent sur des ports séparés — pour reproduire ce same-origin
 (et éviter CORS + le piège `localhost` → IPv6 alors qu'uvicorn écoute en
 127.0.0.1), Next relaie lui-même `/api/*` vers l'API via `API_PROXY_TARGET`
@@ -22,8 +22,8 @@ API_PROXY_TARGET=http://127.0.0.1:8000 npm run dev   # http://localhost:3000
 
 ## Production
 
-Déploiement même origine : le site est servi sur `https://lloomi.fr`
-et l'API sous `https://lloomi.fr/api/*`, routée par Caddy — pas de
+Déploiement même origine : le site est servi sur `https://app.lloomi.fr`
+et l'API sous `https://app.lloomi.fr/api/*`, routée par Caddy — pas de
 `API_PROXY_TARGET` ni de rewrite en prod. `NEXT_PUBLIC_API_URL` reste vide
 (repli sur des chemins relatifs `/api/...`).
 

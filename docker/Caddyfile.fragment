@@ -1,15 +1,11 @@
 # Frip & Co Street — bloc à AJOUTER au Caddyfile du reverse-proxy du VPS.
-# Domaine public : lloomi.fr (DEUX « o »), DNS chez OVH. Une seule origine :
-# le front sur /, l'API sous /api/* (pas de CORS). www.lloomi.fr redirige
-# vers l'apex (redirection au niveau Caddy, PAS au niveau OVH — une
-# redirection web OVH sur ces noms entrerait en conflit avec la validation
-# ACME/HTTP de Caddy, voir docs/DEPLOIEMENT.md §DNS).
+# Une seule origine : le front sur /, l'API sous /api/* (pas de CORS).
 # Pré-requis : le conteneur Caddy est rattaché au réseau externe
 # `fripco-network` (voir docs/DEPLOIEMENT.md).
 # Caddy ≥ 2.5 remplace tout X-Forwarded-For entrant par l'IP réelle du client
 # (aucun `trusted_proxies` déclaré) : l'API peut donc utiliser sa première
 # valeur pour le rate-limit de connexion et le journal (JET).
-lloomi.fr {
+app.lloomi.fr {
 	encode gzip
 	handle /api/* {
 		reverse_proxy fripco-api:8000
@@ -17,8 +13,4 @@ lloomi.fr {
 	handle {
 		reverse_proxy fripco-web:3000
 	}
-}
-
-www.lloomi.fr {
-	redir https://lloomi.fr{uri} permanent
 }

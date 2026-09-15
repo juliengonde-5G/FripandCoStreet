@@ -54,5 +54,5 @@ cd ../web && npm run lint && npx tsc --noEmit && npm run build
 | PR1 | Squelette : auth mono-compte, JET chaîné, migration initiale, Docker, proxy, backup | livré |
 | PR2 | Vente en saisie libre, remise globale, espèces, tickets, Z journalier, annulation, TPE SumUp (push API) | livré |
 | PR3 | Client, ticket par e-mail (Brevo), liste newsletter dédiée, consentement, RGPD | livré |
-| PR3b | Charte graphique de l'affiche, logo, domaine lloomi.fr (OVH), impression des tickets (imprimante ticket réseau/USB + tiroir-caisse), purge des références à l'application source | livré |
+| PR3b | Charte graphique de l'affiche, logo, domaine app.lloomi.fr (OVH), impression des tickets (imprimante ticket réseau/USB + tiroir-caisse), purge des références à l'application source | livré |
 | PR4 | Écritures comptables par Z, CSV Pennylane et FEC (format de l'application source), exports bruts, clôtures mensuelle/annuelle avec archive signée, export fiscal, PDF du Z, attestation, guide vendeur, procédure de clôture | **cette PR** |
