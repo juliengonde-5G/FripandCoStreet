@@ -10,17 +10,15 @@
  * panier défile. Aucun jargon technique visible (§3.2 CDC).
  */
 import React, { useEffect, useRef, useState } from "react";
-import Image from "next/image";
-import Link from "next/link";
 
 import RequireAuth from "@/components/layout/RequireAuth";
 import Modal from "@/components/ui/Modal";
 import NumPad from "@/components/ui/NumPad";
 import CashDrawerOpenModal from "@/components/pos/CashDrawerOpenModal";
 import CashDrawerCloseModal from "@/components/pos/CashDrawerCloseModal";
-import CashMovementButton from "@/components/pos/CashMovementButton";
 import type { DenominationLine } from "@/components/pos/DenominationGrid";
 import MultiStepPaymentWizard from "@/components/pos/MultiStepPaymentWizard";
+import PosTopBar from "@/components/pos/PosTopBar";
 import ReceiptPreviewCard from "@/components/pos/ReceiptPreviewCard";
 import TicketsPanel from "@/components/pos/TicketsPanel";
 import { api, ApiError } from "@/lib/api";
@@ -48,10 +46,6 @@ interface CartLine {
 function newUuid(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 }
 
 export default function CaissePage() {
@@ -295,75 +289,21 @@ export default function CaissePage() {
   return (
     <RequireAuth>
       <div ref={mainContentRef} className="h-screen flex flex-col bg-fc-bg overflow-hidden">
-        {/* Barre haute */}
-        <header className="flex-shrink-0 bg-fc-surface border-b border-fc-line px-4 py-2 flex items-center gap-3 flex-wrap">
-          <div className="flex items-center gap-2 min-w-0">
-            <Image
-              src="/brand/logo-mark.png"
-              alt=""
-              aria-hidden
-              width={40}
-              height={40}
-              className="h-10 w-10 rounded-fc flex-shrink-0"
-            />
-            <span className="font-semibold text-fc-ink truncate">Frip &amp; Co Street</span>
-          </div>
-
-          {drawerState?.drawer && (
-            <span className="text-xs text-fc-ink-soft rounded-fc bg-fc-primary-soft text-fc-primary-deep px-2 py-1 font-medium">
-              Caisse ouverte depuis {formatTime(drawerState.drawer.opened_at)}
-            </span>
-          )}
-          {today && (
-            <span className="text-xs text-fc-ink-soft">
-              {today.sales_count} vente{today.sales_count > 1 ? "s" : ""} · {formatCurrency(today.sales_total)}
-            </span>
-          )}
-
-          <div className="flex-1" />
-
-          <CashMovementButton disabled={!drawerState?.open} onSubmit={handleCashMovement} />
-          {hardware?.drawer_enabled && (
-            <button
-              type="button"
-              onClick={() => void handleKickDrawer()}
-              disabled={drawerKicking || !drawerState?.open}
-              className="min-h-touch rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {drawerKicking ? "Ouverture…" : "Ouvrir le tiroir"}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setTicketsOpen(true)}
-            className="min-h-touch rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
-          >
-            Tickets du jour
-          </button>
-          <button
-            type="button"
-            onClick={() => setCloseDrawerOpen(true)}
-            className="min-h-touch rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
-          >
-            Clôturer la caisse
-          </button>
-          {/* Correctif persona vendeuse : la navigation vers /admin avait
-              disparu de l'en-tête caisse depuis PR1 — /admin, lui, propose
-              déjà un lien « Caisse » (AppShell). PR6 : « Accueil » rejoint
-              « Administration », `/` étant devenu le tableau de bord. */}
-          <Link
-            href="/"
-            className="min-h-touch inline-flex items-center rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
-          >
-            Accueil
-          </Link>
-          <Link
-            href="/admin"
-            className="min-h-touch inline-flex items-center rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt"
-          >
-            Administration
-          </Link>
-        </header>
+        {/* Barre haute — PR7 (I2) : sombre, avec un groupe « Sortie »
+            explicite (accueil, administration, déconnexion). Extraite dans
+            components/pos/PosTopBar.tsx. */}
+        <PosTopBar
+          drawerOpen={!!drawerState?.open}
+          openedAt={drawerState?.drawer?.opened_at ?? null}
+          salesCount={today?.sales_count ?? null}
+          salesTotal={today?.sales_total ?? null}
+          drawerEnabled={!!hardware?.drawer_enabled}
+          drawerKicking={drawerKicking}
+          onKickDrawer={() => void handleKickDrawer()}
+          onCashMovement={handleCashMovement}
+          onOpenTickets={() => setTicketsOpen(true)}
+          onCloseDrawer={() => setCloseDrawerOpen(true)}
+        />
 
         {banner && (
           <div role="alert" className="flex-shrink-0 bg-fc-danger-soft border-b border-fc-danger/30 px-4 py-2 flex items-center gap-3">

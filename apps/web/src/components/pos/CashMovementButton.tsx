@@ -26,6 +26,11 @@ const REASONS_IN: { id: CashMovementReason; label: string }[] = [
 
 interface Props {
   disabled?: boolean;
+  /** Habillage du déclencheur — la barre haute de la caisse est sombre
+   * depuis PR7 (I2) et le menu « ⋯ » affiche l'action en pleine largeur. */
+  className?: string;
+  /** Libellé du déclencheur — raccourci sur tablette 1024 px (PR7, I2). */
+  label?: React.ReactNode;
   onSubmit: (payload: {
     direction: CashMovementDirection;
     amount: number;
@@ -38,7 +43,7 @@ interface Props {
  * Bouton « Mouvement de caisse » — entrée/sortie d'espèces en cours de
  * journée (dépôt banque, paiement fournisseur, réappro. fond de caisse…).
  */
-export default function CashMovementButton({ disabled, onSubmit }: Props) {
+export default function CashMovementButton({ disabled, className, label, onSubmit }: Props) {
   const [open, setOpen] = useState(false);
   const [direction, setDirection] = useState<CashMovementDirection>("out");
   const [amount, setAmount] = useState<number>(0);
@@ -77,9 +82,12 @@ export default function CashMovementButton({ disabled, onSubmit }: Props) {
         disabled={disabled}
         onClick={() => setOpen(true)}
         title={disabled ? "Ouvre la caisse pour saisir un mouvement." : undefined}
-        className="min-h-touch rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt disabled:opacity-50"
+        className={
+          className ??
+          "min-h-touch rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt disabled:opacity-50"
+        }
       >
-        Mouvement de caisse
+        {label ?? "Mouvement de caisse"}
       </button>
 
       <Modal
