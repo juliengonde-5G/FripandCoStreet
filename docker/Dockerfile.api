@@ -37,6 +37,11 @@ ARG FRIPCO_BUILD_SHA=unknown
 ARG FRIPCO_BUILD_DATE=unknown
 ENV FRIPCO_BUILD_SHA=$FRIPCO_BUILD_SHA \
     FRIPCO_BUILD_DATE=$FRIPCO_BUILD_DATE
+# uvicorn ajoute lui-même le cwd à sys.path pour résoudre "app.main:app" ;
+# un script lancé directement (scripts/create_manager.py) n'en bénéficie
+# pas — python n'ajoute que le dossier du script (/app/scripts) à
+# sys.path. PYTHONPATH=/app rend les deux invocations équivalentes.
+ENV PYTHONPATH=/app
 
 USER app
 
