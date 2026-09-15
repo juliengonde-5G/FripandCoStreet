@@ -68,6 +68,17 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
         "account_rounding_expense": "658000",
         "account_rounding_income": "758000",
     },
+    # PR5 (G3, docs/ARCHITECTURE_PR5.md §1) — sauvegarde applicative de la
+    # base : retention en jours, activation du cron nocturne 03:00, e-mail
+    # d'alerte (vide -> repli sur `shop.email`, voir
+    # `app/jobs.py::run_nightly_database_backup`). Aucun secret ici — le
+    # dossier des dumps (`BACKUP_DIR`) est une variable d'environnement
+    # (app/core/config.py), pas un reglage boutique.
+    "backup": {
+        "retention_days": 60,
+        "nightly_enabled": True,
+        "alert_email": "",
+    },
 }
 
 

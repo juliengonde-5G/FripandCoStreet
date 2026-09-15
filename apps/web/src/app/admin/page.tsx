@@ -8,6 +8,7 @@
 import React, { useEffect, useState } from "react";
 
 import AccountingTab from "@/components/admin/AccountingTab";
+import BackupsTab from "@/components/admin/BackupsTab";
 import FiscalArchivesTab from "@/components/admin/FiscalArchivesTab";
 import AppShell from "@/components/layout/AppShell";
 import Button from "@/components/ui/Button";
@@ -39,7 +40,7 @@ import {
 import { findPairedUsbDevice, getStoredPrinter, isWebUsbSupported, pairUsbPrinter, sendBytes } from "@/lib/webusb-printer";
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<"settings" | "hardware" | "clients" | "accounting" | "fiscal">("settings");
+  const [tab, setTab] = useState<"settings" | "hardware" | "clients" | "accounting" | "fiscal" | "backups">("settings");
 
   return (
     <AppShell>
@@ -60,6 +61,9 @@ export default function AdminPage() {
           </TabButton>
           <TabButton active={tab === "fiscal"} onClick={() => setTab("fiscal")}>
             Archives fiscales
+          </TabButton>
+          <TabButton active={tab === "backups"} onClick={() => setTab("backups")}>
+            Sauvegardes
           </TabButton>
         </div>
       </div>
@@ -88,6 +92,8 @@ export default function AdminPage() {
       {tab === "accounting" && <AccountingTab />}
 
       {tab === "fiscal" && <FiscalArchivesTab />}
+
+      {tab === "backups" && <BackupsTab />}
     </AppShell>
   );
 }
@@ -985,6 +991,7 @@ const EVENT_LABELS: Record<string, string> = {
   "config.changed": "Paramètres modifiés",
   "system.job_failed": "Tâche automatique en échec",
   "fiscal.integrity_checked": "Contrôle d'intégrité exécuté",
+  "backup.deleted": "Sauvegarde de la base supprimée",
 };
 
 function describeEvent(type: string): string {

@@ -29,12 +29,15 @@ from app.models.jet import JournalEvent
 from app.models.pos import ZReport
 from app.models.user import User
 from app.services import brevo_contacts, email_gateway
+from app.models.database_backup import BackupStatus, DatabaseBackup
+from app.services import database_backup as database_backup_service
 from app.services.accounting_service import AccountingService
 from app.services.client_service import ClientService
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.fiscal_closure import FiscalClosureService
 from app.services.fiscal_export import FiscalExportService
 from app.services.jet import (
+    EVENT_BACKUP_DELETED,
     EVENT_EXPORT_DOWNLOADED,
     EVENT_FISCAL_INTEGRITY_CHECKED,
     JournalService,
@@ -235,12 +238,30 @@ class AccountingSettingsIn(BaseModel):
         return value
 
 
+# PR5 (G3, docs/ARCHITECTURE_PR5.md §1) — reglages de la sauvegarde
+# applicative de la base. Aucun secret (le dossier des dumps est une
+# variable d'environnement, `BACKUP_DIR`, pas un reglage boutique).
+class BackupSettingsIn(BaseModel):
+    retention_days: int = Field(default=60, ge=7, le=3650)
+    nightly_enabled: bool = True
+    alert_email: str = ""
+
+    @field_validator("alert_email")
+    @classmethod
+    def _validate_alert_email(cls, value: str) -> str:
+        value = (value or "").strip()
+        if value and "@" not in value:
+            raise ValueError("Adresse e-mail d'alerte invalide")
+        return value
+
+
 _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "shop": ShopSettingsIn,
     "fiscal": FiscalSettingsIn,
     "receipt": ReceiptSettingsIn,
     "hardware": HardwareSettingsIn,
     "accounting": AccountingSettingsIn,
+    "backup": BackupSettingsIn,
 }
 
 
@@ -739,6 +760,137 @@ async def fiscal_export(
     )
     await db.commit()
     return Response(content=body, media_type=media_type, headers={"X-Export-SHA256": sha})
+
+
+# ---------------------------------------------------------------------------
+# Sauvegardes applicatives de la base (PR5, docs/ARCHITECTURE_PR5.md §1, G5)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/database/state")
+async def get_database_state(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    return await database_backup_service.database_state(db)
+
+
+@router.get("/database/config")
+async def get_backup_config(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    return await SettingsService(db).get("backup")
+
+
+@router.put("/database/config")
+async def put_backup_config(
+    body: dict,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    try:
+        validated = BackupSettingsIn(**body)
+    except Exception as exc:  # noqa: BLE001 — erreurs Pydantic -> 422 lisible
+        raise PosServiceError(
+            f"Paramètres invalides : {exc}", code="invalid_setting", status_code=422
+        )
+    # Meme mecanisme que /admin/settings/{key} (JET `config.changed`, diff
+    # avant/apres) — routes dediees pour coller au contrat G5, meme cle
+    # `backup` en base.
+    row = await SettingsService(db).set("backup", validated.model_dump(), user_id=user.id)
+    await db.commit()
+    return row.value
+
+
+@router.get("/database/backups")
+async def list_database_backups(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    rows = await database_backup_service.list_backups(db, limit=limit)
+    return {"backups": [database_backup_service.serialize_backup(b) for b in rows]}
+
+
+@router.post("/database/backups/run", status_code=201)
+async def run_database_backup_now(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Declenchement manuel (G5) — 409 `backup_running` si une sauvegarde
+    (nocturne ou manuelle) tourne deja ; 502 `backup_failed` si `pg_dump`
+    echoue (la ligne `failed` reste neanmoins consultable via `GET /backups`,
+    `run_backup` l'a deja committee avant de lever)."""
+    try:
+        backup = await database_backup_service.run_backup(db, trigger="manual", user_id=user.id)
+    except database_backup_service.BackupBusyError as exc:
+        raise PosServiceError(str(exc), code="backup_running", status_code=409)
+    except database_backup_service.BackupError as exc:
+        raise PosServiceError(str(exc), code="backup_failed", status_code=502)
+    return database_backup_service.serialize_backup(backup)
+
+
+@router.get("/database/backups/{backup_id}/download")
+async def download_database_backup(
+    backup_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    backup = await database_backup_service.get_backup(db, backup_id)
+    if backup is None:
+        raise PosServiceError("Sauvegarde introuvable.", code="not_found", status_code=404)
+    if backup.status != BackupStatus.success:
+        raise PosServiceError(
+            "Cette sauvegarde n'est pas disponible au téléchargement.",
+            code="not_found",
+            status_code=404,
+        )
+    path = database_backup_service.backup_dir() / backup.filename
+    if not path.exists():
+        raise PosServiceError(
+            "Fichier de sauvegarde absent du disque.", code="not_found", status_code=404
+        )
+    content = path.read_bytes()
+    await _record_export_downloaded(
+        db, user.id, kind="database_backup", sha256=backup.sha256 or "", rows=0,
+    )
+    await db.commit()
+    return Response(
+        content=content,
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{backup.filename}"',
+            "X-Backup-SHA256": backup.sha256 or "",
+        },
+    )
+
+
+@router.delete("/database/backups/{backup_id}")
+async def delete_database_backup(
+    backup_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    backup = (
+        await db.execute(select(DatabaseBackup).where(DatabaseBackup.id == backup_id))
+    ).scalar_one_or_none()
+    if backup is None:
+        raise PosServiceError("Sauvegarde introuvable.", code="not_found", status_code=404)
+    path = database_backup_service.backup_dir() / backup.filename
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+    await JournalService(db).record(
+        EVENT_BACKUP_DELETED,
+        user_id=user.id,
+        payload={"backup_id": str(backup.id), "filename": backup.filename},
+    )
+    await db.delete(backup)
+    await db.commit()
+    return {"deleted": True, "id": str(backup_id)}
 
 
 # ---------------------------------------------------------------------------

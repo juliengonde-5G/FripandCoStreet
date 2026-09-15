@@ -58,6 +58,9 @@ services:
       # Ce fichier est réservé à la production : on force le mode pour qu'un
       # .env incomplet ne puisse jamais démarrer l'API avec des replis de dev.
       ENVIRONMENT: production
+      # Sauvegardes applicatives (PR5) — sous le volume `fripco_data` monté
+      # ci-dessous (persiste les redéploiements), jamais dans l'image.
+      BACKUP_DIR: /app/data/backups
     volumes:
       - fripco_data:/app/data
     depends_on:

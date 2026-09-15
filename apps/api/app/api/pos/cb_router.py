@@ -23,6 +23,7 @@ from app.models.payment_attempt import PaymentAttempt, PaymentAttemptStatus
 from app.models.user import User
 from app.services.fiscal import PosServiceError
 from app.services.jet import JournalService
+from app.services.settings_service import SettingsService
 from app.services.sumup_service import SumUpService, is_test_api_key, redact_sumup_error
 
 router = APIRouter(prefix="/pos/payments/cb", tags=["cb"])
@@ -80,6 +81,16 @@ def _client_ip(request: Request) -> str | None:
 
 def _request_id(request: Request) -> str | None:
     return getattr(request.state, "request_id", None)
+
+
+async def _cb_description(db: AsyncSession) -> str:
+    """Libellé envoyé au TPE (PR5, G7, docs/ARCHITECTURE_PR5.md §1) — dérivé
+    du nom de boutique courant (`SettingsService.get("shop")`), lu à chaque
+    appel (pas de cache : un manager qui renomme la boutique doit voir l'
+    effet dès la prochaine vente). Repli si le nom est vide."""
+    shop = await SettingsService(db).get("shop")
+    name = (shop.get("name") or "").strip() if isinstance(shop, dict) else ""
+    return f"Vente {name}" if name else "Vente Frip & Co Street"
 
 
 async def _find_pending_or_terminal(db: AsyncSession, client_uuid: uuid.UUID) -> PaymentAttempt | None:
@@ -201,8 +212,9 @@ async def initiate_cb_payment(
         )
 
     client_transaction_id = str(body.client_uuid)
+    description = await _cb_description(db)
     result = await svc._push_to_reader(  # noqa: SLF001 — service interne, même paquet
-        amount=body.amount, client_transaction_id=client_transaction_id
+        amount=body.amount, client_transaction_id=client_transaction_id, description=description
     )
     failed = str(result.get("status", "")).upper() == "FAILED"
 
@@ -428,8 +440,11 @@ async def retry_cb_payment(
 
     new_count = attempt.attempt_count + 1
     new_client_transaction_id = f"{attempt.client_uuid}:r{new_count}"
+    description = await _cb_description(db)
     result = await svc._push_to_reader(  # noqa: SLF001
-        amount=attempt.amount, client_transaction_id=new_client_transaction_id
+        amount=attempt.amount,
+        client_transaction_id=new_client_transaction_id,
+        description=description,
     )
     failed = str(result.get("status", "")).upper() == "FAILED"
 

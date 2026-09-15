@@ -39,6 +39,8 @@ import type {
   ConsentUpdateRequest,
   CreateFiscalClosureRequest,
   CreateTransactionRequest,
+  DatabaseBackup,
+  DatabaseBackupConfig,
   DrawerCurrentResponse,
   DrawerKickResponse,
   ExportableTable,
@@ -124,6 +126,53 @@ let drawerHistory: DrawerHistoryEntry[] = [];
 let accountingExports: AccountingExportDetail[] = [];
 let fiscalClosures: FiscalClosure[] = [];
 let closureSeq = 0;
+
+// --- PR5 : sauvegardes de la base -----------------------------------------
+
+/** Deux sauvegardes de démo (une réussie, une échouée) — une nuit
+ * "normale" et un échec plausible (`pg_dump` absent de l'image), pour que
+ * l'écran Sauvegardes ne soit jamais vide en mode démo. Reconstituées par
+ * `seedDatabaseBackups()` à chaque `reset()`, comme les autres jeux de
+ * données transactionnels (fiscalClosures, clients…). */
+function seedDatabaseBackups(): DatabaseBackup[] {
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  yesterday.setHours(3, 0, 0, 0);
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  twoDaysAgo.setHours(3, 0, 0, 0);
+  return [
+    {
+      id: uuid(),
+      created_at: yesterday.toISOString(),
+      finished_at: new Date(yesterday.getTime() + 4200).toISOString(),
+      trigger: "nightly",
+      status: "success",
+      filename: `fripco_${yesterday.toISOString().slice(0, 10).replaceAll("-", "")}_030000.sql.gz`,
+      size_bytes: 2_684_354,
+      sha256: pseudoHash("backup-demo-success"),
+      duration_ms: 4200,
+      error: null,
+      triggered_by_user_id: null,
+    },
+    {
+      id: uuid(),
+      created_at: twoDaysAgo.toISOString(),
+      finished_at: new Date(twoDaysAgo.getTime() + 380).toISOString(),
+      trigger: "manual",
+      status: "failed",
+      filename: `fripco_${twoDaysAgo.toISOString().slice(0, 10).replaceAll("-", "")}_030000.sql.gz`,
+      size_bytes: null,
+      sha256: null,
+      duration_ms: 380,
+      error: "pg_dump introuvable — installez postgresql-client (voir docker/Dockerfile.api).",
+      triggered_by_user_id: null,
+    },
+  ];
+}
+
+let databaseBackups: DatabaseBackup[] = seedDatabaseBackups();
+
+const DEFAULT_BACKUP_CONFIG: DatabaseBackupConfig = { retention_days: 60, nightly_enabled: true, alert_email: "" };
+let backupConfig: DatabaseBackupConfig = { ...DEFAULT_BACKUP_CONFIG };
 
 // --- PR3 : clients, consentements, envois de ticket -----------------------
 let clients: Client[] = [];
@@ -229,6 +278,10 @@ function reset(): void {
   accountingExports = [];
   fiscalClosures = [];
   closureSeq = 0;
+  databaseBackups = seedDatabaseBackups();
+  // `backupConfig` n'est pas remis à zéro, comme `settings` — un réglage
+  // édité par la personne reste après un reset (état applicatif, pas une
+  // donnée transactionnelle du jeu de démo).
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,6 +1120,97 @@ export async function mockFetchAPI<T = unknown>(
       logJet("config.changed", { key, diff: body });
       return settings[key] as unknown as T;
     }
+  }
+
+  // --- PR5 : sauvegardes de la base ---------------------------------------
+
+  if (path === "/api/admin/database/state" && method === "GET") {
+    const tables = [
+      { name: "transactions", rows_estimate: transactions.length },
+      { name: "transaction_items", rows_estimate: transactions.reduce((s, t) => s + t.items.length, 0) },
+      { name: "payments", rows_estimate: transactions.reduce((s, t) => s + t.payments.length, 0) },
+      { name: "z_reports", rows_estimate: zReports.length },
+      { name: "cash_movements", rows_estimate: cashMovements.length },
+      { name: "cash_drawers", rows_estimate: drawerHistory.length },
+      { name: "journal_events", rows_estimate: jetEvents.length },
+      { name: "clients", rows_estimate: clients.length },
+      { name: "consents", rows_estimate: consents.length },
+      { name: "communications", rows_estimate: communications.length },
+      { name: "fiscal_closures", rows_estimate: fiscalClosures.length },
+      { name: "accounting_exports", rows_estimate: accountingExports.length },
+      { name: "database_backups", rows_estimate: databaseBackups.length },
+      { name: "users", rows_estimate: 1 },
+    ];
+    const lastBackup = databaseBackups[0] ?? null;
+    const response = {
+      engine_version: "PostgreSQL 16.4 (démo)",
+      // Approximation plausible pour la démo — pas une vraie mesure disque.
+      database_size_bytes: 41_943_040 + tables.reduce((s, t) => s + t.rows_estimate, 0) * 2_048,
+      tables,
+      last_backup: lastBackup,
+      backup_dir_free_bytes: 53_687_091_200,
+    };
+    return response as unknown as T;
+  }
+
+  if (path === "/api/admin/database/config" && method === "GET") {
+    return backupConfig as unknown as T;
+  }
+
+  if (path === "/api/admin/database/config" && method === "PUT") {
+    const body = parseBody<Partial<DatabaseBackupConfig>>(options);
+    const retention = Number(body.retention_days);
+    if (!Number.isInteger(retention) || retention < 7 || retention > 3650) {
+      fail(422, "Paramètres invalides : la rétention doit être comprise entre 7 et 3650 jours.", "invalid_setting");
+    }
+    const alertEmail = (body.alert_email ?? "").trim();
+    if (alertEmail && !alertEmail.includes("@")) {
+      fail(422, "Paramètres invalides : adresse e-mail d'alerte invalide.", "invalid_setting");
+    }
+    backupConfig = {
+      retention_days: retention,
+      nightly_enabled: !!body.nightly_enabled,
+      alert_email: alertEmail,
+    };
+    logJet("config.changed", { key: "backup", diff: body });
+    return backupConfig as unknown as T;
+  }
+
+  if (path === "/api/admin/database/backups" && method === "GET") {
+    const limit = query.get("limit") ? parseInt(query.get("limit")!, 10) : 50;
+    return { backups: databaseBackups.slice(0, limit) } as unknown as T;
+  }
+
+  if (path === "/api/admin/database/backups/run" && method === "POST") {
+    // Toujours réussie en mode démo (pas de vrai `pg_dump`) — l'échec est
+    // représenté par la sauvegarde de démo pré-semée, pas par ce bouton.
+    const now = nowIso();
+    const backup: DatabaseBackup = {
+      id: uuid(),
+      created_at: now,
+      finished_at: now,
+      trigger: "manual",
+      status: "success",
+      filename: `fripco_${now.slice(0, 10).replaceAll("-", "")}_${now.slice(11, 19).replaceAll(":", "")}.sql.gz`,
+      size_bytes: 2_500_000 + Math.round(Math.random() * 500_000),
+      sha256: pseudoHash(`backup:${now}`),
+      duration_ms: 900 + Math.round(Math.random() * 600),
+      error: null,
+      triggered_by_user_id: null,
+    };
+    // Pas d'événement JET ici (G1/G5) : contrairement à `backup.deleted`,
+    // la création d'une sauvegarde n'émet aucune ligne dans le journal des
+    // événements côté backend réel — seule la ligne `DatabaseBackup` compte.
+    databaseBackups.unshift(backup);
+    return backup as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/database\/backups\/([^/]+)$/)) && method === "DELETE") {
+    const backup = databaseBackups.find((b) => b.id === m![1]);
+    if (!backup) fail(404, "Sauvegarde introuvable.", "not_found");
+    databaseBackups = databaseBackups.filter((b) => b.id !== m![1]);
+    logJet("backup.deleted", { backup_id: backup!.id, filename: backup!.filename });
+    return { deleted: true, id: m![1] } as unknown as T;
   }
 
   // --- Matériel — imprimante ticket + tiroir-caisse (PR3b) ----------------
@@ -1917,6 +2061,22 @@ export async function mockFetchBytesWithHeaders(endpoint: string, options?: Fetc
       "content-disposition": `attachment; filename="cloture_${closure!.sequence_number}.json.gz"`,
       "x-archive-sha256": closure!.archive_sha256,
       "x-closure-hash": closure!.hash,
+    });
+  }
+
+  if ((m = path.match(/^\/api\/admin\/database\/backups\/([^/]+)\/download$/)) && method === "GET") {
+    const backup = databaseBackups.find((b) => b.id === m![1]);
+    if (!backup) fail(404, "Sauvegarde introuvable.", "not_found");
+    if (backup!.status !== "success") fail(404, "Cette sauvegarde n'est pas disponible au téléchargement.", "not_found");
+    // Octets gzip factices (jamais un vrai dump) : contenu déterministe,
+    // suffisant pour déclencher un vrai téléchargement en mode démo — voir
+    // le rapport de livraison pour l'écart assumé (identique au traitement
+    // de l'archive fiscale ci-dessus).
+    const content = `SAUVEGARDE DE DÉMONSTRATION (pas un vrai .sql.gz)\nFichier ${backup!.filename}\nCréée le ${backup!.created_at}\nEmpreinte ${backup!.sha256}\n`;
+    logJet("export.downloaded", { kind: "database_backup", sha256: backup!.sha256 });
+    return asResult(content, "application/gzip", {
+      "content-disposition": `attachment; filename="${backup!.filename}"`,
+      "x-backup-sha256": backup!.sha256 ?? "",
     });
   }
 

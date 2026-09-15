@@ -581,3 +581,56 @@ export interface CreateFiscalClosureRequest {
 export type ClosuresIntegrityResponse = FiscalIntegrityCheck;
 
 export type FiscalExportFormat = "json" | "xml";
+
+// ---------------------------------------------------------------------------
+// PR5 — Sauvegardes de la base (docs/ARCHITECTURE_PR5.md §1, G5/G6). Table
+// d'exploitation (pas fiscale) : jamais le mot « dump » côté UI, on dit
+// « sauvegarde » et « empreinte ».
+// ---------------------------------------------------------------------------
+
+export type BackupTrigger = "nightly" | "manual";
+export type BackupStatus = "success" | "failed" | "missing";
+
+/** Une ligne `database_backups` (`BackupOut` côté contrat G5). */
+export interface DatabaseBackup {
+  id: string;
+  created_at: string;
+  finished_at: string | null;
+  trigger: BackupTrigger;
+  status: BackupStatus;
+  filename: string;
+  size_bytes: number | null;
+  sha256: string | null;
+  duration_ms: number | null;
+  error: string | null;
+  triggered_by_user_id: string | null;
+}
+
+export interface DatabaseBackupListResponse {
+  backups: DatabaseBackup[];
+}
+
+/** Une ligne de `GET /admin/database/state` — volumes par table
+ * (`pg_stat_user_tables.n_live_tup`, jamais un `COUNT(*)`). */
+export interface DatabaseTableStat {
+  name: string;
+  rows_estimate: number;
+}
+
+/** `GET /admin/database/state`. */
+export interface DatabaseState {
+  engine_version: string | null;
+  database_size_bytes: number | null;
+  tables: DatabaseTableStat[];
+  last_backup: DatabaseBackup | null;
+  backup_dir_free_bytes: number | null;
+}
+
+/** `GET/PUT /admin/database/config` — réglages de la sauvegarde nocturne
+ * (bornes `retention_days` : 7 à 3650 jours, cf. `BackupSettingsIn`
+ * côté backend). `PUT` attend toujours les 3 champs (remplacement complet). */
+export interface DatabaseBackupConfig {
+  retention_days: number;
+  nightly_enabled: boolean;
+  alert_email: string;
+}

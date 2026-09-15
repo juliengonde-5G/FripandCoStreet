@@ -466,6 +466,12 @@ montants de caisse, les mouvements, les cumuls perpétuels, le hash et le
 écran **Archives fiscales**) est écrit, raccordé de bout en bout et
 utilisable par un manager sans intervention technique.
 
+*Pour mémoire* (PR5, `apps/api/app/services/database_backup.py`, migration
+`0006`) : la sauvegarde applicative nocturne de la base (dump complet,
+écran **Sauvegardes**) est une **mesure d'exploitation** — restauration en
+cas d'incident technique — **distincte de l'archive fiscale signée**
+ci-dessus, qui seule fait foi au sens de l'auto-attestation.
+
 **Test opérationnel complet.** Le 15/09/2026, l'exploitant a rejoué
 manuellement, de bout en bout et sur environnement réel, le jeu d'essai de
 référence (`docs/JEU_ESSAI_PR2.md`, prolongé du scénario d'exports PR4) :

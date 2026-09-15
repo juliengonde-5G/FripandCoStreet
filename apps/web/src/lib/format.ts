@@ -113,6 +113,57 @@ export function formatDateTime(value: string | Date | null | undefined): string 
 }
 
 /**
+ * Formate une taille en octets en unité lisible (PR5, écran Sauvegardes) :
+ *
+ *   formatBytes(1536)       → "1,5 Ko"
+ *   formatBytes(52_428_800) → "50,0 Mo"
+ *
+ * Base 1024, unités françaises (o/Ko/Mo/Go/To). `null`/`undefined`/`NaN`
+ * → "—", comme les autres formateurs de ce module.
+ */
+export function formatBytes(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value) || value < 0) {
+    return "—";
+  }
+  const units = ["o", "Ko", "Mo", "Go", "To"];
+  let v = value;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  const decimals = i === 0 ? 0 : 1;
+  return `${v.toFixed(decimals).replace(".", ",")}${NBSP}${units[i]}`;
+}
+
+/**
+ * Formate une date ISO en durée relative courte, française (PR5, écran
+ * Sauvegardes — « dernière sauvegarde : il y a 3 h ») :
+ *
+ *   formatRelativeTime(nowIso)              → "à l'instant"
+ *   formatRelativeTime(fiveMinutesAgo)      → "il y a 5 min"
+ *   formatRelativeTime(threeDaysAgo)        → "il y a 3 j"
+ *
+ * Au-delà de 30 jours, retombe sur `formatDate` (date absolue courte) —
+ * une durée relative en mois/années serait moins lisible qu'une date.
+ * `null`/`undefined`/invalide → "—".
+ */
+export function formatRelativeTime(value: string | Date | null | undefined): string {
+  if (!value) return "—";
+  const d = typeof value === "string" ? new Date(value) : value;
+  if (Number.isNaN(d.getTime())) return "—";
+  const diffSec = Math.round((Date.now() - d.getTime()) / 1000);
+  if (diffSec < 60) return "à l'instant";
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `il y a ${diffMin} min`;
+  const diffHour = Math.round(diffMin / 60);
+  if (diffHour < 24) return `il y a ${diffHour} h`;
+  const diffDay = Math.round(diffHour / 24);
+  if (diffDay < 30) return `il y a ${diffDay} j`;
+  return formatDate(value);
+}
+
+/**
  * Validation simple d'un e-mail, pour activer/désactiver un bouton d'envoi
  * côté front (PR3). La validation qui fait foi reste côté API (422 si
  * invalide) — celle-ci n'a qu'un rôle d'ergonomie de saisie.

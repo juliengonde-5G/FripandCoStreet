@@ -10,5 +10,5 @@ async def test_health_ok(client):
     assert body["app"] == "fripco-street-api"
     assert "version" in body
     assert body["environment"] == "test"
-    # PR4 (0005_accounting_closures) — cf. app/version.py::EXPECTED_DB_REVISION.
-    assert body["expected_db_revision"] == "0005"
+    # PR5 (0006_database_backups) — cf. app/version.py::EXPECTED_DB_REVISION.
+    assert body["expected_db_revision"] == "0006"

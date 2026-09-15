@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
 
+    # Sauvegarde applicative de la base (PR5, docs/ARCHITECTURE_PR5.md §1
+    # G1/G3) — dossier des dumps `pg_dump | gzip`, sous le volume `fripco_data`
+    # en production (docker/docker-compose.prod.yml). Reglages de retention/
+    # alerte/activation du cron : cle `backup` de `app_settings`
+    # (app/services/settings_service.py), pas ici (pas un secret).
+    BACKUP_DIR: str = "data/backups"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [s.strip() for s in self.CORS_ORIGINS.split(",") if s.strip()]

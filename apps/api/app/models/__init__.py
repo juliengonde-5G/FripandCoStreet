@@ -27,6 +27,7 @@ from app.models.communication import (
     CommunicationProvider,
     CommunicationStatus,
 )
+from app.models.database_backup import BackupStatus, BackupTrigger, DatabaseBackup
 
 __all__ = [
     "Base",
@@ -56,4 +57,7 @@ __all__ = [
     "CommunicationKind",
     "CommunicationProvider",
     "CommunicationStatus",
+    "DatabaseBackup",
+    "BackupTrigger",
+    "BackupStatus",
 ]

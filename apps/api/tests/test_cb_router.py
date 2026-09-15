@@ -489,3 +489,104 @@ async def test_retry_not_retryable_when_pending(client, auth_headers, monkeypatc
     resp = await client.post(f"/api/pos/payments/cb/{checkout_id}/retry", headers=auth_headers)
     assert resp.status_code == 409
     assert resp.json()["code"] == "not_retryable"
+
+
+# ---------------------------------------------------------------------------
+# Libellé SumUp dérivé du nom de boutique (PR5, G7, docs/ARCHITECTURE_PR5.md §1)
+# ---------------------------------------------------------------------------
+
+
+def _capturing_push_handler(captured: dict):
+    """Comme `_online_reader_handler`, mais capture le `description` du
+    payload poussé sur `/checkout` (corps JSON complet exposé par httpx)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/status") and "/readers/" in path:
+            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
+        if path.endswith("/checkout"):
+            import json as _json
+
+            captured["description"] = _json.loads(request.content)["description"]
+            return httpx.Response(202, json={"data": {}})
+        if "/readers/" in path:
+            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
+        return httpx.Response(404, json={})
+
+    return handler
+
+
+async def test_initiate_uses_shop_name_in_sumup_description(client, auth_headers, monkeypatch):
+    put_resp = await client.put(
+        "/api/admin/settings/shop",
+        json={"name": "Frip & Co Street — Rouen Centre"},
+        headers=auth_headers,
+    )
+    assert put_resp.status_code == 200, put_resp.text
+
+    captured: dict = {}
+    _configure_sumup(monkeypatch, _capturing_push_handler(captured))
+    resp = await client.post(
+        "/api/pos/payments/cb/initiate",
+        json={"amount": "5.00", "client_uuid": str(uuid.uuid4())},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert captured["description"] == "Vente Frip & Co Street — Rouen Centre"
+
+
+async def test_initiate_falls_back_to_default_description_when_shop_name_blank(
+    client, auth_headers, monkeypatch
+):
+    put_resp = await client.put(
+        "/api/admin/settings/shop", json={"name": ""}, headers=auth_headers
+    )
+    assert put_resp.status_code == 200, put_resp.text
+
+    captured: dict = {}
+    _configure_sumup(monkeypatch, _capturing_push_handler(captured))
+    resp = await client.post(
+        "/api/pos/payments/cb/initiate",
+        json={"amount": "5.00", "client_uuid": str(uuid.uuid4())},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert captured["description"] == "Vente Frip & Co Street"
+
+
+async def test_retry_uses_shop_name_in_sumup_description(client, auth_headers, monkeypatch):
+    state = {"fail_push": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/status") and "/readers/" in path:
+            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
+        if path.endswith("/checkout"):
+            if state["fail_push"]:
+                return httpx.Response(422, json={"error_code": "READER_BUSY"})
+            import json as _json
+
+            state["description"] = _json.loads(request.content)["description"]
+            return httpx.Response(202, json={"data": {}})
+        if "/readers/" in path:
+            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
+        return httpx.Response(404, json={})
+
+    put_resp = await client.put(
+        "/api/admin/settings/shop", json={"name": "Frip & Co Street — Pop-up"}, headers=auth_headers
+    )
+    assert put_resp.status_code == 200, put_resp.text
+
+    _configure_sumup(monkeypatch, handler)
+    client_uuid = str(uuid.uuid4())
+    init = await client.post(
+        "/api/pos/payments/cb/initiate",
+        json={"amount": "6.00", "client_uuid": client_uuid},
+        headers=auth_headers,
+    )
+    assert init.status_code == 409  # premier push refusé (READER_BUSY)
+
+    state["fail_push"] = False
+    retry = await client.post(f"/api/pos/payments/cb/{client_uuid}/retry", headers=auth_headers)
+    assert retry.status_code == 200, retry.text
+    assert state["description"] == "Vente Frip & Co Street — Pop-up"

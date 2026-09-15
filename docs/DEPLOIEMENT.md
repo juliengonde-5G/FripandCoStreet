@@ -178,16 +178,41 @@ attendue par le code (`app/version.py`).
 
 ## 5. Sauvegarde
 
+**Voie principale (PR5) : sauvegarde applicative planifiée**, gérée par
+l'API elle-même — aucune crontab hôte à poser. Cron interne (APScheduler,
+`app/jobs.py::run_nightly_database_backup`) à **03:00 Europe/Paris**
+(aucun chevauchement avec les clôtures fiscales 00:15/00:30/23:59) : dump
+`pg_dump | gzip` en sous-processus asynchrone, vérifié (relecture gzip
+complète + présence de `CREATE TABLE public.journal_events`), empreinte
+SHA-256, écrit dans `BACKUP_DIR` (`/app/data/backups`, sous le volume
+`fripco_data` — persiste les redéploiements). Une ligne est journalisée
+dans tous les cas (succès ou échec) ; un échec écrit aussi le JET
+`system.job_failed` et alerte par e-mail (`backup.alert_email`, repli
+`shop.email`). Écran **Administration → Sauvegardes** : état de la base,
+réglages (rétention 7–3650 jours, activation du cron, e-mail d'alerte),
+liste des sauvegardes (déclenchement manuel, téléchargement, suppression).
+Purge automatique des fichiers et lignes plus vieux que la rétention
+configurée.
+
+**Sauvegarde hôte (`scripts/backup.sh`) : optionnelle, double ceinture.**
+Reste disponible pour une copie indépendante du conteneur API (utile en
+cas d'incident applicatif empêchant le cron interne de tourner) :
+
 ```bash
 crontab -e
 15 3 * * * /opt/fripco-street/scripts/backup.sh >> /var/log/fripco-backup.log 2>&1
 ```
 
 Dump complet gzippé, vérifié (`gunzip -t` + présence de `journal_events`),
-rétention 60 jours. Restauration :
+rétention 60 jours — même format de fichier (`fripco_YYYYMMDD_HHMMSS.sql.gz`)
+que la sauvegarde applicative, pour une restauration identique.
+
+**Restauration (à la main — aucune restauration depuis l'interface,
+hors périmètre PR5)**, que le dump vienne de la voie applicative
+(téléchargé depuis Administration → Sauvegardes) ou de `scripts/backup.sh` :
 
 ```bash
-gunzip -c backups/fripco_YYYYMMDD_HHMMSS.sql.gz | docker exec -i fripco-db psql -U fripco -d fripco
+gunzip -c fripco_YYYYMMDD_HHMMSS.sql.gz | docker exec -i fripco-db psql -U fripco -d fripco
 ```
 
 Une restauration complète doit être **testée une fois avant l'ouverture**
