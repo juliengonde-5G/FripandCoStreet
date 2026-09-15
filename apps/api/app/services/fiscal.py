@@ -793,10 +793,23 @@ class FiscalService:
         )
         self.db.add(drawer)
         await self.db.flush()
-        return await self.generate_z_report(
+        z_report = await self.generate_z_report(
             drawer,
             user_id,
             counted=False,
             is_regularization=True,
             regularization_reason=reason,
         )
+
+        # PR4 (F2, docs/ARCHITECTURE_PR4.md §1/§3) — meme regle que
+        # `pos.py::close_drawer` et `close_open_drawers` ci-dessus : sans
+        # cet appel, un Z de regularisation resterait absent du CSV mensuel
+        # et du FEC (la journee regularisee serait silencieusement
+        # incomplete cote comptabilite, alors que la vente y figure bien
+        # fiscalement). Meme transaction SQL que la creation du Z.
+        from app.services.accounting_service import AccountingService
+
+        await AccountingService(self.db).create_export_for_z(z_report, user_id=user_id)
+        await self.db.flush()
+
+        return z_report

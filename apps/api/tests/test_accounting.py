@@ -5,13 +5,14 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
-from app.core.database import async_session
+from app.core.database import async_session, engine
 from app.models.accounting import AccountingExport, AccountingExportLine
 from app.models.jet import JournalEvent
 from app.models.pos import ZReport
@@ -471,3 +472,109 @@ async def test_verify_export_detects_simulated_divergence(client, auth_headers, 
             )
         ).scalars().all()
     assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# F2/F3 — le Z de regularisation (vente orpheline rattrapee a posteriori,
+# fiscal.py::create_regularization_z) doit lui aussi produire une ecriture
+# comptable, sinon le CSV mensuel/FEC de la journee regularisee est
+# silencieusement incomplet cote comptabilite alors que la vente existe bel
+# et bien fiscalement (docs/ARCHITECTURE_PR4.md §1/§3 F2).
+# ---------------------------------------------------------------------------
+
+
+async def test_regularization_z_creates_balanced_accounting_export(client, auth_headers, manager):
+    """Vente orpheline (aucune session de caisse ne la couvre) rattrapee par
+    une regularisation a posteriori — reproduit une panne d'ouverture de
+    caisse oubliee : la transaction existe en base (INSERT direct, comme
+    l'application ne peut en produire hors caisse ouverte) mais aucun tiroir
+    ne couvre sa periode, ce qui en fait une orpheline au sens de
+    `FiscalService._orphan_transactions`."""
+    period_from = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    period_to = period_from + timedelta(hours=1)
+    tx_created_at = period_from + timedelta(minutes=30)
+
+    # `hash_chain=''` a l'insertion : le trigger `fripco_protect_fiscal_child`
+    # (migration 0002) n'autorise l'ajout de lignes/paiements que tant que la
+    # transaction parente n'est pas encore signee — comme le fait
+    # `PosService.create_transaction` (items/paiements ajoutes AVANT
+    # `FiscalService.sign_transaction`). La signature elle-meme n'est pas
+    # necessaire ici : ni `_orphan_transactions` ni `create_export_for_z` ne
+    # verifient `hash_chain`.
+    tx_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO transactions "
+                "(id, created_at, updated_at, transaction_number, transaction_type, "
+                "user_id, client_uuid, tva_rate, total_ht, total_tva, total_ttc, "
+                "hash_chain, previous_hash, receipt_number) "
+                "VALUES (:id, :created_at, :created_at, 1, 'sale', "
+                ":user_id, :client_uuid, 20.00, 10.00, 2.00, 12.00, "
+                "'', '0', 1)"
+            ),
+            {"id": tx_id, "created_at": tx_created_at, "user_id": manager.id, "client_uuid": uuid.uuid4()},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO payments "
+                "(id, created_at, updated_at, transaction_id, method, amount) "
+                "VALUES (gen_random_uuid(), :created_at, :created_at, :tx_id, 'cash', 12.00)"
+            ),
+            {"created_at": tx_created_at, "tx_id": tx_id},
+        )
+
+    r = await client.post(
+        "/api/pos/z-reports/regularization",
+        json={
+            "period_from": period_from.isoformat(),
+            "period_to": period_to.isoformat(),
+            "reason": "vente oubliée (test)",
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    z = r.json()
+    assert z["is_regularization"] is True
+    assert z["total_ht"] == 10.0
+    assert z["total_tva"] == 2.0
+
+    async with async_session() as db:
+        export = (
+            await db.execute(
+                select(AccountingExport).where(AccountingExport.z_report_id == uuid.UUID(z["id"]))
+            )
+        ).scalar_one_or_none()
+        assert export is not None, "aucune ecriture comptable pour le Z de régularisation"
+        lines = (
+            await db.execute(
+                select(AccountingExportLine)
+                .where(AccountingExportLine.export_id == export.id)
+                .order_by(AccountingExportLine.line_number)
+            )
+        ).scalars().all()
+
+    by_account = {ln.account_number: ln for ln in lines}
+    assert Decimal(str(by_account["531000"].debit)) == Decimal("12.00")  # caisse
+    assert Decimal(str(by_account["707100"].credit)) == Decimal("10.00")  # ventes HT
+    assert Decimal(str(by_account["44571"].credit)) == Decimal("2.00")  # TVA collectée
+    total_debit = sum((Decimal(str(ln.debit)) for ln in lines), Decimal("0"))
+    total_credit = sum((Decimal(str(ln.credit)) for ln in lines), Decimal("0"))
+    assert total_debit == total_credit  # ecriture equilibree
+
+    # JET accounting.export_created ecrit pour ce Z de regularisation.
+    async with async_session() as db:
+        events = (
+            await db.execute(
+                select(JournalEvent).where(JournalEvent.event_type == "accounting.export_created")
+            )
+        ).scalars().all()
+    assert len(events) == 1
+    assert events[0].payload["z_number"] == z["report_number"]
+
+    # Le CSV mensuel du mois régularisé (janvier 2020) contient bien la ligne.
+    async with async_session() as db:
+        csv_text = await AccountingService(db).generate_monthly_csv(2020, 1)
+    assert "Z0001" in csv_text
+    assert "707100" in csv_text
+    assert "10,00" in csv_text
