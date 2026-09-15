@@ -13,6 +13,14 @@ de caisse (billet par billet ou en montant global), saisis-le, puis touche
 **Ouvrir la caisse — [montant]**. Tant que la caisse n'est pas ouverte,
 impossible d'encaisser.
 
+## S'identifier et faire la relève
+Touche **S'identifier** en haut de la caisse, choisis ton prénom et tape ton
+code à quatre chiffres : ton nom s'affiche alors à côté du tiroir. Si la
+boutique l'exige, le code est demandé avant d'ouvrir la caisse et avant
+d'encaisser. Pour passer la main, touche **Relève** : le panier en cours
+reste à l'écran, la suivante s'identifie et termine la vente. Après cinq
+codes faux, l'écran affiche le temps à attendre avant de réessayer.
+
 ## Encaisser une vente (3 gestes)
 1. Tape le prix sur le pavé numérique (le libellé est facultatif) puis
    touche **Ajouter au panier**. Répète pour chaque article du panier.
