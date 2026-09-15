@@ -106,3 +106,90 @@ async def test_put_receipt_settings_free_form(client, auth_headers):
     )
     assert r.status_code == 200
     assert r.json()["footer_note"] == "A bientot !"
+
+
+# ---------------------------------------------------------------------------
+# PR6 (H1, docs/ARCHITECTURE_PR6.md §1) — objectifs de chiffre d'affaires.
+# ---------------------------------------------------------------------------
+
+
+async def test_get_targets_settings_defaults(client, auth_headers):
+    r = await client.get("/api/admin/settings/targets", headers=auth_headers)
+    assert r.status_code == 200
+    assert r.json() == {"daily": "0.00", "monthly": {}}
+
+
+async def test_put_targets_normalizes_amounts_and_journals(client, auth_headers):
+    r = await client.put(
+        "/api/admin/settings/targets",
+        json={"daily": 200, "monthly": {"2026-09": "3000", "default": 2500.5}},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    # Montants normalises en chaines a 2 decimales, comme `fiscal.tva_rate`.
+    assert r.json() == {
+        "daily": "200.00",
+        "monthly": {"2026-09": "3000.00", "default": "2500.50"},
+    }
+
+    r2 = await client.get("/api/admin/settings/targets", headers=auth_headers)
+    assert r2.json()["monthly"]["2026-09"] == "3000.00"
+
+    async with async_session() as db:
+        events = (
+            await db.execute(
+                select(JournalEvent).where(JournalEvent.event_type == "config.changed")
+            )
+        ).scalars().all()
+    assert len(events) == 1
+    assert events[0].payload["key"] == "targets"
+
+
+async def test_put_targets_accepts_empty_monthly(client, auth_headers):
+    r = await client.put(
+        "/api/admin/settings/targets", json={"daily": "0"}, headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"daily": "0.00", "monthly": {}}
+
+
+async def test_put_targets_rejects_negative_daily(client, auth_headers):
+    r = await client.put(
+        "/api/admin/settings/targets",
+        json={"daily": "-10", "monthly": {}},
+        headers=auth_headers,
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "invalid_setting"
+
+
+async def test_put_targets_rejects_negative_monthly(client, auth_headers):
+    r = await client.put(
+        "/api/admin/settings/targets",
+        json={"daily": "0", "monthly": {"2026-09": "-1"}},
+        headers=auth_headers,
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "invalid_setting"
+
+
+@pytest.mark.parametrize("bad_key", ["2026-13", "2026-9", "septembre", "2026", "2026-09-01"])
+async def test_put_targets_rejects_malformed_month_key(client, auth_headers, bad_key):
+    r = await client.put(
+        "/api/admin/settings/targets",
+        json={"daily": "0", "monthly": {bad_key: "100"}},
+        headers=auth_headers,
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "invalid_setting"
+
+
+@pytest.mark.parametrize("bad_amount", ["beaucoup", "NaN", "Infinity"])
+async def test_put_targets_rejects_non_numeric_amount(client, auth_headers, bad_amount):
+    r = await client.put(
+        "/api/admin/settings/targets",
+        json={"daily": bad_amount, "monthly": {}},
+        headers=auth_headers,
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "invalid_setting"

@@ -1,6 +1,6 @@
 """Source unique de verite pour la version deployee de fripco-street."""
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 EXPECTED_DB_REVISION = "0006"
 JET_SIGNATURE_VERSION = 1
 FISCAL_SIGNATURE_VERSION = 3

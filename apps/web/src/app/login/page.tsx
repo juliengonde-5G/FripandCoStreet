@@ -18,7 +18,7 @@ export default function LoginPage() {
 
   // Déjà connecté : direction la caisse.
   useEffect(() => {
-    if (isLoggedIn()) router.replace("/caisse");
+    if (isLoggedIn()) router.replace("/");
   }, [router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -53,7 +53,7 @@ export default function LoginPage() {
 
       const data = await res.json();
       setSession(data.access_token, data.username);
-      router.push("/caisse");
+      router.push("/");
     } catch {
       setError("Erreur de connexion au serveur");
     } finally {

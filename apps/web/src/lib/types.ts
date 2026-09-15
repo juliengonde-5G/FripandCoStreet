@@ -634,3 +634,85 @@ export interface DatabaseBackupConfig {
   nightly_enabled: boolean;
   alert_email: string;
 }
+
+// ---------------------------------------------------------------------------
+// PR6 — tableau de bord d'accueil et objectifs
+// (docs/ARCHITECTURE_PR6.md §1, H1 et H3). Tous les montants transitent en
+// **chaînes décimales à 2 décimales** ("0.00"), comme `fiscal.tva_rate` :
+// jamais de `number` flottant pour de l'argent dans le contrat. Seuls les
+// compteurs (`sales_count`…) et les pourcentages de progression
+// (`progress_pct`, 0–999 à une décimale) sont des nombres.
+// ---------------------------------------------------------------------------
+
+/** `GET/PUT /admin/settings/targets` (H1) — objectifs de chiffre d'affaires
+ * en € TTC nets (ventes − annulations).
+ *
+ * `daily` : objectif par jour ouvert ("0.00" = pas d'objectif).
+ * `monthly` : carte `"YYYY-MM"` → objectif. Un mois absent hérite de
+ * `monthly["default"]` s'il existe, sinon 0. Le `PUT` remplace la carte
+ * complète : toujours relire avant d'écrire pour conserver les autres mois. */
+export interface TargetsSettings {
+  daily: string;
+  monthly: Record<string, string>;
+}
+
+/** Clé spéciale acceptée dans `TargetsSettings.monthly` : objectif de repli
+ * pour tout mois non saisi explicitement. */
+export const TARGETS_DEFAULT_KEY = "default";
+
+/** Bloc « Aujourd'hui » de `GET /api/reports/dashboard`. */
+export interface DashboardToday {
+  /** Jour civil Europe/Paris, `YYYY-MM-DD`. */
+  date: string;
+  sales_count: number;
+  refunds_count: number;
+  /** Net du jour = Σ ventes − Σ annulations. */
+  net: string;
+  /** Net / nombre de ventes non annulées ("0.00" si aucune vente). */
+  average_basket: string;
+  cash: string;
+  card: string;
+  /** Objectif journalier ("0.00" = aucun objectif fixé). */
+  target: string;
+  /** 0 à 999, une décimale. 0 quand `target` vaut "0.00". */
+  progress_pct: number;
+}
+
+/** Meilleur jour du mois. `date` vaut `null` quand le mois n'a aucune vente. */
+export interface DashboardBestDay {
+  date: string | null;
+  net: string;
+}
+
+/** Bloc « Ce mois » de `GET /api/reports/dashboard`. */
+export interface DashboardMonth {
+  /** `YYYY-MM`. */
+  month: string;
+  net: string;
+  sales_count: number;
+  target: string;
+  progress_pct: number;
+  /** Jours du mois écoulés ayant au moins une vente. */
+  days_open: number;
+  /** Jours calendaires restants dans le mois, jour courant inclus. */
+  remaining_days: number;
+  /** max(0, objectif − réalisé) / `remaining_days`. */
+  required_daily: string;
+  best_day: DashboardBestDay;
+}
+
+/** Un point de la série « 7 derniers jours » (J−6 → J, toujours 7 entrées). */
+export interface DashboardDay {
+  date: string;
+  net: string;
+  sales_count: number;
+}
+
+/** `GET /api/reports/dashboard` (H3) — schéma exact, aucune valeur nulle
+ * hormis `month.best_day.date`. */
+export interface DashboardResponse {
+  generated_at: string;
+  today: DashboardToday;
+  month: DashboardMonth;
+  last_7_days: DashboardDay[];
+}

@@ -39,6 +39,8 @@ import type {
   ConsentUpdateRequest,
   CreateFiscalClosureRequest,
   CreateTransactionRequest,
+  DashboardDay,
+  DashboardResponse,
   DatabaseBackup,
   DatabaseBackupConfig,
   DrawerCurrentResponse,
@@ -58,6 +60,7 @@ import type {
   ReceiptTestResponse,
   SendReceiptEmailRequest,
   ShopSettings,
+  TargetsSettings,
   TransactionItemOut,
   TransactionOut,
   TransactionSummary,
@@ -214,6 +217,7 @@ let settings: {
   receipt: ReceiptSettings;
   hardware: HardwareSettings;
   accounting: AccountingSettings;
+  targets: TargetsSettings;
 } = {
   shop: {
     name: "Frip & Co Street",
@@ -260,6 +264,10 @@ let settings: {
     account_rounding_expense: "658000",
     account_rounding_income: "758000",
   },
+  // PR6 (H1) — objectifs de chiffre d'affaires. Volontairement à zéro au
+  // départ : le tableau de bord doit pouvoir être vu dans son état « aucun
+  // objectif défini » sans manipulation préalable.
+  targets: { daily: "0.00", monthly: {} },
 };
 
 function reset(): void {
@@ -279,6 +287,7 @@ function reset(): void {
   fiscalClosures = [];
   closureSeq = 0;
   databaseBackups = seedDatabaseBackups();
+  seedDemoSales();
   // `backupConfig` n'est pas remis à zéro, comme `settings` — un réglage
   // édité par la personne reste après un reset (état applicatif, pas une
   // donnée transactionnelle du jeu de démo).
@@ -353,6 +362,53 @@ function parseBody<T>(options?: FetchAPIOptions): T {
 
 function tvaRateNumber(): number {
   return parseFloat(settings.fiscal.tva_rate);
+}
+
+// --- PR6 : objectifs + tableau de bord ------------------------------------
+
+/** Montant du contrat H1 : chaîne décimale positive, au plus 2 décimales. */
+function isTargetAmount(value: unknown): value is string {
+  return typeof value === "string" && /^\d+(\.\d{1,2})?$/.test(value.trim());
+}
+
+/** Clé de jour civil locale (`YYYY-MM-DD`). Le mock tourne dans le
+ * navigateur de la boutique, donc sur l'heure de Paris — équivalent du
+ * `_PARIS` du service backend (H2). */
+function dayKeyOf(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function monthKeyOf(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+/** Montants du contrat H3 : toujours des chaînes à 2 décimales. */
+function money(n: number): string {
+  return (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
+}
+
+/** Objectif applicable à un mois : valeur explicite, sinon repli
+ * `monthly.default`, sinon 0 (H1). */
+function monthlyTargetOf(monthKey: string): number {
+  const monthly = settings.targets.monthly ?? {};
+  const raw = monthly[monthKey] ?? monthly.default ?? "0.00";
+  const n = Number.parseFloat(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** `progress_pct` du contrat H3 : 0 sans objectif, sinon 0–999 à une
+ * décimale. */
+function progressPct(net: number, target: number): number {
+  if (target <= 0) return 0;
+  return Math.round(Math.min(999, Math.max(0, (net / target) * 100)) * 10) / 10;
+}
+
+/** Somme des paiements d'un moyen donné sur une liste de transactions. */
+function sumPayments(txs: TransactionOut[], wanted: "cash" | "card"): number {
+  return txs.reduce(
+    (total, tx) => total + tx.payments.filter((p) => p.method === wanted).reduce((s, p) => s + p.amount, 0),
+    0,
+  );
 }
 
 // --- PR3 : aides clients/consentements --------------------------------
@@ -747,6 +803,181 @@ function createAccountingExportForZ(z: ZReport): AccountingExportDetail {
 }
 
 // ---------------------------------------------------------------------------
+// PR6 — historique de démo + tableau de bord
+// ---------------------------------------------------------------------------
+
+/** Catalogue de démo (friperie) — libellé, prix. */
+const DEMO_ARTICLES: readonly (readonly [string, number])[] = [
+  ["Veste en jean", 32],
+  ["T-shirt vintage", 12],
+  ["Sweat à capuche", 25],
+  ["Robe fleurie", 28],
+  ["Baskets", 45],
+  ["Chemise à carreaux", 18],
+  ["Casquette", 9],
+  ["Jupe plissée", 16],
+  ["Blouson bomber", 38],
+  ["Sac à main", 22],
+];
+
+/**
+ * Historique de ventes de démo sur les 13 jours PRÉCÉDENTS (jamais le jour
+ * courant), dimanche fermé. Même intention que `seedDatabaseBackups()` :
+ * que l'écran d'accueil ne soit jamais vide en mode démo (H6, « calculé à
+ * partir des transactions de démo »).
+ *
+ * Volontairement daté d'hier et avant : la caisse du jour, les « Tickets du
+ * jour » et le rapport Z ne voient rien de ces ventes (ils filtrent sur la
+ * journée courante / l'ouverture du tiroir), donc le parcours de vente
+ * reste identique à ce qu'il était avant PR6.
+ *
+ * Déterministe (FNV-1a sur la date) : deux chargements de la même journée
+ * produisent exactement les mêmes chiffres.
+ */
+function seedDemoSales(): void {
+  const now = new Date();
+  for (let back = 13; back >= 1; back--) {
+    const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - back);
+    if (day.getDay() === 0) continue; // fermé le dimanche
+    const daySeed = fnv1a(`demo-sales-${dayKeyOf(day)}`);
+    const saleCount = 2 + (daySeed % 4); // 2 à 5 ventes
+    const daySales: TransactionOut[] = [];
+    for (let i = 0; i < saleCount; i++) {
+      const r = fnv1a(`${daySeed}-${i}`);
+      const itemCount = 1 + (r % 3);
+      const items = Array.from({ length: itemCount }, (_, j) => {
+        const article = DEMO_ARTICLES[fnv1a(`${r}-${j}`) % DEMO_ARTICLES.length];
+        return { label: article[0], unit_price: article[1], quantity: 1 };
+      });
+      const total = round2(items.reduce((sum, it) => sum + it.unit_price, 0));
+      const payments: PaymentInput[] =
+        r % 3 === 0
+          ? [{ method: "cash", amount: total, tendered_amount: Math.ceil(total / 10) * 10 }]
+          : [{ method: "card", amount: total, checkout_id: `demo-${dayKeyOf(day)}-${i}` }];
+      const tx = buildTransaction("sale", items, null, payments);
+      const at = new Date(day);
+      at.setHours(10 + (r % 8), (r * 7) % 60, 0, 0);
+      tx.created_at = at.toISOString();
+      tx.receipt_text = buildReceiptText(tx);
+      daySales.push(tx);
+      transactions.unshift(tx);
+    }
+    // Une annulation dans l'historique (J−3) : le tableau de bord doit
+    // montrer un net (ventes − annulations), pas un cumul de ventes.
+    if (back === 3 && daySales.length > 0) {
+      const victim = daySales[0];
+      const refund = buildTransaction(
+        "refund",
+        victim.items.map((it) => ({ label: it.label, unit_price: it.unit_price, quantity: it.quantity })),
+        null,
+        victim.payments.map((pmt) => ({ method: pmt.method, amount: pmt.amount })),
+        {
+          original_transaction_id: victim.id,
+          refund_reason: "Article défectueux",
+          original_transaction_number: victim.transaction_number,
+        },
+      );
+      const at = new Date(victim.created_at);
+      at.setHours(at.getHours() + 1);
+      refund.created_at = at.toISOString();
+      refund.receipt_text = buildReceiptText(refund, victim.transaction_number);
+      transactions.unshift(refund);
+      cancelledToRefund.set(victim.id, refund.id);
+    }
+  }
+}
+
+/** Net d'un jour civil : Σ ventes − Σ annulations (H2). */
+function netOfDay(dayKey: string): { net: number; sales: TransactionOut[]; refunds: TransactionOut[] } {
+  const sales: TransactionOut[] = [];
+  const refunds: TransactionOut[] = [];
+  for (const tx of transactions) {
+    if (dayKeyOf(new Date(tx.created_at)) !== dayKey) continue;
+    (tx.transaction_type === "sale" ? sales : refunds).push(tx);
+  }
+  const net = round2(
+    sales.reduce((sum, t) => sum + t.total_ttc, 0) - refunds.reduce((sum, t) => sum + t.total_ttc, 0),
+  );
+  return { net, sales, refunds };
+}
+
+/** `GET /api/reports/dashboard` (H3) — calculé sur `transactions`, jamais
+ * sur les sessions de caisse. Aucune valeur nulle hormis `best_day.date`. */
+function buildDashboard(reference: Date): DashboardResponse {
+  // --- Aujourd'hui (ou le jour passé demandé via `?date=`) ---------------
+  const dayKey = dayKeyOf(reference);
+  const { net: dayNet, sales: daySales, refunds: dayRefunds } = netOfDay(dayKey);
+  // Une vente annulée compte 0 au dénominateur du panier moyen (H2).
+  const basketCount = daySales.filter((t) => !cancelledToRefund.has(t.id)).length;
+  const dailyTargetRaw = Number.parseFloat(settings.targets.daily ?? "0");
+  const dailyTarget = Number.isFinite(dailyTargetRaw) && dailyTargetRaw > 0 ? dailyTargetRaw : 0;
+
+  // --- Ce mois ------------------------------------------------------------
+  const monthKey = monthKeyOf(reference);
+  const lastDayOfMonth = new Date(reference.getFullYear(), reference.getMonth() + 1, 0).getDate();
+  let monthNet = 0;
+  let monthSalesCount = 0;
+  const openDays = new Set<string>();
+  const netByDay = new Map<string, number>();
+  for (let d = 1; d <= lastDayOfMonth; d++) {
+    const key = dayKeyOf(new Date(reference.getFullYear(), reference.getMonth(), d));
+    const { net, sales } = netOfDay(key);
+    if (sales.length === 0 && net === 0) continue;
+    monthNet = round2(monthNet + net);
+    monthSalesCount += sales.length;
+    if (sales.length > 0) openDays.add(key);
+    netByDay.set(key, net);
+  }
+  const monthTarget = monthlyTargetOf(monthKey);
+  const remainingDays = Math.max(0, lastDayOfMonth - reference.getDate() + 1);
+  const requiredDaily = remainingDays > 0 ? Math.max(0, monthTarget - monthNet) / remainingDays : 0;
+  let bestDate: string | null = null;
+  let bestNet = 0;
+  for (const [key, net] of netByDay) {
+    if (net > bestNet) {
+      bestNet = net;
+      bestDate = key;
+    }
+  }
+
+  // --- 7 derniers jours (J−6 → J, toujours 7 entrées) ---------------------
+  const last7: DashboardDay[] = [];
+  for (let back = 6; back >= 0; back--) {
+    const day = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate() - back);
+    const key = dayKeyOf(day);
+    const { net, sales } = netOfDay(key);
+    last7.push({ date: key, net: money(net), sales_count: sales.length });
+  }
+
+  return {
+    generated_at: nowIso(),
+    today: {
+      date: dayKey,
+      sales_count: daySales.length,
+      refunds_count: dayRefunds.length,
+      net: money(dayNet),
+      average_basket: money(basketCount > 0 ? dayNet / basketCount : 0),
+      cash: money(sumPayments(daySales, "cash") - sumPayments(dayRefunds, "cash")),
+      card: money(sumPayments(daySales, "card") - sumPayments(dayRefunds, "card")),
+      target: money(dailyTarget),
+      progress_pct: progressPct(dayNet, dailyTarget),
+    },
+    month: {
+      month: monthKey,
+      net: money(monthNet),
+      sales_count: monthSalesCount,
+      target: money(monthTarget),
+      progress_pct: progressPct(monthNet, monthTarget),
+      days_open: openDays.size,
+      remaining_days: remainingDays,
+      required_daily: money(requiredDaily),
+      best_day: { date: bestDate, net: money(bestNet) },
+    },
+    last_7_days: last7,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
 
@@ -1063,9 +1294,21 @@ export async function mockFetchAPI<T = unknown>(
     return undefined as unknown as T;
   }
 
+  // --- PR6 : tableau de bord d'accueil ------------------------------------
+  if (path === "/api/reports/dashboard" && method === "GET") {
+    const dateParam = query.get("date");
+    let reference = new Date();
+    if (dateParam) {
+      const parsed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateParam);
+      if (!parsed) fail(422, "Date invalide (AAAA-MM-JJ attendu).", "invalid_date");
+      reference = new Date(Number(parsed![1]), Number(parsed![2]) - 1, Number(parsed![3]));
+    }
+    return buildDashboard(reference) as unknown as T;
+  }
+
   // --- Administration ---------------------------------------------------
-  if ((m = path.match(/^\/api\/admin\/settings\/(shop|fiscal|receipt|hardware|accounting)$/))) {
-    const key = m[1] as "shop" | "fiscal" | "receipt" | "hardware" | "accounting";
+  if ((m = path.match(/^\/api\/admin\/settings\/(shop|fiscal|receipt|hardware|accounting|targets)$/))) {
+    const key = m[1] as "shop" | "fiscal" | "receipt" | "hardware" | "accounting" | "targets";
     if (method === "GET") return settings[key] as unknown as T;
     if (method === "PUT") {
       const body = parseBody<Record<string, unknown>>(options);
@@ -1101,6 +1344,32 @@ export async function mockFetchAPI<T = unknown>(
             fail(422, `Numéro de compte invalide (${JSON.stringify(value)}) : 3 à 8 chiffres attendus.`, "invalid_account_number");
           }
         }
+      }
+      if (key === "targets") {
+        // Validation H1 : montants décimaux >= 0 en chaîne (le signe « - »
+        // est refusé par la regex), clés de mois `YYYY-MM` ou `default`.
+        if (body.daily !== undefined && !isTargetAmount(body.daily)) {
+          fail(422, "Objectif journalier invalide : montant positif à 2 décimales attendu (ex. \"1500.00\").", "invalid_setting");
+        }
+        if (body.monthly !== undefined) {
+          if (typeof body.monthly !== "object" || body.monthly === null || Array.isArray(body.monthly)) {
+            fail(422, "Objectifs mensuels invalides : une carte mois → montant est attendue.", "invalid_setting");
+          }
+          for (const [monthKey, value] of Object.entries(body.monthly as Record<string, unknown>)) {
+            if (monthKey !== "default" && !/^\d{4}-(0[1-9]|1[0-2])$/.test(monthKey)) {
+              fail(422, `Clé de mois invalide (${JSON.stringify(monthKey)}) : "AAAA-MM" ou "default" attendu.`, "invalid_setting");
+            }
+            if (!isTargetAmount(value)) {
+              fail(422, `Objectif invalide pour ${monthKey} : montant positif à 2 décimales attendu.`, "invalid_setting");
+            }
+          }
+          // Normalisation (comme le backend, qui stocke des décimaux) : la
+          // carte est remplacée en entier, jamais fusionnée mois par mois.
+          body.monthly = Object.fromEntries(
+            Object.entries(body.monthly as Record<string, string>).map(([k, v]) => [k, Number.parseFloat(v).toFixed(2)]),
+          );
+        }
+        if (typeof body.daily === "string") body.daily = Number.parseFloat(body.daily).toFixed(2);
       }
       if (key === "hardware") {
         const merged = { ...settings.hardware, ...body } as HardwareSettings;
@@ -2109,6 +2378,11 @@ export async function mockFetchBytesWithHeaders(endpoint: string, options?: Fetc
   const bytes = await mockFetchBytes(endpoint, options);
   return { bytes, headers: {} };
 }
+
+// Amorçage de l'historique de démo (PR6) au chargement du module : le
+// tableau de bord d'accueil a des chiffres dès le premier écran, sans
+// toucher à la journée en cours (ventes datées d'hier et avant).
+seedDemoSales();
 
 // Expose un reset pour d'éventuels tests / Playwright (état frais par page load
 // de toute façon, car le module vit en mémoire côté navigateur).

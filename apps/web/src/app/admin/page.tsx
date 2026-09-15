@@ -35,6 +35,7 @@ import {
   type ReceiptSettings,
   type ReceiptTestResponse,
   type ShopSettings,
+  type TargetsSettings,
   type ZReport,
 } from "@/lib/types";
 import { findPairedUsbDevice, getStoredPrinter, isWebUsbSupported, pairUsbPrinter, sendBytes } from "@/lib/webusb-printer";
@@ -72,6 +73,7 @@ export default function AdminPage() {
         <div className="space-y-6">
           <ShopSettingsCard />
           <FiscalSettingsCard />
+          <TargetsCard />
           <ReceiptSettingsCard />
           <MessagingStatusCard />
           <TerminalStatusCard />
@@ -275,6 +277,166 @@ function FiscalSettingsCard() {
               ))}
             </select>
           </label>
+          <div className="flex items-center gap-3">
+            <Button onClick={() => void handleSave()} disabled={saving}>
+              {saving ? "Enregistrement…" : "Enregistrer"}
+            </Button>
+            <SavedNotice show={saved} />
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Objectifs de chiffre d'affaires (PR6, H5)
+// ---------------------------------------------------------------------------
+
+/** `Date` → clé de mois du contrat H1 (`"YYYY-MM"`), calculée côté front
+ * (la boutique et la tablette sont sur le même fuseau). */
+function monthKeyOf(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthLabelOf(key: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(key);
+  if (!m) return key;
+  return new Date(Number(m[1]), Number(m[2]) - 1, 1).toLocaleDateString("fr-FR", {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+/** Saisie en euros (virgule ou point acceptée, champ vide = 0) → chaîne à
+ * 2 décimales du contrat H1. `null` si la saisie n'est pas un montant
+ * positif : la carte refuse alors d'appeler l'API. */
+function toAmountString(raw: string): string | null {
+  const trimmed = raw.trim().replace(",", ".").replace(/\s/g, "");
+  if (trimmed === "") return "0.00";
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null;
+  const n = Number.parseFloat(trimmed);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n.toFixed(2);
+}
+
+/** Affichage d'une valeur du contrat ("1500.00") dans un champ de saisie,
+ * en convention française (virgule décimale) — `toAmountString` sait relire
+ * les deux écritures. */
+function toAmountInput(value: string | undefined): string {
+  const n = Number.parseFloat(value ?? "");
+  return Number.isFinite(n) && n > 0 ? n.toFixed(2).replace(".", ",") : "";
+}
+
+function TargetsCard() {
+  // Clés de mois figées au premier rendu : la carte doit rester stable même
+  // si l'onglet reste ouvert au passage de minuit.
+  const [monthKeys] = useState(() => {
+    const now = new Date();
+    const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    return { current: monthKeyOf(now), next: monthKeyOf(next) };
+  });
+
+  const [daily, setDaily] = useState("");
+  const [currentMonth, setCurrentMonth] = useState("");
+  const [nextMonth, setNextMonth] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .get<TargetsSettings>("/api/admin/settings/targets")
+      .then((data) => {
+        const monthly = data?.monthly ?? {};
+        setDaily(toAmountInput(data?.daily));
+        // Un mois non saisi hérite du repli `default` (H1) : on affiche la
+        // valeur qui s'applique réellement, pas un champ vide trompeur.
+        setCurrentMonth(toAmountInput(monthly[monthKeys.current] ?? monthly.default));
+        setNextMonth(toAmountInput(monthly[monthKeys.next] ?? monthly.default));
+      })
+      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les objectifs."))
+      .finally(() => setLoading(false));
+  }, [monthKeys]);
+
+  const edit = (setter: (v: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    setter(e.target.value);
+    setSaved(false);
+  };
+
+  const handleSave = async (): Promise<void> => {
+    const dailyValue = toAmountString(daily);
+    const currentValue = toAmountString(currentMonth);
+    const nextValue = toAmountString(nextMonth);
+    if (dailyValue === null || currentValue === null || nextValue === null) {
+      setError("Montant invalide : saisissez un nombre positif (ex. 1500 ou 1500,50).");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      // Relecture de la carte complète avant réécriture (H5) : le `PUT`
+      // remplace `monthly` en entier, les mois déjà saisis (et un éventuel
+      // repli `default`) doivent donc être reportés tels quels.
+      let existing: Record<string, string> = {};
+      try {
+        const current = await api.get<TargetsSettings>("/api/admin/settings/targets");
+        existing = { ...(current?.monthly ?? {}) };
+      } catch {
+        // Réglage encore absent côté serveur : on repart d'une carte vide
+        // plutôt que d'abandonner l'enregistrement.
+      }
+      const payload: TargetsSettings = {
+        daily: dailyValue,
+        monthly: { ...existing, [monthKeys.current]: currentValue, [monthKeys.next]: nextValue },
+      };
+      const data = await api.put<TargetsSettings>("/api/admin/settings/targets", payload);
+      const monthly = data?.monthly ?? payload.monthly;
+      setDaily(toAmountInput(data?.daily ?? payload.daily));
+      setCurrentMonth(toAmountInput(monthly[monthKeys.current]));
+      setNextMonth(toAmountInput(monthly[monthKeys.next]));
+      setSaved(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card
+      title="Objectifs"
+      subtitle="Chiffre d'affaires visé, affiché sur le tableau de bord d'accueil. Laisser à zéro pour ne pas fixer d'objectif."
+    >
+      {loading ? (
+        <p className="text-sm text-fc-ink-soft">Chargement…</p>
+      ) : (
+        <div className="space-y-4">
+          <ErrorNotice message={error} />
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Input
+              label="Objectif journalier (€)"
+              inputMode="decimal"
+              placeholder="0,00"
+              value={daily}
+              onChange={edit(setDaily)}
+            />
+            <Input
+              label={`Objectif ${monthLabelOf(monthKeys.current)} (€)`}
+              inputMode="decimal"
+              placeholder="0,00"
+              value={currentMonth}
+              onChange={edit(setCurrentMonth)}
+            />
+            <Input
+              label={`Objectif ${monthLabelOf(monthKeys.next)} (€)`}
+              inputMode="decimal"
+              placeholder="0,00"
+              value={nextMonth}
+              onChange={edit(setNextMonth)}
+            />
+          </div>
           <div className="flex items-center gap-3">
             <Button onClick={() => void handleSave()} disabled={saving}>
               {saving ? "Enregistrement…" : "Enregistrer"}
