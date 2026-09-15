@@ -16,13 +16,14 @@ import Modal from "@/components/ui/Modal";
 import NumPad from "@/components/ui/NumPad";
 import CashDrawerOpenModal from "@/components/pos/CashDrawerOpenModal";
 import CashDrawerCloseModal from "@/components/pos/CashDrawerCloseModal";
+import ClientSelectionScreen from "@/components/pos/ClientSelectionScreen";
 import type { DenominationLine } from "@/components/pos/DenominationGrid";
 import MultiStepPaymentWizard from "@/components/pos/MultiStepPaymentWizard";
 import PosTopBar from "@/components/pos/PosTopBar";
 import ReceiptPreviewCard from "@/components/pos/ReceiptPreviewCard";
 import TicketsPanel from "@/components/pos/TicketsPanel";
 import { api, ApiError } from "@/lib/api";
-import { formatCurrency } from "@/lib/format";
+import { formatClientName, formatCurrency } from "@/lib/format";
 import { clampDiscountValue, computeBrut, computeDiscountAmount } from "@/lib/posCalc";
 import { kickDrawer, loadHardwareSettings } from "@/lib/printing";
 import type {
@@ -31,6 +32,7 @@ import type {
   DrawerCurrentResponse,
   HardwareSettings,
   PaymentInput,
+  PosClient,
   ShopSettings,
   TransactionOut,
   ZReport,
@@ -73,6 +75,13 @@ export default function CaissePage() {
   // simplement le bloc RGPD sans adresse plutôt que de casser la vente.
   const [dpoEmail, setDpoEmail] = useState<string>("");
 
+  // PR7 (I3) — cliente rattachée au ticket en cours. Choisie AVANT
+  // l'encaissement (bouton « Client » de l'en-tête du ticket), envoyée avec
+  // la vente (`client_id`), conservée pour l'écran de succès puis remise à
+  // zéro au ticket suivant (`handleNewTicket`).
+  const [selectedClient, setSelectedClient] = useState<PosClient | null>(null);
+  const [clientScreenOpen, setClientScreenOpen] = useState(false);
+
   const [ticketsOpen, setTicketsOpen] = useState(false);
   const [closeDrawerOpen, setCloseDrawerOpen] = useState(false);
   const [lastZ, setLastZ] = useState<ZReport | null>(null);
@@ -99,7 +108,7 @@ export default function CaissePage() {
   // exclu dans nos tests — `aria-hidden="true"`, lui, est le mécanisme
   // que les moteurs de requête par rôle respectent de façon fiable.
   const mainContentRef = useRef<HTMLDivElement | null>(null);
-  const anyOverlayOpen = discountEditorOpen || paymentOpen || ticketsOpen || closeDrawerOpen;
+  const anyOverlayOpen = discountEditorOpen || paymentOpen || ticketsOpen || closeDrawerOpen || clientScreenOpen;
   useEffect(() => {
     const el = mainContentRef.current;
     if (!el) return;
@@ -203,6 +212,12 @@ export default function CaissePage() {
   const discountAmount = computeDiscountAmount(brut, discount);
   const totalTtc = Math.max(0, Math.round((brut - discountAmount) * 100) / 100);
 
+  // Pastille de l'en-tête du ticket : « Prénom Nom », à défaut la
+  // coordonnée masquée — jamais une pastille vide.
+  const clientChipLabel = selectedClient
+    ? formatClientName(selectedClient) || selectedClient.email_masked || selectedClient.phone_masked || "Cliente"
+    : "";
+
   const cardDisabled = !cbConfig?.configured || cbConfig?.reader_online === false;
   const cardDisabledReason = cbConfig?.message || (!cbConfig?.configured ? "Terminal non configuré." : "Terminal hors ligne.");
 
@@ -213,6 +228,9 @@ export default function CaissePage() {
         items: cart.map((l) => ({ label: l.label, unit_price: l.unitPrice, quantity: l.quantity })),
         discount,
         payments,
+        // `null` (et non l'absence de champ) quand la vente est anonyme :
+        // le contrat accepte les deux, l'intention est explicite.
+        client_id: selectedClient?.id ?? null,
       });
       setSuccessTx(tx);
       setCart([]);
@@ -223,6 +241,9 @@ export default function CaissePage() {
 
   const handleNewTicket = (): void => {
     setSuccessTx(null);
+    // La cliente n'est relâchée qu'ICI : l'écran de succès s'en sert encore
+    // pour le ticket par e-mail, le ticket suivant repart vierge.
+    setSelectedClient(null);
     clientUuidRef.current = newUuid();
   };
 
@@ -331,6 +352,7 @@ export default function CaissePage() {
                 dpoEmail={dpoEmail}
                 hardware={hardware}
                 isCashSale={successTx.payments.some((p) => p.method === "cash")}
+                client={successTx.client ?? null}
                 onNewSale={handleNewTicket}
               />
             </div>
@@ -363,6 +385,55 @@ export default function CaissePage() {
 
             {/* Panier */}
             <section className="flex-1 flex flex-col overflow-hidden">
+              {/* En-tête du ticket (PR7, I3) — la cliente se choisit ICI,
+                  pas dans la barre haute : c'est un geste de vente, au même
+                  endroit que le panier auquel il s'applique. */}
+              <div className="flex-shrink-0 flex items-center justify-between gap-2 border-b border-fc-line bg-fc-surface px-4 py-2">
+                <h2 className="text-sm font-semibold uppercase tracking-wide text-fc-ink-mute">Ticket en cours</h2>
+                {selectedClient ? (
+                  <span className="inline-flex max-w-[60%] items-center gap-1 rounded-full border border-fc-primary bg-fc-primary-soft py-0.5 pl-1 pr-1 text-sm font-medium text-fc-primary-deep">
+                    <button
+                      type="button"
+                      onClick={() => setClientScreenOpen(true)}
+                      title="Changer de cliente"
+                      className="min-h-[36px] max-w-full truncate rounded-full px-2 hover:underline"
+                    >
+                      {clientChipLabel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedClient(null)}
+                      aria-label="Retirer la cliente du ticket"
+                      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-fc-primary-deep hover:bg-fc-primary hover:text-white"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setClientScreenOpen(true)}
+                    className="inline-flex min-h-[40px] items-center gap-2 rounded-fc border border-fc-line bg-fc-bg-alt px-3 py-1.5 text-sm font-medium text-fc-ink-soft transition-colors hover:bg-fc-line hover:text-fc-ink"
+                  >
+                    <svg
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                      <circle cx="12" cy="7" r="4" />
+                    </svg>
+                    Client
+                  </button>
+                )}
+              </div>
+
               <div className="flex-1 overflow-y-auto p-4 space-y-2">
                 {cart.length === 0 && <p className="text-sm text-fc-ink-mute text-center mt-8">Le panier est vide.</p>}
                 {cart.map((l) => (
@@ -513,6 +584,16 @@ export default function CaissePage() {
         cardDisabledReason={cardDisabledReason}
         onClose={() => setPaymentOpen(false)}
         onCommit={handleCommitSale}
+      />
+
+      <ClientSelectionScreen
+        open={clientScreenOpen}
+        onClose={() => setClientScreenOpen(false)}
+        onSelect={(client) => {
+          setSelectedClient(client);
+          setClientScreenOpen(false);
+        }}
+        dpoEmail={dpoEmail}
       />
 
       <TicketsPanel open={ticketsOpen} onClose={() => setTicketsOpen(false)} onCancelled={() => void loadDrawer()} />
