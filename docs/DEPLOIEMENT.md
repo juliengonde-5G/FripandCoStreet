@@ -247,7 +247,23 @@ les ventes en espèces sont des options du même écran. Chaque impression et
 chaque ouverture de tiroir sont journalisées (JET `receipt.printed`,
 `drawer.kicked`) ; les réimpressions sont comptées sur le ticket.
 
-## 9. Déploiement automatique
+## 9. Clôtures, archives et exports (PR4)
+
+- Clôtures **mensuelle** (1er du mois à 00:15) et **annuelle** (1er janvier à 00:30,
+  heure de Paris) automatiques ; refusées si une caisse est ouverte ou si une
+  chaîne est rompue (échec journalisé et signalé par e-mail à l'adresse de la
+  boutique). Contrôle et clôture manuelle : Administration → Archives fiscales.
+- **Copie hors site obligatoire** après chaque clôture : télécharger l'archive
+  (`.json.gz`) et noter son empreinte SHA-256 ; la conserver sur deux supports
+  distincts du VPS (conservation 6 ans). L'archive se lit sans l'application
+  (`gunzip`, JSON) ; son empreinte se vérifie avec `sha256sum`.
+- Exports comptables (Administration → Comptabilité) : CSV mensuel au format
+  Pennylane et FEC, à transmettre au cabinet ; exports bruts par table pour
+  contrôle.
+- La clé `FISCAL_SIGNING_KEY` est indispensable pour vérifier les signatures :
+  la conserver hors ligne, sous accès restreint, avec les archives.
+
+## 10. Déploiement automatique
 
 `.github/workflows/deploy.yml` (actif dans le dépôt dédié) : après une CI verte
 sur `main`, connexion SSH et `./scripts/deploy.sh --pull`. Secrets à créer dans
