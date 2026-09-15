@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.cash_movement import CashMovement
 from app.models.jet import JournalEvent
 from app.models.pos import Payment, Transaction, TransactionItem, TransactionType, ZReport
+from app.services.invoice_service import invoice_snapshot_dicts
 
 
 def _fmt(value) -> str:
@@ -82,6 +83,13 @@ class FiscalExportService:
         jet_query = jet_query.order_by(JournalEvent.seq.asc())
         jet_events = (await self.db.execute(jet_query)).scalars().all()
 
+        # PR8/J5 — factures et avoirs de la periode. Le service dedie
+        # (`services/invoice_service.py`) porte la serialisation : un seul
+        # endroit decide de la forme « export » d'une facture, et l'archive
+        # de cloture (`services/fiscal_closure.py`, qui construit sa
+        # snapshot avec CE service) en herite sans duplication.
+        invoices = await invoice_snapshot_dicts(self.db, period_from, period_to)
+
         sales_ttc = sum(
             (float(t.total_ttc) for t in transactions if t.transaction_type == TransactionType.sale),
             0.0,
@@ -103,8 +111,9 @@ class FiscalExportService:
                 "annulations et les clôtures Z sont ordonnées par numéro. Les "
                 "champs hash_chain, previous_hash et signature_version "
                 "permettent de contrôler le chaînage ; le journal des "
-                "événements techniques (JET) et les mouvements de caisse "
-                "complètent la traçabilité. Les montants sont exprimés en "
+                "événements techniques (JET), les mouvements de caisse et "
+                "les factures/avoirs professionnels complètent la "
+                "traçabilité. Les montants sont exprimés en "
                 "euros TTC. Ce document est une auto-attestation (art. 286 "
                 "I-3° bis du CGI) et n'est jamais présenté comme « conforme "
                 "NF525 »."
@@ -118,6 +127,8 @@ class FiscalExportService:
                 ),
                 "transactions_count": len(transactions),
                 "z_reports_count": len(z_reports),
+                "invoices_count": sum(1 for i in invoices if i["kind"] == "invoice"),
+                "credit_notes_count": sum(1 for i in invoices if i["kind"] == "credit_note"),
                 "sales_ttc": _fmt(sales_ttc),
                 "refunds_ttc": _fmt(refunds_ttc),
                 "net_ttc": _fmt(sales_ttc - refunds_ttc),
@@ -126,6 +137,7 @@ class FiscalExportService:
             "z_reports": [self._z_dict(z) for z in z_reports],
             "cash_movements": [self._movement_dict(m) for m in movements],
             "journal_events": [self._jet_dict(e) for e in jet_events],
+            "invoices": invoices,
         }
 
     async def _tx_dict(self, t: Transaction) -> dict:
@@ -361,6 +373,26 @@ class FiscalExportService:
                     "amount": m["amount"],
                     "reason": m["reason"],
                     "created_at": m["created_at"],
+                },
+            )
+
+        inv_root = SubElement(root, "Invoices", {"count": str(len(snapshot["invoices"]))})
+        for inv in snapshot["invoices"]:
+            SubElement(
+                inv_root,
+                "Invoice",
+                {
+                    "kind": inv["kind"],
+                    "invoice_number": inv["invoice_number"],
+                    "original_invoice_number": inv["original_invoice_number"] or "",
+                    "transaction_number": str(inv["transaction_number"] or ""),
+                    "issued_at": inv["issued_at"],
+                    "company_name": inv["company_name"],
+                    "siret": inv["siret"],
+                    "vat_number": inv["vat_number"] or "",
+                    "total_ht": inv["total_ht"],
+                    "total_tva": inv["total_tva"],
+                    "total_ttc": inv["total_ttc"],
                 },
             )
 

@@ -683,7 +683,15 @@ class ClientService:
         """RGPD art. 17 (E4) — anonymise la fiche, JAMAIS de suppression de
         ligne ni de modification d'une vente : `transactions.client_id`
         continue de pointer vers cette fiche, desormais videe de toute
-        donnee personnelle."""
+        donnee personnelle.
+
+        Les FACTURES professionnelles (PR8/J5) sont hors perimetre et ne
+        sont donc pas touchees ici : une raison sociale et un SIRET ne sont
+        pas des donnees personnelles d'une personne physique, la facture est
+        une piece comptable a conserver 10 ans, et elle est de toute facon
+        immuable en base (trigger `fripco_protect_invoice`). Le client
+        professionnel n'a jamais de fiche `clients` : rien ne relie les deux
+        objets."""
         if client.anonymized_at is not None:
             return client
 
