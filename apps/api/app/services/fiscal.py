@@ -678,6 +678,13 @@ class FiscalService:
                     "expected_amount": float(z_report.expected_amount),
                 },
             )
+            # PR4 (F2, docs/ARCHITECTURE_PR4.md §1/§3) — meme regle que
+            # `pos.py::close_drawer` : l'ecriture comptable du Z est creee
+            # dans la MEME transaction SQL que la cloture automatique.
+            from app.services.accounting_service import AccountingService
+
+            await AccountingService(self.db).create_export_for_z(z_report, user_id=user_id)
+            await self.db.flush()
             reports.append(z_report)
         return reports
 

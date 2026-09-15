@@ -138,7 +138,8 @@ async def _truncate() -> None:
                 "TRUNCATE users, journal_events, app_settings, transactions, "
                 "transaction_items, payments, cash_drawers, z_reports, "
                 "cash_movements, payment_attempts, receipts, "
-                "clients, consents, communications "
+                "clients, consents, communications, "
+                "accounting_exports, accounting_export_lines, fiscal_closures "
                 "RESTART IDENTITY CASCADE"
             )
         )

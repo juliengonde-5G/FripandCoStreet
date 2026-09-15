@@ -51,6 +51,23 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
         "auto_print_on_sale": False,
         "auto_kick_on_cash": False,
     },
+    # PR4 (F1, docs/ARCHITECTURE_PR4.md §1/§3) — plan de comptes comptable,
+    # defauts IDENTIQUES a l'application source (`AccountingConfig`) : pas
+    # d'integration Pennylane (decision Julien, §1 du contrat — l'import se
+    # fait par fichier CSV/FEC). Voir `app/services/accounting_service.py`.
+    "accounting": {
+        "journal_code": "VTE",
+        "account_sales": "707100",
+        "label_sales": "Ventes marchandises",
+        "account_tva": "44571",
+        "label_tva": "TVA collectée 20%",
+        "account_cash": "531000",
+        "label_cash": "Caisse",
+        "account_card": "512000",
+        "label_card": "CB SumUp",
+        "account_rounding_expense": "658000",
+        "account_rounding_income": "758000",
+    },
 }
 
 

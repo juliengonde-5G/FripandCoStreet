@@ -566,6 +566,16 @@ class PosService:
             payload={"z_number": z_report.report_number, "discrepancy": float(z_report.discrepancy)},
         )
         await self.db.flush()
+
+        # PR4 (F2, docs/ARCHITECTURE_PR4.md §1/§3) — l'ecriture comptable du Z
+        # est creee dans la MEME transaction SQL que la cloture (idempotent :
+        # aucun effet si deja creee, ce qui ne peut arriver ici puisque le Z
+        # vient d'etre scelle).
+        from app.services.accounting_service import AccountingService
+
+        await AccountingService(self.db).create_export_for_z(z_report, user_id=user_id)
+        await self.db.flush()
+
         return z_report
 
     # ------------------------------------------------------------------

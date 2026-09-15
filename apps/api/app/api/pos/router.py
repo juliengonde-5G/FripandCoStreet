@@ -24,6 +24,7 @@ from app.services import escpos_service
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.jet import (
     EVENT_DRAWER_KICKED,
+    EVENT_EXPORT_DOWNLOADED,
     EVENT_PRINTER_UNREACHABLE,
     EVENT_RECEIPT_DUPLICATE,
     EVENT_RECEIPT_PRINTED,
@@ -931,6 +932,51 @@ async def create_regularization(
         _raise(exc)
     await db.commit()
     return _serialize_z_report(z_report)
+
+
+@router.get("/z-reports/{z_report_id}/pdf")
+async def get_z_report_pdf(
+    z_report_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """PDF deterministe du rapport Z (PR4, F8, docs/ARCHITECTURE_PR4.md).
+
+    Deux appels sur le meme Z renvoient des octets identiques (voir
+    `services/z_report_pdf.py`) — le SHA-256 journalise (`export.downloaded`,
+    F7) est donc stable, verifiable hors application."""
+    z = (await db.execute(select(ZReport).where(ZReport.id == z_report_id))).scalar_one_or_none()
+    if z is None:
+        raise PosServiceError("Z introuvable.", code="not_found", status_code=404)
+
+    from app.services.z_report_pdf import generate_z_report_pdf
+
+    pdf_bytes = await generate_z_report_pdf(db, z)
+
+    import hashlib
+
+    sha = hashlib.sha256(pdf_bytes).hexdigest()
+    await JournalService(db).record(
+        EVENT_EXPORT_DOWNLOADED,
+        user_id=user.id,
+        payload={
+            "kind": "z_report_pdf",
+            "period_start": None,
+            "period_end": None,
+            "sha256": sha,
+            "rows": 1,
+            "z_number": z.report_number,
+        },
+    )
+    await db.commit()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="Z{z.report_number:04d}.pdf"',
+            "X-PDF-SHA256": sha,
+        },
+    )
 
 
 @router.get("/z-reports/{z_report_id}")

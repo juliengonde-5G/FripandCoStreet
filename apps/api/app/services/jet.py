@@ -88,6 +88,14 @@ EVENT_DRAWER_KICKED = "drawer.kicked"
 # `app/services/escpos_service.py::PRINTER_UNREACHABLE_MESSAGE`.
 EVENT_PRINTER_UNREACHABLE = "printer.unreachable"
 
+# PR4 — exports comptables, archives fiscales, clotures periodiques
+# (docs/ARCHITECTURE_PR4.md §3).
+EVENT_ACCOUNTING_EXPORT_CREATED = "accounting.export_created"
+EVENT_ACCOUNTING_MISMATCH = "accounting.mismatch"
+EVENT_CLOSURE_CREATED = "closure.created"
+EVENT_CLOSURE_FAILED = "closure.failed"
+EVENT_EXPORT_DOWNLOADED = "export.downloaded"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""

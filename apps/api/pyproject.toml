@@ -19,6 +19,9 @@ dependencies = [
     "tenacity>=8.2.0",
     "cryptography>=42.0.0",
     "apscheduler>=3.10.0",
+    # PR4 (F8, docs/ARCHITECTURE_PR4.md §1) — PDF du rapport Z. Meme pin que
+    # l'application source (`reportlab>=4.0.0`).
+    "reportlab>=4.0.0",
 ]
 
 [project.optional-dependencies]
