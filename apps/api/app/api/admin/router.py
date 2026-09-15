@@ -1218,3 +1218,42 @@ async def messaging_status(
         "email": email_gateway.describe_active_provider(),
         "brevo_contacts": brevo_contacts.describe(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Factures professionnelles (PR8, docs/ARCHITECTURE_PR8.md J5) — liste par
+# année pour la carte « Factures » de l'onglet Comptabilité. L'émission, la
+# lecture par vente et le PDF vivent côté caisse
+# (`app/api/pos/invoices_router.py`) : ici, uniquement de la consultation.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/invoices")
+async def list_invoices(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    year: int = Query(..., ge=2000, le=2100),
+):
+    from app.models.pos import Transaction
+    from app.services.invoice_service import InvoiceService
+
+    service = InvoiceService(db)
+    invoices = await service.list_for_year(year)
+    transactions = {
+        t.id: t
+        for t in (
+            await db.execute(
+                select(Transaction).where(
+                    Transaction.id.in_([i.transaction_id for i in invoices])
+                )
+            )
+        ).scalars().all()
+    } if invoices else {}
+    return {
+        "year": year,
+        "invoices": [
+            InvoiceService.serialize(i, transactions[i.transaction_id])
+            for i in invoices
+            if i.transaction_id in transactions
+        ],
+    }

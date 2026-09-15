@@ -174,6 +174,7 @@ def _serialize_transaction(
     refund_of_sale: dict[str, str] | None = None,
     original_number_by_refund_id: dict[str, int] | None = None,
     clients_by_id: dict[str, dict] | None = None,
+    invoice_numbers: dict[str, str] | None = None,
 ) -> dict:
     """Serialise une transaction.
 
@@ -191,10 +192,16 @@ def _serialize_transaction(
     first_name, last_name}`` pour TOUTE la page appelante — jamais une
     requete par transaction. ``client`` vaut ``None`` quand `client_id`
     est absent, ou (defensif) quand l'appelant n'a pas fourni le mapping.
+
+    ``invoice_numbers`` (PR8/J5, voir `_load_invoice_numbers`) mappe de la
+    meme facon ``str(transaction_id) -> invoice_number`` : ``invoice_number``
+    vaut ``F-AAAA-NNNN`` sur une vente facturee, ``A-AAAA-NNNN`` sur
+    l'annulation d'une vente facturee, ``None`` partout ailleurs.
     """
     refund_of_sale = refund_of_sale or {}
     original_number_by_refund_id = original_number_by_refund_id or {}
     clients_by_id = clients_by_id or {}
+    invoice_numbers = invoice_numbers or {}
     tx_id = str(transaction.id)
     is_refund = transaction.transaction_type == TransactionType.refund
     refund_transaction_id = None if is_refund else refund_of_sale.get(tx_id)
@@ -214,6 +221,7 @@ def _serialize_transaction(
         "cancelled": False if is_refund else refund_transaction_id is not None,
         "refund_transaction_id": refund_transaction_id,
         "refund_reason": transaction.refund_reason,
+        "invoice_number": invoice_numbers.get(tx_id),
         "discount_type": transaction.discount_type.value if transaction.discount_type else None,
         "discount_value": (
             float(transaction.discount_value) if transaction.discount_value is not None else None
@@ -351,6 +359,16 @@ async def _load_refund_links(
         refund_of_sale[str(original_id)] = str(refund_id)
         original_number_by_refund_id[str(refund_id)] = original_number
     return refund_of_sale, original_number_by_refund_id
+
+
+async def _load_invoice_numbers(
+    db: AsyncSession, transaction_ids: list[uuid.UUID]
+) -> dict[str, str]:
+    """Numeros de facture/avoir d'une page de transactions (PR8/J5), en UNE
+    requete — meme principe que `_load_clients`."""
+    from app.services.invoice_service import InvoiceService
+
+    return await InvoiceService(db).numbers_by_transaction(transaction_ids)
 
 
 async def _load_clients(db: AsyncSession, client_ids: list[uuid.UUID | None]) -> dict[str, dict]:
@@ -599,12 +617,14 @@ async def create_transaction(
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction.id])
     clients_by_id = await _load_clients(db, [transaction.client_id])
+    invoice_numbers = await _load_invoice_numbers(db, [transaction.id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
+        invoice_numbers=invoice_numbers,
     )
 
 
@@ -625,6 +645,7 @@ async def list_transactions(
         db, [t.id for t in transactions]
     )
     clients_by_id = await _load_clients(db, [t.client_id for t in transactions])
+    invoice_numbers = await _load_invoice_numbers(db, [t.id for t in transactions])
     return {
         "transactions": [
             _serialize_transaction(
@@ -632,6 +653,7 @@ async def list_transactions(
                 refund_of_sale=refund_of_sale,
                 original_number_by_refund_id=original_number_by_refund_id,
                 clients_by_id=clients_by_id,
+                invoice_numbers=invoice_numbers,
             )
             for t in transactions
         ]
@@ -652,12 +674,14 @@ async def get_transaction(
     )
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
     clients_by_id = await _load_clients(db, [transaction.client_id])
+    invoice_numbers = await _load_invoice_numbers(db, [transaction_id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
+        invoice_numbers=invoice_numbers,
     )
 
 
@@ -683,12 +707,14 @@ async def cancel_transaction(
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [refund_tx.id])
     clients_by_id = await _load_clients(db, [refund_tx.client_id])
+    invoice_numbers = await _load_invoice_numbers(db, [refund_tx.id])
     return _serialize_transaction(
         refund_tx,
         receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
+        invoice_numbers=invoice_numbers,
     )
 
 
@@ -1103,12 +1129,14 @@ async def detach_client(
         transaction_id, transaction=transaction
     )
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
+    invoice_numbers = await _load_invoice_numbers(db, [transaction_id])
     return _serialize_transaction(
         transaction,
         receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id={},
+        invoice_numbers=invoice_numbers,
     )
 
 

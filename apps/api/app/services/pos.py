@@ -44,7 +44,12 @@ from app.services.jet import (
     EVENT_SALE_CREATED,
     JournalService,
 )
-from app.services.receipt import ReceiptService, apply_client_line, format_client_label
+from app.services.receipt import (
+    ReceiptService,
+    apply_client_line,
+    apply_invoice_line,
+    format_client_label,
+)
 from app.services.settings_service import SettingsService
 from app.services.tva_service import compute_line_totals
 
@@ -503,9 +508,29 @@ class PosService:
         courant, pas celui de l'instant de la vente. Seule la ligne
         « Client : … » est reecrite (`apply_client_line`) ; tout le reste
         du ticket reste figé au mot pres.
+
+        Meme mecanique pour la ligne « Facture : F-… » (PR8/J5) : la
+        facture d'un client professionnel est emise APRES la vente, le
+        ticket stocke ne peut donc pas la porter — elle est posee au rendu
+        (`apply_invoice_line`).
         """
         transaction = transaction or receipt.transaction
-        return apply_client_line(receipt.content, await self.client_label(transaction))
+        text = apply_client_line(receipt.content, await self.client_label(transaction))
+        number, is_credit_note = await self.invoice_label(transaction)
+        return apply_invoice_line(text, number, credit_note=is_credit_note)
+
+    async def invoice_label(self, transaction: Transaction | None) -> tuple[str | None, bool]:
+        """``(numero de facture, est_un_avoir)`` du document rattache a une
+        transaction — ``(None, False)`` quand elle n'est pas facturee."""
+        if transaction is None:
+            return None, False
+        from app.models.invoice import InvoiceKind
+        from app.services.invoice_service import InvoiceService
+
+        invoice = await InvoiceService(self.db).get_for_transaction(transaction.id)
+        if invoice is None:
+            return None, False
+        return invoice.invoice_number, invoice.kind == InvoiceKind.credit_note
 
     async def client_label(self, transaction: Transaction | None) -> str | None:
         """« Prenom N. » de la cliente rattachee a une vente, ou ``None``."""

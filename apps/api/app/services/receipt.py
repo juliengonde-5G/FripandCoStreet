@@ -68,6 +68,50 @@ def apply_client_line(content: str, client_label: str | None) -> str:
     return "\n".join(lines)
 
 
+# Prefixes EXACTS des lignes « document » du ticket (PR8/J5), sur le meme
+# modele que `CLIENT_LINE_PREFIX` : une seule definition partagee entre
+# l'ecriture et la reecriture a la lecture.
+INVOICE_LINE_PREFIX = "Facture : "
+CREDIT_NOTE_LINE_PREFIX = "Avoir : "
+
+
+def apply_invoice_line(
+    content: str, invoice_number: str | None, *, credit_note: bool = False
+) -> str:
+    """Fonction soeur d'`apply_client_line` (PR8/J5) : pose la ligne
+    « Facture : F-2026-0001 » (ou « Avoir : A-2026-0001 ») sur un ticket
+    DEJA FIGE, au moment du RENDU.
+
+    Meme mecanique, et pour la meme raison : `receipts.content` est
+    immuable en base (trigger `trg_protect_receipt`), or la facture est
+    emise APRES la vente — le ticket stocke ne peut donc pas la porter. Le
+    numero de facture n'entre dans aucun hash : l'ajouter au rendu ne
+    touche a aucune preuve.
+
+    La ligne se place sous la derniere des lignes d'en-tete presentes —
+    « Client : … », a defaut « Vendeuse : … » (PR8/J2), a defaut « Date: »
+    — de sorte que l'ordre rendu est toujours le meme, quel que soit
+    l'ordre dans lequel ces fonctions de rendu sont appliquees.
+    """
+    prefix = CREDIT_NOTE_LINE_PREFIX if credit_note else INVOICE_LINE_PREFIX
+    lines = [
+        line
+        for line in content.split("\n")
+        if not line.startswith(INVOICE_LINE_PREFIX)
+        and not line.startswith(CREDIT_NOTE_LINE_PREFIX)
+    ]
+    if invoice_number:
+        anchors = (CLIENT_LINE_PREFIX, CASHIER_LINE_PREFIX, _DATE_LINE_PREFIX)
+        for anchor_prefix in anchors:
+            for index, line in enumerate(lines):
+                if line.startswith(anchor_prefix):
+                    lines.insert(index + 1, f"{prefix}{invoice_number}")
+                    return "\n".join(lines)
+        # Format inattendu (ni ligne client, ni ligne date) : on n'invente
+        # pas un emplacement, le ticket est rendu tel quel.
+    return "\n".join(lines)
+
+
 def format_client_label(first_name: str | None, last_name: str | None) -> str | None:
     """« Prenom N. » — le seul identifiant client imprime sur un ticket (PR7,
     I3).
