@@ -94,23 +94,34 @@ def normalize_email(raw: str) -> str:
 # Separateurs de saisie tolerés dans un numero : espaces (y compris
 # insecables), points, tirets (y compris typographiques), barres obliques,
 # parentheses. Tout le reste est refusé.
-_PHONE_SEPARATORS = re.compile(r"[\s.\-  ‐-―/()]+")
-_PHONE_ALLOWED = re.compile(r"^\+?\d{6,31}$")
+_PHONE_SEPARATORS = re.compile(r"[\s.\-\u00a0\u202f\u2010-\u2015/()]+")
+_PHONE_ALLOWED = re.compile(r"^\+?\d+$")
+_PHONE_MIN_DIGITS = 6
+_PHONE_MAX_DIGITS = 15  # E.164
 
 
 def normalize_phone(raw: str | None) -> str | None:
-    """Normalise un numero de telephone : espaces, points, tirets,
-    parentheses et barres obliques retires ; chiffres conserves ; `+`
-    conserve UNIQUEMENT s'il est en tete.
+    """Normalise un numero de telephone vers UNE seule forme canonique.
 
-    Aucune conversion d'un format vers un autre (I3) : `06 12 34 56 78`,
-    `+33 6 12 34 56 78` et `0033 6 12 34 56 78` donnent respectivement
-    `0612345678`, `+33612345678` et `0033612345678` — la caisse stocke ce
-    que la cliente a dicté, elle ne réécrit pas son numéro.
+    En boutique, la vendeuse tape toujours le numero a la francaise
+    (`06 99 88 77 66`) alors que la cliente a pu le dicter en `+33` ou en
+    `0033` : si la caisse stockait chaque saisie telle quelle, la meme
+    personne existerait en trois fiches et ne serait retrouvee que par la
+    forme exacte tapee le jour de sa creation. On canonise donc a
+    l'ecriture :
 
-    Renvoie ``None`` pour une saisie vide (le telephone est facultatif tant
-    qu'un e-mail est fourni), leve `InvalidPhone` (422 `invalid_phone`)
-    pour une saisie non vide mais inexploitable.
+    - `+…` (deja international, France ou etranger) : conserve tel quel ;
+    - `0033X…` : le prefixe international compose devient `+33X…` ;
+    - `0X…` a 10 chiffres avec `X != 0` (numero national francais) :
+      `+33X…` ;
+    - tout le reste (etranger compose sans indicatif) : les chiffres bruts.
+
+    Espaces, points, tirets, parentheses et barres obliques sont retires
+    avant tout traitement. Renvoie ``None`` pour une saisie vide (le
+    telephone est facultatif tant qu'un e-mail est fourni), leve
+    `InvalidPhone` (422 `invalid_phone`) pour une saisie non vide mais
+    inexploitable : caracteres interdits, moins de 6 chiffres ou plus de 15
+    (limite E.164).
     """
     candidate = _PHONE_SEPARATORS.sub("", (raw or "").strip())
     if not candidate:
@@ -120,25 +131,55 @@ def normalize_phone(raw: str | None) -> str | None:
             "Numéro de téléphone invalide : chiffres uniquement, "
             "éventuellement précédés de « + »."
         )
-    return candidate
+    digits = candidate.lstrip("+")
+    if not _PHONE_MIN_DIGITS <= len(digits) <= _PHONE_MAX_DIGITS:
+        raise InvalidPhone(
+            "Numéro de téléphone invalide : entre 6 et 15 chiffres attendus."
+        )
+
+    if candidate.startswith("+"):
+        return candidate
+    if digits.startswith("0033"):
+        return "+33" + digits[4:]
+    if len(digits) == 10 and digits.startswith("0") and digits[1] != "0":
+        return "+33" + digits[1:]
+    return digits
+
+
+def phone_digits(phone: str | None) -> str:
+    """Chiffres d'un numero stocke (le `+` en moins) — c'est sur eux que
+    porte la recherche."""
+    return (phone or "").lstrip("+")
 
 
 def phone_search_digits(raw: str | None) -> str | None:
-    """Chiffres significatifs d'une recherche par telephone (I3).
+    """Chiffres significatifs d'une recherche par telephone.
 
     Renvoie ``None`` si la saisie n'est PAS un numero (elle contient autre
-    chose que des chiffres, des espaces/separateurs et un `+`) — l'appelant
-    retombe alors sur la recherche e-mail/nom/prenom. Le `+` de tete est
-    retiré : la recherche se fait sur les chiffres, de sorte que
-    `+33 6 12 34 56 78` retrouve aussi bien `+33612345678` que
-    `0033612345678`.
+    chose que des chiffres, des separateurs et un `+` eventuel) —
+    l'appelant retombe alors sur la seule recherche e-mail/nom/prenom.
+
+    Sinon la saisie est reduite a ses chiffres, puis debarrassee de ce qui
+    n'identifie pas la ligne : le prefixe international `0033`, puis
+    l'indicatif `33`, puis le `0` national de tete. Il reste le numero
+    « nu », cherche en sous-chaine dans les chiffres stockes — de sorte que
+    `06 99 88`, `+33 6 99 88`, `0033 699 88` et `699 88` retrouvent tous la
+    fiche `+33699887766`. Un numero etranger (`+41791234567`) se retrouve
+    par ses propres chiffres (`41 79 12`, `79 123 45`…).
     """
     candidate = _PHONE_SEPARATORS.sub("", (raw or "").strip())
     if not candidate:
         return None
-    if candidate.startswith("+"):
-        candidate = candidate[1:]
-    return candidate if candidate.isdigit() else None
+    digits = candidate.lstrip("+")
+    if not digits.isdigit():
+        return None
+    if digits.startswith("0033"):
+        digits = digits[4:]
+    elif digits.startswith("33"):
+        digits = digits[2:]
+    if digits.startswith("0"):
+        digits = digits[1:]
+    return digits or None
 
 
 def _correlation_hash(value: str) -> str:
@@ -211,10 +252,13 @@ class ClientService:
 
         Quand la saisie ne contient que des chiffres, des separateurs et un
         eventuel `+` (`phone_search_digits`), la recherche porte AUSSI sur
-        `phone` en `LIKE` sur les chiffres : `06 12` retrouve `0612345678`,
-        `+33 6 12` retrouve indifferemment `+33612345678` et
-        `0033612345678`. Une saisie alphabetique ne declenche jamais de
-        clause `phone` (inutile : le numero stocke n'a pas de lettres).
+        `phone`, en `LIKE` sur les chiffres STOCKES (le `+` retire cote
+        base) et sur les chiffres NUS de la saisie (prefixes `0033`, `33`
+        et `0` national retires cote saisie). C'est ce qui permet a la
+        vendeuse de taper le numero a la francaise — `06 99 88` — et de
+        retrouver une fiche enregistree en `+33699887766`. La recherche par
+        nom/e-mail est inchangee ; une saisie alphabetique ne declenche
+        jamais de clause `phone` (le numero stocke n'a pas de lettres).
         """
         query = select(Client).order_by(Client.created_at.desc()).limit(limit)
         if not include_anonymized:
@@ -228,7 +272,9 @@ class ClientService:
             )
             digits = phone_search_digits(q)
             if digits:
-                condition = condition | Client.phone.like(f"%{digits}%")
+                condition = condition | func.replace(Client.phone, "+", "").like(
+                    f"%{digits}%"
+                )
             query = query.where(condition)
         return (await self.db.execute(query)).scalars().all()
 

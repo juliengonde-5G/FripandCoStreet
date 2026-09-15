@@ -24,6 +24,7 @@ from app.services.client_service import (
     InvalidPhone,
     mask_phone,
     normalize_phone,
+    phone_digits,
     phone_search_digits,
 )
 from app.services.fiscal import FiscalService
@@ -56,42 +57,78 @@ async def _create_client(client, auth_headers, **payload) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_normalize_phone_strips_separators_and_keeps_the_dialled_format():
+def test_normalize_phone_canonicalises_the_three_french_forms():
+    """La meme ligne dictee de trois facons donne UNE seule fiche."""
     # Espaces, points, tirets, parentheses, insecables : retires.
-    assert normalize_phone("06 12 34 56 78") == "0612345678"
-    assert normalize_phone("06.12.34.56.78") == "0612345678"
-    assert normalize_phone("06-12-34-56-78") == "0612345678"
-    assert normalize_phone(" (06) 12 34 56 78 ") == "0612345678"
-    # Aucune conversion d'un format vers un autre : ce que la cliente a
-    # dicte est ce qui est stocke.
-    assert normalize_phone("+33 6 12 34 56 78") == "+33612345678"
-    assert normalize_phone("0033 6 12 34 56 78") == "0033612345678"
-    # Le `+` n'est conserve QU'en tete.
+    for raw in (
+        "06 12 34 56 78",
+        "06.12.34.56.78",
+        "06-12-34-56-78",
+        " (06) 12 34 56 78 ",
+        "+33 6 12 34 56 78",
+        "0033 6 12 34 56 78",
+    ):
+        assert normalize_phone(raw) == "+33612345678", raw
+
+
+def test_normalize_phone_keeps_foreign_numbers_and_raw_digits():
+    # Deja international : conserve tel quel, quel que soit le pays.
+    assert normalize_phone("+41 79 123 45 67") == "+41791234567"
+    # Etranger compose sans indicatif : chiffres bruts, aucune invention
+    # d'un `+33` qui serait faux.
+    assert normalize_phone("1234567") == "1234567"
+    assert normalize_phone("0033 6 12 34 56 78") == "+33612345678"
+    # Un `0X…` qui n'a pas 10 chiffres n'est pas un numero francais.
+    assert normalize_phone("012345678") == "012345678"
     assert normalize_phone("") is None
     assert normalize_phone(None) is None
     assert normalize_phone("   ") is None
 
 
 def test_normalize_phone_rejects_garbage():
-    for raw in ("pas-un-numero", "06 12 34 56 7A", "12345", "++33612345678", "06+12"):
+    for raw in (
+        "pas-un-numero",
+        "06 12 34 56 7A",
+        "12345",  # moins de 6 chiffres
+        "1234567890123456",  # plus de 15 chiffres (E.164)
+        "++33612345678",
+        "06+12",
+    ):
         with pytest.raises(InvalidPhone) as exc:
             normalize_phone(raw)
         assert exc.value.code == "invalid_phone"
         assert exc.value.status_code == 422
 
 
-def test_phone_search_digits_only_matches_numeric_queries():
-    assert phone_search_digits("06 12") == "0612"
-    assert phone_search_digits("+33 6 12") == "33612"
+def test_phone_search_digits_strips_what_does_not_identify_the_line():
+    # Les quatre facons de taper la meme ligne francaise se rejoignent.
+    assert (
+        phone_search_digits("06 99 88")
+        == phone_search_digits("+33 6 99 88")
+        == phone_search_digits("0033699 88")
+        == phone_search_digits("699 88")
+        == "69988"
+    )
+    # Etranger : cherche par ses propres chiffres.
+    assert phone_search_digits("41 79 12") == "417912"
+    assert phone_search_digits("79 123 45") == "7912345"
+    # Pas un numero -> la recherche reste sur nom/e-mail.
     assert phone_search_digits("martin") is None
     assert phone_search_digits("a@b.fr") is None
+    assert phone_search_digits("33") is None
+
+
+def test_phone_digits_drops_the_plus():
+    assert phone_digits("+33699887766") == "33699887766"
+    assert phone_digits("0612345678") == "0612345678"
+    assert phone_digits(None) == ""
 
 
 def test_mask_phone_keeps_only_the_last_two_digits():
-    assert mask_phone("0612345678") == "••••••••78"
     assert mask_phone("+33612345678") == "••••••••••78"
+    assert mask_phone("0612345678") == "••••••••78"
     assert mask_phone(None) is None
-    assert "12345" not in (mask_phone("0612345678") or "")
+    assert "12345" not in (mask_phone("+33612345678") or "")
 
 
 def test_format_client_label_is_first_name_plus_initial():
@@ -116,7 +153,8 @@ async def test_create_or_get_without_email_creates_a_phone_only_client():
         await db.commit()
         assert created is True
         assert client.email is None
-        assert client.phone == "0612345678"
+        # Canonise a l'ecriture : une seule forme en base.
+        assert client.phone == "+33612345678"
 
 
 async def test_create_or_get_is_idempotent_on_email_and_on_phone():
@@ -163,7 +201,7 @@ async def test_create_or_get_completes_a_fiche_without_overwriting():
         await db.commit()
         assert was_created is False
         assert again.id == client_id
-        assert again.phone == "0612000000"
+        assert again.phone == "+33612000000"
         assert again.last_name == "Martin"
         assert again.first_name == "Alice"  # jamais efface
 
@@ -218,11 +256,26 @@ async def test_search_covers_email_name_and_phone():
         assert [c.first_name for c in await service.search("chercheuse")] == ["Camille"]
         assert [c.first_name for c in await service.search("durand")] == ["Camille"]
         assert [c.first_name for c in await service.search("camil")] == ["Camille"]
-        # Telephone : avec espaces, avec `+33`, ou juste les derniers chiffres.
-        assert [c.first_name for c in await service.search("+33 6 99 88 77 66")] == ["Zoe"]
-        assert [c.first_name for c in await service.search("699887766")] == ["Zoe"]
+        # Telephone : les quatre facons de taper la meme ligne retrouvent la
+        # fiche, quelle que soit la forme sous laquelle elle a ete saisie.
+        for q in ("06 99 88 77 66", "+33 6 99 88 77 66", "0033 699 88 77 66", "699887766"):
+            assert [c.first_name for c in await service.search(q)] == ["Zoe"], q
+        assert [c.first_name for c in await service.search("06 99 88")] == ["Zoe"]
         assert [c.first_name for c in await service.search("88 77 66")] == ["Zoe"]
         assert await service.search("06 00 00 00 00") == []
+
+
+async def test_search_finds_a_foreign_number_by_its_digits():
+    async with async_session() as db:
+        service = ClientService(db)
+        await service.create_or_get(phone="+41 79 123 45 67", first_name="Heidi", user_id=None)
+        await db.commit()
+
+    async with async_session() as db:
+        service = ClientService(db)
+        assert [c.phone for c in await service.search("+41 79 123 45 67")] == ["+41791234567"]
+        assert [c.first_name for c in await service.search("41 79 12")] == ["Heidi"]
+        assert [c.first_name for c in await service.search("79 123 45")] == ["Heidi"]
 
 
 async def test_anonymize_erases_the_phone_too():
@@ -294,8 +347,9 @@ async def test_create_pos_client_with_phone_only(client, auth_headers):
     assert fiche["first_name"] == "Alice"
     assert fiche["email_masked"] is None
     # Coordonnees masquees en caisse — jamais le numero complet.
-    assert fiche["phone_masked"] == "••••••••78"
-    assert "0612345678" not in json.dumps(body)
+    assert fiche["phone_masked"] == "••••••••••78"
+    assert "+33612345678" not in json.dumps(body)
+    assert "612345678" not in json.dumps(body)
     assert fiche["visits_count"] == 0
     assert fiche["last_visit_at"] is None
 
@@ -347,24 +401,34 @@ async def test_create_pos_client_records_consent_only_when_checked(client, auth_
 
 
 async def test_search_pos_clients_by_phone_returns_masked_fiche(client, auth_headers):
+    """La fiche est enregistree en `+33…` ; la vendeuse tape le numero a la
+    francaise, ou n'importe laquelle des autres formes, et la retrouve."""
     await _create_client(
         client, auth_headers, first_name="Zoe", last_name="Blanc", phone="+33 6 99 88 77 66"
     )
-    r = await client.get(
-        "/api/pos/clients/search", params={"q": "06 99 88"}, headers=auth_headers
-    )
-    assert r.status_code == 200, r.text
-    # `06 99 88` ne matche pas `+33699887766` : la recherche porte sur les
-    # chiffres tels qu'ils sont stockes.
-    assert r.json()["clients"] == []
 
-    r2 = await client.get("/api/pos/clients/search", params={"q": "99 88 77"}, headers=auth_headers)
-    assert r2.status_code == 200
-    found = r2.json()["clients"]
-    assert len(found) == 1
-    assert found[0]["last_name"] == "Blanc"
-    assert found[0]["phone_masked"] == "••••••••••66"
-    assert "33699887766" not in r2.text
+    for q in ("06 99 88", "+33 6 99 88", "0033699 88", "699 88", "99 88 77"):
+        r = await client.get("/api/pos/clients/search", params={"q": q}, headers=auth_headers)
+        assert r.status_code == 200, r.text
+        found = r.json()["clients"]
+        assert len(found) == 1, q
+        assert found[0]["last_name"] == "Blanc"
+        assert found[0]["phone_masked"] == "••••••••••66"
+        # Jamais le numero complet dans la reponse.
+        assert "33699887766" not in r.text
+
+    # Une autre ligne ne repond pas.
+    other = await client.get(
+        "/api/pos/clients/search", params={"q": "06 00 00 00 00"}, headers=auth_headers
+    )
+    assert other.json()["clients"] == []
+
+
+async def test_search_pos_clients_finds_a_foreign_number(client, auth_headers):
+    await _create_client(client, auth_headers, first_name="Heidi", phone="+41 79 123 45 67")
+    r = await client.get("/api/pos/clients/search", params={"q": "79 123 45"}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert [c["first_name"] for c in r.json()["clients"]] == ["Heidi"]
 
 
 async def test_search_pos_clients_requires_two_characters(client, auth_headers):
@@ -506,6 +570,8 @@ async def test_sale_with_client_id_prints_first_name_and_initial_on_the_receipt(
     # Jamais de coordonnees sur un ticket remis en main propre.
     assert "ticket@example.com" not in receipt
     assert "0612345678" not in receipt
+    assert "+33612345678" not in receipt
+    assert "612345678" not in receipt
     assert "Martin" not in receipt
 
 
@@ -551,7 +617,7 @@ async def test_jet_client_linked_carries_no_personal_data(client, auth_headers, 
             [e.payload for e in (await db.execute(select(JournalEvent))).scalars().all()],
             ensure_ascii=False,
         )
-        for secret in ("jet@example.com", "0612345678", "Alice", "Martin"):
+        for secret in ("jet@example.com", "+33612345678", "612345678", "Alice", "Martin"):
             assert secret not in everything
 
 
@@ -630,17 +696,18 @@ async def test_admin_clients_search_and_fiche_cover_the_phone(client, auth_heade
     rows = listing.json()["clients"]
     assert len(rows) == 1
     assert rows[0]["id"] == client_id
-    # Cote back-office, le numero est en clair (c'est la fiche, pas la caisse).
-    assert rows[0]["phone"] == "0612345678"
+    # Cote back-office, le numero est en clair (c'est la fiche, pas la
+    # caisse) et sous sa forme canonique `+33…`.
+    assert rows[0]["phone"] == "+33612345678"
     assert rows[0]["email"] is None
 
     detail = await client.get(f"/api/admin/clients/{client_id}", headers=auth_headers)
     assert detail.status_code == 200
-    assert detail.json()["client"]["phone"] == "0612345678"
+    assert detail.json()["client"]["phone"] == "+33612345678"
 
     export = await client.get(f"/api/admin/clients/{client_id}/export", headers=auth_headers)
     assert export.status_code == 200
-    assert export.json()["client"]["phone"] == "0612345678"
+    assert export.json()["client"]["phone"] == "+33612345678"
 
 
 # ---------------------------------------------------------------------------
