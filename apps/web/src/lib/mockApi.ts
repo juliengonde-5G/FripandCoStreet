@@ -16,7 +16,7 @@
  * simulées et répondent 501 si jamais appelées.
  */
 import { ApiError } from "./apiError";
-import { isValidEmail } from "./format";
+import { isValidEmail, maskEmail } from "./format";
 import { EXPORTABLE_TABLES, TVA_RATES } from "./types";
 import type {
   AccountingExportDetail,
@@ -31,6 +31,7 @@ import type {
   CbCheckoutState,
   Client,
   ClientFull,
+  ClientRef,
   ClientTransactionRef,
   ClosuresIntegrityResponse,
   CommunicationEntry,
@@ -38,6 +39,8 @@ import type {
   ConsentEntry,
   ConsentUpdateRequest,
   CreateFiscalClosureRequest,
+  CreatePosClientRequest,
+  CreatePosClientResponse,
   CreateTransactionRequest,
   DashboardDay,
   DashboardResponse,
@@ -54,6 +57,7 @@ import type {
   MessagingStatus,
   PaymentInput,
   PaymentOut,
+  PosClient,
   PrinterStatus,
   PrintReceiptResponse,
   ReceiptSettings,
@@ -288,6 +292,7 @@ function reset(): void {
   closureSeq = 0;
   databaseBackups = seedDatabaseBackups();
   seedDemoSales();
+  seedDemoClients();
   // `backupConfig` n'est pas remis à zéro, comme `settings` — un réglage
   // édité par la personne reste après un reset (état applicatif, pas une
   // donnée transactionnelle du jeu de démo).
@@ -415,6 +420,86 @@ function sumPayments(txs: TransactionOut[], wanted: "cash" | "card"): number {
 
 function normalizeEmail(email: string | null | undefined): string {
   return (email ?? "").trim().toLowerCase();
+}
+
+// --- PR7 (I3) : téléphone, masquage, libellé ticket --------------------
+
+const PHONE_SEPARATORS = /[\s.\-/()]/g;
+
+/** Même canonisation que le service backend (`normalize_phone`) : un seul
+ * numéro stocké quelle que soit la façon dont la cliente l'a dicté.
+ * `null` pour une saisie vide ; lève `invalid_phone` pour une saisie non
+ * vide mais inexploitable (moins de 6 chiffres, plus de 15, caractères
+ * interdits). */
+function normalizePhoneMock(raw: string | null | undefined): string | null {
+  const candidate = (raw ?? "").trim().replace(PHONE_SEPARATORS, "");
+  if (!candidate) return null;
+  if (!/^\+?\d+$/.test(candidate)) {
+    fail(422, "Numéro de téléphone invalide.", "invalid_phone");
+  }
+  const digits = candidate.replace(/\D/g, "");
+  if (digits.length < 6 || digits.length > 15) {
+    fail(422, "Numéro de téléphone invalide.", "invalid_phone");
+  }
+  if (candidate.startsWith("+")) return candidate;
+  if (candidate.startsWith("0033")) return `+33${candidate.slice(4)}`;
+  if (candidate.length === 10 && candidate.startsWith("0") && candidate[1] !== "0") {
+    return `+33${candidate.slice(1)}`;
+  }
+  return digits;
+}
+
+/** Masque le numéro comme le backend : seuls les deux derniers chiffres
+ * restent lisibles. */
+function maskPhoneMock(phone: string | null | undefined): string | null {
+  if (!phone) return null;
+  if (phone.length <= 2) return "••";
+  return "•".repeat(phone.length - 2) + phone.slice(-2);
+}
+
+/** « Prénom N. » — le seul identifiant client imprimé sur un ticket (I3) :
+ * jamais l'e-mail, jamais le téléphone. `null` sans prénom. */
+function receiptClientLabel(client: { first_name: string | null; last_name: string | null } | null | undefined): string | null {
+  const first = (client?.first_name ?? "").trim();
+  if (!first) return null;
+  const last = (client?.last_name ?? "").trim();
+  return last ? `${first} ${last.charAt(0).toUpperCase()}.` : first;
+}
+
+/** Nombre de visites et dernière visite d'une fiche — une VENTE rattachée,
+ * jamais une annulation (même définition que `ClientService.visit_stats`). */
+function visitStats(clientId: string): { visits_count: number; last_visit_at: string | null } {
+  const sales = transactions.filter((t) => t.transaction_type === "sale" && t.client?.id === clientId);
+  const last = sales.reduce<string | null>(
+    (acc, t) => (acc === null || new Date(t.created_at) > new Date(acc) ? t.created_at : acc),
+    null,
+  );
+  return { visits_count: sales.length, last_visit_at: last };
+}
+
+/** Projection « caisse » d'une fiche : coordonnées masquées + visites. */
+function posClientPayload(client: Client): PosClient {
+  const stats = visitStats(client.id);
+  return {
+    id: client.id,
+    first_name: client.first_name,
+    last_name: client.last_name,
+    email_masked: client.email ? maskEmail(client.email) : null,
+    phone_masked: maskPhoneMock(client.phone),
+    newsletter_optin: client.newsletter_optin,
+    last_visit_at: stats.last_visit_at,
+    visits_count: stats.visits_count,
+  };
+}
+
+/** Référence embarquée sur une vente (`TransactionOut.client`). */
+function clientRefOf(client: Client): ClientRef {
+  return {
+    id: client.id,
+    email: client.email,
+    first_name: client.first_name,
+    last_name: client.last_name,
+  };
 }
 
 /** Dernière ligne de consentement connue pour (client, purpose) — l'état
@@ -588,6 +673,13 @@ function buildReceiptText(tx: TransactionOut, originalNumber?: number): string {
     rows.push(`Ticket n° ${tx.transaction_number}`);
   }
   rows.push(new Date(tx.created_at).toLocaleString("fr-FR"));
+  // PR7 (I3) — « Prénom N. » sous l'en-tête quand une cliente est
+  // rattachée. Jamais son e-mail ni son téléphone : le ticket est un
+  // document remis en main propre, parfois oublié sur le comptoir.
+  if (tx.transaction_type === "sale") {
+    const clientLabel = receiptClientLabel(tx.client);
+    if (clientLabel) rows.push(`Client : ${clientLabel}`);
+  }
   rows.push(rule);
   for (const it of tx.items) {
     rows.push(`${it.label}`);
@@ -887,6 +979,43 @@ function seedDemoSales(): void {
   }
 }
 
+/** Trois fiches de démo (PR7, I3) — une avec e-mail seul, une avec
+ * téléphone seul, une avec les deux : la recherche en caisse, l'écran de
+ * fin de vente et l'onglet Clients doivent tous pouvoir être vus sans
+ * saisie préalable. Quelques ventes du jeu de démo leur sont rattachées
+ * pour que « N visites » et « Dernière visite … » disent quelque chose. */
+function seedDemoClients(): void {
+  const seeds: { first_name: string; last_name: string; email: string | null; phone: string | null; optin: boolean }[] = [
+    { first_name: "Julie", last_name: "Vasseur", email: "julie.vasseur@exemple.fr", phone: "+33612345678", optin: true },
+    { first_name: "Sophie", last_name: "Lemoine", email: null, phone: "+33699887766", optin: false },
+    { first_name: "Karim", last_name: "Benali", email: "karim.benali@exemple.fr", phone: null, optin: false },
+  ];
+  const created = seeds.map((seed) => {
+    const client: Client = {
+      id: uuid(),
+      email: seed.email,
+      phone: seed.phone,
+      first_name: seed.first_name,
+      last_name: seed.last_name,
+      newsletter_optin: false,
+      created_at: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString(),
+      anonymized_at: null,
+    };
+    clients.push(client);
+    if (seed.optin) recordConsent(client, true, "pos");
+    return client;
+  });
+
+  // Rattachement de quelques ventes passées (les plus anciennes du jeu de
+  // démo), en régénérant leur ticket pour qu'il porte la ligne « Client ».
+  const pastSales = transactions.filter((t) => t.transaction_type === "sale").slice(-6);
+  pastSales.forEach((tx, index) => {
+    const client = created[index % created.length];
+    tx.client = clientRefOf(client);
+    tx.receipt_text = buildReceiptText(tx);
+  });
+}
+
 /** Net d'un jour civil : Σ ventes − Σ annulations (H2). */
 function netOfDay(dayKey: string): { net: number; sales: TransactionOut[]; refunds: TransactionOut[] } {
   const sales: TransactionOut[] = [];
@@ -1151,6 +1280,15 @@ export async function mockFetchAPI<T = unknown>(
 
     const tx = buildTransaction("sale", body.items, body.discount, body.payments ?? []);
     (tx as unknown as { client_uuid?: string }).client_uuid = body.client_uuid;
+    // PR7 (I3) — cliente choisie en caisse AVANT l'encaissement : le lien
+    // est posé dès la création, et le ticket porte « Client : Prénom N. ».
+    if (body.client_id) {
+      const client = clients.find((c) => c.id === body.client_id && !c.anonymized_at);
+      if (!client) fail(404, "Fiche cliente introuvable.", "client_not_found");
+      tx.client = clientRefOf(client!);
+      tx.receipt_text = buildReceiptText(tx);
+      logJet("client.linked", { client_id: client!.id, number: tx.transaction_number });
+    }
     transactions.unshift(tx);
     logJet("sale.created", { number: tx.transaction_number, total_ttc: tx.total_ttc, methods: Array.from(methods) });
     return attachCancelInfo(tx) as unknown as T;
@@ -1716,6 +1854,98 @@ export async function mockFetchAPI<T = unknown>(
     return closure as unknown as T;
   }
 
+  // --- PR7 (I3) : client en caisse (recherche, création, détachement) ---
+
+  if (path === "/api/pos/clients/search" && method === "GET") {
+    const raw = (query.get("q") ?? "").trim();
+    if (raw.length < 2) fail(422, "Tapez au moins 2 caractères.", "invalid_query");
+    const needle = raw.toLowerCase();
+    // Recherche par chiffres dès que la saisie en contient : « 66 » doit
+    // retrouver un numéro quelle que soit la façon dont il a été dicté.
+    const digits = raw.replace(/\D/g, "");
+    const found = clients.filter((c) => {
+      if (c.anonymized_at) return false;
+      if ((c.email ?? "").toLowerCase().includes(needle)) return true;
+      if ((c.first_name ?? "").toLowerCase().includes(needle)) return true;
+      if ((c.last_name ?? "").toLowerCase().includes(needle)) return true;
+      if (digits.length >= 2 && c.phone && c.phone.replace(/\D/g, "").includes(digits)) return true;
+      return false;
+    });
+    return { clients: found.slice(0, 20).map(posClientPayload) } as unknown as T;
+  }
+
+  if (path === "/api/pos/clients" && method === "POST") {
+    const body = parseBody<CreatePosClientRequest>(options);
+    const email = normalizeEmail(body.email) || null;
+    if (email && !isValidEmail(email)) fail(422, "Adresse e-mail invalide.", "invalid_email");
+    const phone = normalizePhoneMock(body.phone);
+    if (!email && !phone) {
+      fail(422, "Renseignez au moins un e-mail ou un téléphone.", "contact_required");
+    }
+
+    // `create_or_get` : par e-mail, sinon par téléphone, sinon création.
+    let client = email ? clients.find((c) => c.email === email && !c.anonymized_at) : undefined;
+    if (!client && phone) client = clients.find((c) => c.phone === phone && !c.anonymized_at);
+    const created = !client;
+    if (!client) {
+      client = {
+        id: uuid(),
+        email,
+        phone,
+        first_name: body.first_name?.trim() || null,
+        last_name: body.last_name?.trim() || null,
+        newsletter_optin: false,
+        created_at: nowIso(),
+        anonymized_at: null,
+      };
+      clients.unshift(client);
+      logJet("client.created", { client_id: client.id });
+    } else {
+      // Une fiche existante se complète, jamais ne s'écrase.
+      let updated = false;
+      if (email && !client.email) {
+        client.email = email;
+        updated = true;
+      }
+      if (phone && !client.phone) {
+        client.phone = phone;
+        updated = true;
+      }
+      if (body.first_name?.trim() && !client.first_name) {
+        client.first_name = body.first_name.trim();
+        updated = true;
+      }
+      if (body.last_name?.trim() && !client.last_name) {
+        client.last_name = body.last_name.trim();
+        updated = true;
+      }
+      if (updated) logJet("client.updated", { client_id: client.id });
+    }
+
+    // Consentement enregistré UNIQUEMENT s'il est coché (case jamais
+    // pré-cochée côté caisse).
+    if (body.newsletter_optin) {
+      const last = latestConsent(client.id, "newsletter");
+      if (!last || !last.granted) recordConsent(client, true, "pos");
+    }
+
+    const response: CreatePosClientResponse = { client: posClientPayload(client), created };
+    return response as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/client$/)) && method === "DELETE") {
+    const tx = transactions.find((t) => t.id === m![1]);
+    if (!tx) fail(404, "Vente introuvable.", "not_found");
+    if (tx!.client) {
+      logJet("client.unlinked", { client_id: tx!.client.id, number: tx!.transaction_number });
+      tx!.client = null;
+      // Seule une VENTE porte une cliente : régénérer son ticket ne
+      // demande aucun numéro d'origine (réservé aux annulations).
+      tx!.receipt_text = buildReceiptText(tx!);
+    }
+    return attachCancelInfo(tx!) as unknown as T;
+  }
+
   // --- PR3 : client, e-mail (Brevo), newsletter, RGPD -------------------
 
   if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/client$/)) && method === "POST") {
@@ -1730,6 +1960,8 @@ export async function mockFetchAPI<T = unknown>(
       client = {
         id: uuid(),
         email,
+        // Le parcours « ticket par e-mail » ne demande pas de téléphone.
+        phone: null,
         first_name: body.first_name?.trim() || null,
         last_name: body.last_name?.trim() || null,
         newsletter_optin: false,
@@ -1764,7 +1996,8 @@ export async function mockFetchAPI<T = unknown>(
     }
 
     if (!tx!.client) {
-      tx!.client = { id: client.id, email: client.email };
+      tx!.client = clientRefOf(client);
+      tx!.receipt_text = buildReceiptText(tx!);
       logJet("client.linked", { client_id: client.id, number: tx!.transaction_number });
     }
 
@@ -1778,7 +2011,9 @@ export async function mockFetchAPI<T = unknown>(
         transaction_id: tx!.id,
         kind: "receipt",
         channel: "email",
-        recipient: client.email,
+        // `client.email` est nullable depuis PR7 ; ici l'adresse vient
+        // d'être validée, on trace donc celle du corps de la requête.
+        recipient: email,
         subject: `Votre ticket Frip & Co Street n° ${tx!.transaction_number}`,
         provider,
         status,
@@ -1829,15 +2064,20 @@ export async function mockFetchAPI<T = unknown>(
   }
 
   if (path === "/api/admin/clients" && method === "GET") {
-    const q = normalizeEmail(query.get("q") ?? "");
+    const raw = (query.get("q") ?? "").trim();
+    const q = raw.toLowerCase();
+    // PR7 (I3) : la recherche admin couvre aussi le téléphone, sur les
+    // chiffres — même règle qu'en caisse.
+    const digits = raw.replace(/\D/g, "");
     const limit = query.get("limit") ? parseInt(query.get("limit")!, 10) : 50;
     let list = clients;
     if (q) {
       list = list.filter(
         (c) =>
-          c.email.includes(q) ||
+          (c.email ?? "").includes(q) ||
           (c.first_name ?? "").toLowerCase().includes(q) ||
-          (c.last_name ?? "").toLowerCase().includes(q),
+          (c.last_name ?? "").toLowerCase().includes(q) ||
+          (digits.length >= 2 && !!c.phone && c.phone.replace(/\D/g, "").includes(digits)),
       );
     }
     return { clients: list.slice(0, limit) } as unknown as T;
@@ -1861,6 +2101,8 @@ export async function mockFetchAPI<T = unknown>(
       fail(422, "Le motif de la suppression doit contenir au moins 3 caractères.", "reason_required");
     }
     client!.email = `supprime-${client!.id}@anonyme.invalid`;
+    // PR7 (I3) : l'anonymisation efface aussi le téléphone.
+    client!.phone = null;
     client!.first_name = null;
     client!.last_name = null;
     recordConsent(client!, false, "rgpd", body.reason.trim());
@@ -2383,6 +2625,7 @@ export async function mockFetchBytesWithHeaders(endpoint: string, options?: Fetc
 // tableau de bord d'accueil a des chiffres dès le premier écran, sans
 // toucher à la journée en cours (ventes datées d'hier et avant).
 seedDemoSales();
+seedDemoClients();
 
 // Expose un reset pour d'éventuels tests / Playwright (état frais par page load
 // de toute façon, car le module vit en mémoire côté navigateur).
