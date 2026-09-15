@@ -174,6 +174,12 @@ export interface TransactionOut {
    * « Tickets du jour → détail » (§5), qui doit préremplir l'e-mail du
    * client lié et afficher son adresse partiellement masquée. */
   client?: ClientRef | null;
+  /** PR8 (J5) — n° de la facture B2B émise sur cette vente
+   * (`F-2026-0001`), ou de l'avoir (`A-2026-0001`) quand la transaction est
+   * l'annulation d'une vente facturée. `null` tant qu'aucune facture n'a
+   * été émise. Absent/`undefined` sur un backend antérieur à PR8 : toujours
+   * traité comme `null` côté front. */
+  invoice_number?: string | null;
 }
 
 /** Ligne allégée pour la liste « Tickets du jour ». */
@@ -780,4 +786,67 @@ export interface CreatePosClientRequest {
 export interface CreatePosClientResponse {
   client: PosClient;
   created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// PR8 — facture B2B et avoir (docs/ARCHITECTURE_PR8.md §1, J5/J6)
+//
+// Une facture est émise sur une VENTE non annulée, une seule fois. Annuler
+// une vente facturée génère automatiquement un AVOIR (`kind: "credit_note"`,
+// n° `A-AAAA-NNNN`) rattaché à l'annulation et lié à la facture d'origine.
+// Le client professionnel n'est PAS une fiche client (`Client`) : ses
+// coordonnées vivent uniquement sur la facture.
+//
+// Montants en **chaînes décimales à 2 décimales** ("0.00"), comme le
+// tableau de bord PR6 — jamais de flottant pour de l'argent.
+// ---------------------------------------------------------------------------
+
+export type InvoiceKind = "invoice" | "credit_note";
+
+export interface Invoice {
+  id: string;
+  kind: InvoiceKind;
+  /** `F-2026-0001` (facture) ou `A-2026-0001` (avoir). */
+  invoice_number: string;
+  /** Transaction portant le document : la vente pour une facture,
+   * l'annulation pour un avoir. */
+  transaction_id: string;
+  transaction_number: number;
+  /** Facture annulée par cet avoir — `null` sur une facture. */
+  original_invoice_id: string | null;
+  company_name: string;
+  /** 14 chiffres, sans espaces (la mise en forme est faite à l'affichage,
+   * cf. lib/siret.ts::formatSiret). */
+  siret: string;
+  vat_number: string | null;
+  address_line1: string;
+  address_line2: string | null;
+  postal_code: string;
+  city: string;
+  total_ht: string;
+  total_tva: string;
+  total_ttc: string;
+  issued_at: string;
+}
+
+/** Corps de `POST /api/pos/transactions/{id}/invoice`. */
+export interface IssueInvoiceRequest {
+  company_name: string;
+  siret: string;
+  vat_number?: string;
+  address_line1: string;
+  address_line2?: string;
+  postal_code: string;
+  city: string;
+}
+
+/** `POST /api/pos/transactions/{id}/invoice` → 201, et
+ * `GET /api/pos/transactions/{id}/invoice` (404 `not_found` si aucune). */
+export interface InvoiceResponse {
+  invoice: Invoice;
+}
+
+/** `GET /api/admin/invoices?year=2026`. */
+export interface InvoiceListResponse {
+  invoices: Invoice[];
 }
