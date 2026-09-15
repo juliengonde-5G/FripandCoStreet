@@ -450,14 +450,16 @@ async def create_transaction(
     except PosServiceError as exc:
         _raise(exc)
     await db.commit()
-    receipt = await PosService(db).get_receipt(transaction.id)
+    receipt_text = await PosService(db).get_rendered_receipt_text(
+        transaction.id, transaction=transaction
+    )
     if not created:
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction.id])
     clients_by_id = await _load_clients(db, [transaction.client_id])
     return _serialize_transaction(
         transaction,
-        receipt_text=receipt.content if receipt else None,
+        receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
@@ -503,12 +505,14 @@ async def get_transaction(
     transaction = await PosService(db).get_transaction(transaction_id)
     if transaction is None:
         raise PosServiceError("Transaction introuvable.", code="not_found", status_code=404)
-    receipt = await PosService(db).get_receipt(transaction_id)
+    receipt_text = await PosService(db).get_rendered_receipt_text(
+        transaction_id, transaction=transaction
+    )
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
     clients_by_id = await _load_clients(db, [transaction.client_id])
     return _serialize_transaction(
         transaction,
-        receipt_text=receipt.content if receipt else None,
+        receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
@@ -530,14 +534,16 @@ async def cancel_transaction(
     except PosServiceError as exc:
         _raise(exc)
     await db.commit()
-    receipt = await PosService(db).get_receipt(refund_tx.id)
+    receipt_text = await PosService(db).get_rendered_receipt_text(
+        refund_tx.id, transaction=refund_tx
+    )
     if not created:
         response.status_code = 200
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [refund_tx.id])
     clients_by_id = await _load_clients(db, [refund_tx.client_id])
     return _serialize_transaction(
         refund_tx,
-        receipt_text=receipt.content if receipt else None,
+        receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id=clients_by_id,
@@ -572,7 +578,12 @@ async def get_receipt(
         payload={"transaction_id": str(transaction_id), "duplicate_count": receipt.duplicate_count},
     )
     await db.commit()
-    return {"text": receipt.content, "duplicate_count": receipt.duplicate_count}
+    # Rendu courant (PR7/I3) : le contenu stocke est immuable (trigger
+    # `trg_protect_receipt`), c'est donc la LECTURE qui remet la ligne
+    # « Client : … » en accord avec le rattachement d'aujourd'hui — voir
+    # `services/receipt.py::apply_client_line`.
+    text = await PosService(db).render_receipt_text(receipt)
+    return {"text": text, "duplicate_count": receipt.duplicate_count}
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +697,10 @@ async def print_receipt(
     shop = await SettingsService(db).get("shop")
     kick_bytes = _drawer_kick_bytes(hardware) if body.kick and hardware.get("drawer_enabled") else None
     payload = escpos_service.build_receipt(
-        receipt.content, shop_name=shop.get("name") or "", kick=kick_bytes
+        # Rendu courant (PR7/I3) — cf. `GET .../receipt` ci-dessus.
+        await PosService(db).render_receipt_text(receipt),
+        shop_name=shop.get("name") or "",
+        kick=kick_bytes,
     )
     try:
         await escpos_service.send_to_printer(host, port, payload)
@@ -743,7 +757,10 @@ async def get_transaction_escpos(
     shop = await SettingsService(db).get("shop")
     kick_bytes = _drawer_kick_bytes(hardware) if kick and hardware.get("drawer_enabled") else None
     payload = escpos_service.build_receipt(
-        receipt.content, shop_name=shop.get("name") or "", kick=kick_bytes
+        # Rendu courant (PR7/I3) — cf. `GET .../receipt` ci-dessus.
+        await PosService(db).render_receipt_text(receipt),
+        shop_name=shop.get("name") or "",
+        kick=kick_bytes,
     )
 
     is_duplicate = await _mark_printed(db, receipt)
@@ -940,11 +957,13 @@ async def detach_client(
         _raise(exc)
     await db.commit()
     transaction = await PosService(db).get_transaction(transaction_id)
-    receipt = await PosService(db).get_receipt(transaction_id)
+    receipt_text = await PosService(db).get_rendered_receipt_text(
+        transaction_id, transaction=transaction
+    )
     refund_of_sale, original_number_by_refund_id = await _load_refund_links(db, [transaction_id])
     return _serialize_transaction(
         transaction,
-        receipt_text=receipt.content if receipt else None,
+        receipt_text=receipt_text,
         refund_of_sale=refund_of_sale,
         original_number_by_refund_id=original_number_by_refund_id,
         clients_by_id={},

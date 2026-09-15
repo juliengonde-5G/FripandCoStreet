@@ -43,7 +43,7 @@ from app.services.jet import (
     EVENT_SALE_CREATED,
     JournalService,
 )
-from app.services.receipt import ReceiptService, format_client_label
+from app.services.receipt import ReceiptService, apply_client_line, format_client_label
 from app.services.settings_service import SettingsService
 from app.services.tva_service import compute_line_totals
 
@@ -453,6 +453,45 @@ class PosService:
             await self.db.execute(select(Receipt).where(Receipt.transaction_id == transaction_id))
         ).scalar_one_or_none()
 
+    async def render_receipt_text(self, receipt, *, transaction: Transaction | None = None) -> str:
+        """Texte du ticket tel qu'il doit etre RENDU aujourd'hui (PR7/I3).
+
+        Le contenu stocke est immuable (trigger `trg_protect_receipt`) :
+        c'est la trace du ticket emis, et c'est elle qui part dans
+        l'archive fiscale. Mais le rattachement d'une cliente peut changer
+        APRES la vente (rattachement a posteriori de PR3, detachement
+        `DELETE /pos/transactions/{id}/client`) — la relecture, le renvoi
+        par e-mail et la reimpression doivent alors montrer l'etat
+        courant, pas celui de l'instant de la vente. Seule la ligne
+        « Client : … » est reecrite (`apply_client_line`) ; tout le reste
+        du ticket reste figé au mot pres.
+        """
+        transaction = transaction or receipt.transaction
+        return apply_client_line(receipt.content, await self.client_label(transaction))
+
+    async def client_label(self, transaction: Transaction | None) -> str | None:
+        """« Prenom N. » de la cliente rattachee a une vente, ou ``None``."""
+        if transaction is None or transaction.client_id is None:
+            return None
+        from app.models.client import Client
+
+        client = (
+            await self.db.execute(select(Client).where(Client.id == transaction.client_id))
+        ).scalar_one_or_none()
+        if client is None:
+            return None
+        return format_client_label(client.first_name, client.last_name)
+
+    async def get_rendered_receipt_text(
+        self, transaction_id: uuid.UUID, *, transaction: Transaction | None = None
+    ) -> str | None:
+        """`render_receipt_text` pour un ticket charge par son id de vente
+        — ``None`` s'il n'y a pas (encore) de ticket."""
+        receipt = await self.get_receipt(transaction_id)
+        if receipt is None:
+            return None
+        return await self.render_receipt_text(receipt, transaction=transaction)
+
     # ------------------------------------------------------------------
     # Caisse espèces (§4.3)
     # ------------------------------------------------------------------
@@ -809,10 +848,15 @@ class PosService:
 
         shop = await SettingsService(self.db).get("shop")
         receipt = await self.get_receipt(transaction.id)
+        # Rendu courant (PR7/I3) : si la vente a ete rattachee — ou
+        # detachee — apres coup, l'e-mail porte l'etat d'aujourd'hui, pas
+        # celui de l'instant de la vente.
         receipt_text = (
-            receipt.content
+            await self.render_receipt_text(receipt, transaction=transaction)
             if receipt is not None
-            else ReceiptService().generate(transaction, shop=shop)
+            else ReceiptService().generate(
+                transaction, shop=shop, client_label=await self.client_label(transaction)
+            )
         )
         dpo_email = shop.get("dpo_email") if isinstance(shop, dict) else None
         message = build_receipt_email(

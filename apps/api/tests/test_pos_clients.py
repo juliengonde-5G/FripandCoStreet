@@ -13,11 +13,13 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import settings
 from app.core.database import async_session, engine
 from app.models.client import Client
 from app.models.jet import JournalEvent
 from app.models.pos import Transaction
-from app.services import brevo_contacts
+from app.models.receipt import Receipt
+from app.services import brevo_contacts, email_gateway
 from app.services.client_service import (
     ClientService,
     ContactRequired,
@@ -28,7 +30,7 @@ from app.services.client_service import (
     phone_search_digits,
 )
 from app.services.fiscal import FiscalService
-from app.services.receipt import format_client_label
+from app.services.receipt import apply_client_line, format_client_label
 
 pytestmark = pytest.mark.anyio
 
@@ -619,6 +621,167 @@ async def test_jet_client_linked_carries_no_personal_data(client, auth_headers, 
         )
         for secret in ("jet@example.com", "+33612345678", "612345678", "Alice", "Martin"):
             assert secret not in everything
+
+
+# ---------------------------------------------------------------------------
+# Le nom imprime suit le rattachement — a la relecture, au renvoi par
+# e-mail et a la reimpression (le contenu stocke, lui, est immuable)
+# ---------------------------------------------------------------------------
+
+
+def _fake_brevo(calls: list[dict]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(201, json={"messageId": "fake-1"})
+
+    return httpx.MockTransport(handler)
+
+
+async def _send_receipt_by_email(client, auth_headers, sale_id, monkeypatch) -> dict:
+    """Renvoie le ticket par e-mail vers un faux Brevo et rend le corps
+    exact qui lui a ete transmis."""
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "ak-test")
+    monkeypatch.setattr(settings, "BREVO_ANONYMOUS_TRACKING", True)
+    calls: list[dict] = []
+    monkeypatch.setattr(email_gateway, "_transport", _fake_brevo(calls))
+
+    r = await client.post(
+        f"/api/pos/transactions/{sale_id}/receipt/email",
+        json={"email": "renvoi@example.com"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["provider"] == "brevo", r.json()
+    assert len(calls) == 1
+    return calls[0]
+
+
+async def test_detaching_a_client_removes_the_name_everywhere_it_is_read(
+    client, auth_headers, open_drawer, monkeypatch
+):
+    """Le bug : `receipts.content` est IMMUABLE (trigger
+    `trg_protect_receipt`), le detachement ne pouvait donc pas le
+    reecrire — relecture, renvoi par e-mail et reimpression continuaient
+    de porter « Client : Alice M. ». C'est desormais le RENDU qui suit le
+    rattachement courant."""
+    fiche = await _create_client(
+        client, auth_headers, first_name="Alice", last_name="Martin", email="detache@example.com"
+    )
+    sale = await _sell(client, auth_headers, client_id=fiche["client"]["id"])
+    assert "Client : Alice M." in sale["receipt_text"]
+
+    detach = await client.delete(
+        f"/api/pos/transactions/{sale['id']}/client", headers=auth_headers
+    )
+    assert detach.status_code == 200, detach.text
+    assert "Client :" not in detach.json()["receipt_text"]
+
+    # 1. relecture du texte
+    read = await client.get(f"/api/pos/transactions/{sale['id']}/receipt", headers=auth_headers)
+    assert read.status_code == 200, read.text
+    assert "Client :" not in read.json()["text"]
+    assert "Alice" not in read.json()["text"]
+
+    # 2. detail de la vente (panneau Tickets)
+    detail = await client.get(f"/api/pos/transactions/{sale['id']}", headers=auth_headers)
+    assert "Client :" not in detail.json()["receipt_text"]
+
+    # 3. renvoi par e-mail (corps reellement transmis au fournisseur)
+    payload = await _send_receipt_by_email(client, auth_headers, sale["id"], monkeypatch)
+    assert "Client :" not in payload["textContent"]
+    assert "Alice" not in payload["textContent"]
+    assert "Alice" not in payload["htmlContent"]
+
+    # 4. reimpression ESC/POS (tablette)
+    escpos = await client.get(
+        f"/api/pos/transactions/{sale['id']}/escpos", headers=auth_headers
+    )
+    assert escpos.status_code == 200, escpos.text
+    assert b"Client :" not in escpos.content
+    assert b"Alice" not in escpos.content
+
+
+async def test_attaching_a_client_afterwards_adds_the_name_everywhere_it_is_read(
+    client, auth_headers, open_drawer, monkeypatch
+):
+    """Symetrique : le rattachement a posteriori (PR3, apres le paiement)
+    fait apparaitre « Client : … » sur le ticket relu, renvoye et
+    reimprime."""
+    sale = await _sell(client, auth_headers)
+    assert "Client :" not in sale["receipt_text"]
+
+    attach = await client.post(
+        f"/api/pos/transactions/{sale['id']}/client",
+        json={
+            "email": "apres-coup@example.com",
+            "first_name": "Camille",
+            "last_name": "Durand",
+            "send_receipt": False,
+        },
+        headers=auth_headers,
+    )
+    assert attach.status_code == 200, attach.text
+
+    read = await client.get(f"/api/pos/transactions/{sale['id']}/receipt", headers=auth_headers)
+    assert "Client : Camille D." in read.json()["text"]
+    # Toujours pas de coordonnees sur un ticket.
+    assert "apres-coup@example.com" not in read.json()["text"]
+    assert "Durand" not in read.json()["text"]
+
+    detail = await client.get(f"/api/pos/transactions/{sale['id']}", headers=auth_headers)
+    assert "Client : Camille D." in detail.json()["receipt_text"]
+
+    payload = await _send_receipt_by_email(client, auth_headers, sale["id"], monkeypatch)
+    assert "Client : Camille D." in payload["textContent"]
+
+    escpos = await client.get(
+        f"/api/pos/transactions/{sale['id']}/escpos", headers=auth_headers
+    )
+    assert "Client : Camille D.".encode("cp437", "replace") in escpos.content
+
+
+async def test_stored_receipt_content_is_never_rewritten(client, auth_headers, open_drawer):
+    """La trace reste intacte : c'est le rendu qui bouge, pas la ligne en
+    base (elle est protegee par `trg_protect_receipt` et part telle quelle
+    dans l'archive fiscale)."""
+    fiche = await _create_client(
+        client, auth_headers, first_name="Alice", last_name="Martin", email="trace@example.com"
+    )
+    sale = await _sell(client, auth_headers, client_id=fiche["client"]["id"])
+
+    async with async_session() as db:
+        stored = (
+            await db.execute(
+                select(Receipt).where(Receipt.transaction_id == uuid.UUID(sale["id"]))
+            )
+        ).scalar_one()
+        frozen = stored.content
+    assert "Client : Alice M." in frozen
+
+    r = await client.delete(f"/api/pos/transactions/{sale['id']}/client", headers=auth_headers)
+    assert r.status_code == 200, r.text
+
+    async with async_session() as db:
+        after = (
+            await db.execute(
+                select(Receipt).where(Receipt.transaction_id == uuid.UUID(sale["id"]))
+            )
+        ).scalar_one()
+        assert after.content == frozen  # aucune reecriture en base
+
+
+def test_apply_client_line_is_idempotent_and_surgical():
+    ticket = "\n".join(
+        ["FRIP & CO STREET", "Ticket #42", "Date: 15/09/2026 18:30", "-" * 42, "Total TTC"]
+    )
+    with_client = apply_client_line(ticket, "Alice M.")
+    assert with_client.split("\n")[3] == "Client : Alice M."
+    # Poser deux fois ne duplique pas la ligne.
+    assert apply_client_line(with_client, "Alice M.") == with_client
+    # Changer de cliente remplace la ligne, ne l'ajoute pas.
+    assert apply_client_line(with_client, "Zoe B.").count("Client : ") == 1
+    # Retirer la cliente rend le ticket d'origine, au caractere pres.
+    assert apply_client_line(with_client, None) == ticket
 
 
 # ---------------------------------------------------------------------------

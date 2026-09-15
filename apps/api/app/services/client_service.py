@@ -40,6 +40,7 @@ from app.services.jet import (
     EVENT_CONSENT_REVOKED,
     JournalService,
 )
+from app.services.receipt import apply_client_line, format_client_label
 from app.version import CONSENT_POLICY_VERSION
 
 logger = logging.getLogger("fripco")
@@ -745,7 +746,20 @@ class ClientService:
                 )
             ).scalar_one_or_none()
             if receipt is not None:
-                tickets.append({"transaction_number": tx.transaction_number, "content": receipt.content})
+                # Export RGPD : le ticket est rendu avec la ligne
+                # « Client : … » telle qu'elle est AUJOURD'HUI (PR7/I3), la
+                # vente exportee etant par construction rattachee a cette
+                # cliente. Le contenu stocke, lui, reste fige (immuable en
+                # base) et c'est lui qui part dans l'archive fiscale.
+                tickets.append(
+                    {
+                        "transaction_number": tx.transaction_number,
+                        "content": apply_client_line(
+                            receipt.content,
+                            format_client_label(client.first_name, client.last_name),
+                        ),
+                    }
+                )
         data["tickets"] = tickets
         data["exported_at"] = datetime.now(timezone.utc).isoformat()
         await JournalService(self.db).record(
