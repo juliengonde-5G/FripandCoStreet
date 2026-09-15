@@ -16,18 +16,31 @@
  * simulées et répondent 501 si jamais appelées.
  */
 import { ApiError } from "./apiError";
+import { isValidEmail } from "./format";
 import { TVA_RATES } from "./types";
 import type {
+  AnonymizeRequest,
+  AttachClientRequest,
+  AttachClientResponse,
   CashMovement,
   CashMovementReason,
   CbCheckoutState,
+  Client,
+  ClientFull,
+  ClientTransactionRef,
+  CommunicationEntry,
+  CommunicationProvider,
+  ConsentEntry,
+  ConsentUpdateRequest,
   CreateTransactionRequest,
   DrawerCurrentResponse,
   FiscalSettings,
   JetEvent,
+  MessagingStatus,
   PaymentInput,
   PaymentOut,
   ReceiptSettings,
+  SendReceiptEmailRequest,
   ShopSettings,
   TransactionItemOut,
   TransactionOut,
@@ -35,6 +48,10 @@ import type {
   ZReport,
 } from "./types";
 import type { FetchAPIOptions } from "./api";
+
+/** Version de la politique de consentement (E8) — même constante que le
+ * backend (`CONSENT_POLICY_VERSION`), horodate chaque ligne du journal. */
+const CONSENT_POLICY_VERSION = "2026-09";
 
 export function isMockEnabled(): boolean {
   return process.env.NEXT_PUBLIC_MOCK_API === "1";
@@ -56,6 +73,17 @@ let txSeq = 0;
 let zSeq = 0;
 let jetSeq = 0;
 
+/** Lignes internes au mock (portent `client_id`/`transaction_id`, jamais
+ * exposés tels quels : les endpoints filtrent déjà sur un client avant de
+ * renvoyer `ConsentEntry`/`CommunicationEntry`). */
+interface MockConsent extends ConsentEntry {
+  client_id: string;
+}
+interface MockCommunication extends CommunicationEntry {
+  client_id: string | null;
+  transaction_id: string | null;
+}
+
 let transactions: TransactionOut[] = [];
 // vente annulée (id) -> id de la transaction `refund` qui l'a annulée.
 // Alimente `cancelled`/`refund_transaction_id` (attendus par TicketsPanel,
@@ -64,6 +92,22 @@ const cancelledToRefund = new Map<string, string>();
 let cashMovements: CashMovement[] = [];
 let zReports: ZReport[] = [];
 let jetEvents: JetEvent[] = [];
+
+// --- PR3 : clients, consentements, envois de ticket -----------------------
+let clients: Client[] = [];
+let consents: MockConsent[] = [];
+let communications: MockCommunication[] = [];
+
+/** État simulé de la messagerie (`GET /admin/messaging/status`) : sans clé
+ * Brevo configurée, comme un déploiement de démo réel — l'e-mail part en
+ * simulation (tracé, jamais réellement délivré) et la newsletter Brevo
+ * refuse le push (`brevo.status: "failed"`, note discrète non bloquante,
+ * §5 PR3). Non modélisé comme éditable ici : c'est un état lecture seule
+ * côté front, comme en prod (aucun secret ne transite par l'UI). */
+const messagingStatus: MessagingStatus = {
+  email: { provider: "simulated", anonymous_tracking: false, from: "noreply@fripandcostreet.fr" },
+  brevo_contacts: { configured: false, list_id_set: false, webhook_token_set: false },
+};
 
 // Les cumuls perpétuels (§2 z_reports.cumulative_*) sont une exigence du
 // contrat backend ; le type ZReport côté front (§6, tableau de bord Z)
@@ -93,6 +137,7 @@ let settings: {
     vat_number: "FR12345678900",
     phone: "02 35 00 00 00",
     email: "contact@fripandcostreet.fr",
+    dpo_email: "dpo@fripandcostreet.fr",
   },
   fiscal: { tva_rate: "20.00" },
   receipt: {
@@ -110,6 +155,9 @@ function reset(): void {
   zReports = [];
   jetEvents = [];
   cbAttempts.clear();
+  clients = [];
+  consents = [];
+  communications = [];
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +203,56 @@ function parseBody<T>(options?: FetchAPIOptions): T {
 
 function tvaRateNumber(): number {
   return parseFloat(settings.fiscal.tva_rate);
+}
+
+// --- PR3 : aides clients/consentements --------------------------------
+
+function normalizeEmail(email: string | null | undefined): string {
+  return (email ?? "").trim().toLowerCase();
+}
+
+/** Dernière ligne de consentement connue pour (client, purpose) — l'état
+ * courant du journal append-only (E5). */
+function latestConsent(clientId: string, purpose: "newsletter"): MockConsent | undefined {
+  return consents.find((c) => c.client_id === clientId && c.purpose === purpose);
+}
+
+function recordConsent(
+  client: Client,
+  granted: boolean,
+  source: MockConsent["source"],
+  note?: string | null,
+): void {
+  consents.unshift({
+    id: uuid(),
+    client_id: client.id,
+    purpose: "newsletter",
+    granted,
+    source,
+    policy_version: CONSENT_POLICY_VERSION,
+    note: note?.trim() || null,
+    created_at: nowIso(),
+  });
+  client.newsletter_optin = granted;
+  logJet(granted ? "consent.granted" : "consent.revoked", { client_id: client.id, source });
+}
+
+function clientFullPayload(client: Client): ClientFull {
+  return {
+    client,
+    consents: consents.filter((c) => c.client_id === client.id),
+    communications: communications.filter((c) => c.client_id === client.id),
+    transactions: transactions
+      .filter((t) => t.client?.id === client.id)
+      .map(
+        (t): ClientTransactionRef => ({
+          id: t.id,
+          transaction_number: t.transaction_number,
+          created_at: t.created_at,
+          total_ttc: t.total_ttc,
+        }),
+      ),
+  };
 }
 
 /** Ventile une remise globale sur les lignes, prorata en centimes, reste
@@ -711,6 +809,176 @@ export async function mockFetchAPI<T = unknown>(
       z_reports: { ok: true, count: zReports.length, message: "Chaîne des rapports Z cohérente." },
       jet: { ok: true, count: jetEvents.length, message: "Journal des événements complet." },
     } as unknown as T;
+  }
+
+  // --- PR3 : client, e-mail (Brevo), newsletter, RGPD -------------------
+
+  if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/client$/)) && method === "POST") {
+    const tx = transactions.find((t) => t.id === m![1]);
+    if (!tx) fail(404, "Ticket introuvable.", "not_found");
+    const body = parseBody<AttachClientRequest>(options);
+    const email = normalizeEmail(body.email);
+    if (!isValidEmail(email)) fail(422, "Adresse e-mail invalide.", "invalid_email");
+
+    let client = clients.find((c) => c.email === email && !c.anonymized_at);
+    if (!client) {
+      client = {
+        id: uuid(),
+        email,
+        first_name: body.first_name?.trim() || null,
+        last_name: body.last_name?.trim() || null,
+        newsletter_optin: false,
+        created_at: nowIso(),
+        anonymized_at: null,
+      };
+      clients.unshift(client);
+      logJet("client.created", { client_id: client.id });
+    } else {
+      let updated = false;
+      if (body.first_name?.trim() && !client.first_name) {
+        client.first_name = body.first_name.trim();
+        updated = true;
+      }
+      if (body.last_name?.trim() && !client.last_name) {
+        client.last_name = body.last_name.trim();
+        updated = true;
+      }
+      if (updated) logJet("client.updated", { client_id: client.id });
+    }
+
+    if (tx!.client && tx!.client.id !== client.id) {
+      fail(409, "Ce ticket est déjà rattaché à un autre client.", "client_already_linked");
+    }
+
+    // Consentement newsletter — idempotent côté POS (§3 : ne réécrit pas si
+    // l'état courant est déjà celui demandé).
+    const wanted = !!body.newsletter_optin;
+    const last = latestConsent(client.id, "newsletter");
+    if (!last || last.granted !== wanted) {
+      recordConsent(client, wanted, "pos");
+    }
+
+    if (!tx!.client) {
+      tx!.client = { id: client.id, email: client.email };
+      logJet("client.linked", { client_id: client.id, number: tx!.transaction_number });
+    }
+
+    let receipt_email: AttachClientResponse["receipt_email"] = null;
+    if (body.send_receipt !== false) {
+      const provider: CommunicationProvider = messagingStatus.email.provider;
+      const status = provider === "simulated" ? "simulated" : "sent";
+      communications.unshift({
+        id: uuid(),
+        client_id: client.id,
+        transaction_id: tx!.id,
+        kind: "receipt",
+        channel: "email",
+        recipient: client.email,
+        subject: `Votre ticket Frip & Co Street n° ${tx!.transaction_number}`,
+        provider,
+        status,
+        created_at: nowIso(),
+      });
+      receipt_email = { status, provider };
+      logJet("receipt.emailed", { client_id: client.id, number: tx!.transaction_number, provider });
+    }
+
+    let brevo: AttachClientResponse["brevo"] = null;
+    if (wanted) {
+      if (messagingStatus.brevo_contacts.configured) {
+        brevo = { status: "ok" };
+        logJet("brevo.synced", { client_id: client.id });
+      } else {
+        brevo = { status: "failed" };
+        logJet("brevo.sync_failed", { client_id: client.id });
+      }
+    }
+
+    const response: AttachClientResponse = { client, receipt_email, brevo };
+    return response as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/receipt\/email$/)) && method === "POST") {
+    const tx = transactions.find((t) => t.id === m![1]);
+    if (!tx) fail(404, "Ticket introuvable.", "not_found");
+    const body = parseBody<SendReceiptEmailRequest>(options);
+    const email = normalizeEmail(body.email) || normalizeEmail(tx!.client?.email);
+    if (!isValidEmail(email)) fail(422, "Adresse e-mail invalide.", "invalid_email");
+
+    const provider: CommunicationProvider = messagingStatus.email.provider;
+    const status = provider === "simulated" ? "simulated" : "sent";
+    communications.unshift({
+      id: uuid(),
+      client_id: tx!.client?.id ?? null,
+      transaction_id: tx!.id,
+      kind: "receipt",
+      channel: "email",
+      recipient: email,
+      subject: `Votre ticket Frip & Co Street n° ${tx!.transaction_number}`,
+      provider,
+      status,
+      created_at: nowIso(),
+    });
+    logJet("receipt.emailed", { number: tx!.transaction_number, provider, resend: true });
+    return { status, provider } as unknown as T;
+  }
+
+  if (path === "/api/admin/clients" && method === "GET") {
+    const q = normalizeEmail(query.get("q") ?? "");
+    const limit = query.get("limit") ? parseInt(query.get("limit")!, 10) : 50;
+    let list = clients;
+    if (q) {
+      list = list.filter(
+        (c) =>
+          c.email.includes(q) ||
+          (c.first_name ?? "").toLowerCase().includes(q) ||
+          (c.last_name ?? "").toLowerCase().includes(q),
+      );
+    }
+    return { clients: list.slice(0, limit) } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/consents$/)) && method === "POST") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client) fail(404, "Client introuvable.", "not_found");
+    if (client!.anonymized_at) fail(409, "Ce client a été anonymisé : plus de coordonnées à contacter.", "client_anonymized");
+    const body = parseBody<ConsentUpdateRequest>(options);
+    recordConsent(client!, !!body.granted, "admin", body.note);
+    return clientFullPayload(client!) as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/anonymize$/)) && method === "POST") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client) fail(404, "Client introuvable.", "not_found");
+    if (client!.anonymized_at) fail(409, "Ce client a déjà été anonymisé.", "already_anonymized");
+    const body = parseBody<AnonymizeRequest>(options);
+    if (!body.reason || body.reason.trim().length < 3) {
+      fail(422, "Le motif de la suppression doit contenir au moins 3 caractères.", "reason_required");
+    }
+    client!.email = `supprime-${client!.id}@anonyme.invalid`;
+    client!.first_name = null;
+    client!.last_name = null;
+    recordConsent(client!, false, "rgpd", body.reason.trim());
+    client!.anonymized_at = nowIso();
+    logJet("client.anonymized", { client_id: client!.id, reason: body.reason.trim() });
+    return clientFullPayload(client!) as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/export$/)) && method === "GET") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client) fail(404, "Client introuvable.", "not_found");
+    logJet("client.exported", { client_id: client!.id });
+    return clientFullPayload(client!) as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)$/)) && method === "GET") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client) fail(404, "Client introuvable.", "not_found");
+    return clientFullPayload(client!) as unknown as T;
+  }
+
+  if (path === "/api/admin/messaging/status" && method === "GET") {
+    return messagingStatus as unknown as T;
   }
 
   if (path === "/api/admin/jet" && method === "GET") {

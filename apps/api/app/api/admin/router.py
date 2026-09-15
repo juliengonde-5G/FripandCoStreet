@@ -2,19 +2,25 @@
 # la lecture du JET (compte unique : tout utilisateur authentifie a acces
 # admin, pas de RoleChecker). PR2 (docs/ARCHITECTURE_PR2.md §4.7) ajoute les
 # parametres boutique (`app_settings`) et le controle d'integrite fiscal.
+# PR3 (docs/ARCHITECTURE_PR3.md §4) ajoute la fiche client/RGPD, l'etat de
+# la messagerie et `dpo_email` sur `shop`.
 import re
+import uuid
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user
+from app.models.client import Client, ConsentPurpose, ConsentSource
 from app.models.jet import JournalEvent
 from app.models.user import User
+from app.services import brevo_contacts, email_gateway
+from app.services.client_service import ClientService
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.jet import EVENT_FISCAL_INTEGRITY_CHECKED, JournalService
 from app.services.settings_service import SettingsService
@@ -97,6 +103,9 @@ class ShopSettingsIn(BaseModel):
     vat_number: str = ""
     phone: str = ""
     email: str = ""
+    # PR3 (E8) — contact DPO affiché sur l'écran de saisie client et dans le
+    # paragraphe RGPD de l'e-mail du ticket (`services/receipt_email.py`).
+    dpo_email: str = ""
 
     @field_validator("siret")
     @classmethod
@@ -235,4 +244,136 @@ async def list_payment_attempts(
             }
             for a in rows
         ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# Clients — fiche, consentements, RGPD (PR3, §4 ARCHITECTURE_PR3.md)
+# ---------------------------------------------------------------------------
+
+
+class AdminConsentIn(BaseModel):
+    purpose: Literal["newsletter"] = "newsletter"
+    granted: bool
+    note: str | None = None
+
+
+class AdminAnonymizeIn(BaseModel):
+    reason: str = Field(min_length=3)
+
+
+def _serialize_client_summary(client: Client) -> dict:
+    return {
+        "id": str(client.id),
+        "email": client.email,
+        "first_name": client.first_name,
+        "last_name": client.last_name,
+        "newsletter_optin": client.newsletter_optin,
+        "created_at": client.created_at.isoformat() if client.created_at else None,
+        "anonymized_at": client.anonymized_at.isoformat() if client.anonymized_at else None,
+    }
+
+
+@router.get("/clients")
+async def list_clients(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    q: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    clients = await ClientService(db).search(q, limit=limit)
+    return {"clients": [_serialize_client_summary(c) for c in clients]}
+
+
+@router.get("/clients/{client_id}")
+async def get_client(
+    client_id: uuid.UUID,
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    client = await ClientService(db).get_by_id(client_id)
+    if client is None:
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    return await ClientService(db).get_full(client)
+
+
+@router.post("/clients/{client_id}/consents")
+async def add_client_consent(
+    client_id: uuid.UUID,
+    body: AdminConsentIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    client = await ClientService(db).get_by_id(client_id)
+    if client is None:
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    clients = ClientService(db)
+    purpose = ConsentPurpose(body.purpose)
+    await clients.record_consent(
+        client=client,
+        purpose=purpose,
+        granted=body.granted,
+        source=ConsentSource.admin,
+        user_id=user.id,
+        note=body.note,
+    )
+    if purpose == ConsentPurpose.newsletter:
+        # Revue RGPD : « Retirer de la newsletter »/« Inscrire (demande
+        # orale) » doit refléter l'état sur la liste Brevo dédiée (push si
+        # opt-in, retrait sinon) — best-effort, jamais bloquant.
+        await clients.sync_brevo(client, user_id=user.id)
+    await db.commit()
+    return await clients.get_full(client)
+
+
+@router.post("/clients/{client_id}/anonymize")
+async def anonymize_client(
+    client_id: uuid.UUID,
+    body: AdminAnonymizeIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    client = await ClientService(db).get_by_id(client_id)
+    if client is None:
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    # L'e-mail original doit être capturé AVANT l'anonymisation (E4) :
+    # `anonymize()` le remplace par une adresse `@anonyme.invalid`, ce
+    # n'est donc plus l'adresse à retirer côté Brevo.
+    original_email = client.email
+    await ClientService(db).anonymize(client=client, user_id=user.id, reason=body.reason)
+    if original_email:
+        # Best-effort — jamais `DELETE /v3/contacts` ni `emailBlacklisted`
+        # (E1) : seule l'appartenance à la liste Fripco dédiée change.
+        await brevo_contacts.remove_from_list(original_email)
+    await db.commit()
+    return await ClientService(db).get_full(client)
+
+
+@router.get("/clients/{client_id}/export")
+async def export_client(
+    client_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    client = await ClientService(db).get_by_id(client_id)
+    if client is None:
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    data = await ClientService(db).export(client, user_id=user.id)
+    await db.commit()
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Messagerie — état des fournisseurs, aucun secret (PR3, §4)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/messaging/status")
+async def messaging_status(
+    _user: Annotated[User, Depends(get_current_user)],
+    _db: Annotated[AsyncSession, Depends(get_db)],
+):
+    return {
+        "email": email_gateway.describe_active_provider(),
+        "brevo_contacts": brevo_contacts.describe(),
     }

@@ -62,6 +62,34 @@ class Settings(BaseSettings):
     SUMUP_READER_ID: str = ""
     SUMUP_API_BASE: str = "https://api.sumup.com"
 
+    # E-mail (PR3) — passerelle Brevo -> SMTP -> simulation (E6). Le compte
+    # Brevo est PARTAGE avec Vintiz Vernon (Julien) : Fripco n'ecrit jamais
+    # sur la blocklist globale d'un contact ni ne supprime un contact Brevo,
+    # seulement sur SA liste dediee (BREVO_LIST_ID, E1). BREVO_API_BASE est
+    # la RACINE de l'hote Brevo (comme SUMUP_API_BASE), a ne changer que
+    # pour les tests de bout en bout (faux serveur Brevo local).
+    BREVO_API_KEY: str = ""
+    BREVO_API_BASE: str = "https://api.brevo.com"
+    BREVO_LIST_ID: str = ""
+    # Token partage authentifiant POST /api/brevo/webhook (E9) — sans lui,
+    # le webhook refuse tout evenement (403).
+    BREVO_WEBHOOK_TOKEN: str = ""
+    # Confirmation que le compte Brevo PARTAGE est bascule en suivi anonyme
+    # (recommandation CNIL 2026 sur le pixel d'ouverture individuel). Tant
+    # qu'elle n'est pas posee, tout envoi via Brevo est refuse — repli SMTP
+    # puis simulation (E6). Question ouverte pour Julien.
+    BREVO_ANONYMOUS_TRACKING: bool = False
+
+    EMAIL_FROM_ADDRESS: str = "noreply@fripco-street.fr"
+    EMAIL_FROM_NAME: str = "Frip & Co Street"
+
+    # SMTP — repli si Brevo est absent ou refuse l'envoi (E6). Jamais de
+    # secret en base (E10) : variables d'environnement uniquement.
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [s.strip() for s in self.CORS_ORIGINS.split(",") if s.strip()]

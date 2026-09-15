@@ -36,6 +36,9 @@ from app.services.jet import (
     EVENT_CASH_MOVEMENT_CREATED,
     EVENT_DRAWER_CLOSED,
     EVENT_DRAWER_OPENED,
+    EVENT_RECEIPT_DUPLICATE,
+    EVENT_RECEIPT_EMAIL_FAILED,
+    EVENT_RECEIPT_EMAILED,
     EVENT_SALE_CREATED,
     JournalService,
 )
@@ -564,3 +567,220 @@ class PosService:
         )
         await self.db.flush()
         return z_report
+
+    # ------------------------------------------------------------------
+    # Client + ticket par e-mail (PR3, docs/ARCHITECTURE_PR3.md §3/§4)
+    # ------------------------------------------------------------------
+
+    async def attach_client_and_send_receipt(
+        self,
+        *,
+        transaction: Transaction,
+        email: str,
+        first_name: str | None,
+        last_name: str | None,
+        newsletter_optin: bool,
+        send_receipt: bool,
+        user_id: uuid.UUID | None,
+    ) -> dict:
+        """Orchestre `POST /pos/transactions/{id}/client` (§3) : upsert du
+        client -> consentement newsletter (si coché ; si la cliente existait
+        déjà avec opt-in et décoche, révocation source `pos`) -> lien vente
+        -> e-mail du ticket -> synchro Brevo (best-effort, un échec Brevo
+        n'empêche ni la vente ni l'e-mail) — `ClientService.sync_brevo` pousse
+        le contact si `newsletter_optin`, le retire sinon (revue RGPD :
+        point unique, cf. `client_service.py`).
+
+        Revue robustesse (double-tap « Envoyer le ticket ») :
+        `upsert_by_email` sérialise par e-mail normalisé (verrou avisory,
+        tenu jusqu'au COMMIT de CETTE requête) avant toute lecture/écriture
+        sur `clients` — deux appels concurrents pour la même adresse ne
+        courent donc plus sur la contrainte unique `clients.email`. Une
+        fois le verrou acquis, la vente est RELUE (l'objet `transaction`
+        passé en paramètre a pu devenir périmé pendant l'attente) : si elle
+        est déjà liée à CE client (deuxième appel, concurrent ou
+        séquentiel), la réponse est idempotente — aucun nouvel envoi,
+        aucun nouvel évènement JET, aucune nouvelle synchro Brevo.
+        """
+        from app.models.client import ConsentPurpose, ConsentSource
+        from app.services.client_service import ClientService
+
+        clients = ClientService(self.db)
+        client, _created = await clients.upsert_by_email(
+            email=email, first_name=first_name, last_name=last_name, user_id=user_id
+        )
+
+        # Sous le verrou (acquis par `upsert_by_email` ci-dessus) : RELIT la
+        # vente plutôt que de faire confiance à l'objet reçu en paramètre.
+        # `db.refresh()` — et non un second `select()` — est indispensable
+        # ici : `transaction` est déjà dans l'identity map de CETTE session
+        # (chargé plus haut par le routeur), donc un simple `select()`
+        # renverrait l'objet Python déjà en mémoire SANS relire ses
+        # colonnes depuis la base (SQLAlchemy ne rafraîchit pas un objet
+        # déjà identifié à partir d'un résultat de requête), et manquerait
+        # donc le `client_id` qu'une requête concurrente vient de committer
+        # pendant l'attente du verrou.
+        await self.db.refresh(transaction)
+        if transaction.client_id is not None and transaction.client_id == client.id:
+            return await self._idempotent_attach_response(transaction, client)
+
+        await clients.record_consent(
+            client=client,
+            purpose=ConsentPurpose.newsletter,
+            granted=newsletter_optin,
+            source=ConsentSource.pos,
+            user_id=user_id,
+        )
+        await clients.link_transaction(transaction=transaction, client=client, user_id=user_id)
+
+        receipt_result = None
+        if send_receipt:
+            receipt_result = await self._send_receipt_email(
+                transaction=transaction, to=client.email, client_id=client.id, user_id=user_id
+            )
+
+        brevo_result = await clients.sync_brevo(client, user_id=user_id)
+
+        return {"client": client, "receipt_email": receipt_result, "brevo": brevo_result}
+
+    async def _idempotent_attach_response(self, transaction: Transaction, client) -> dict:
+        """Réponse d'un double-tap déjà traité (`attach_client_and_send_receipt`,
+        vente déjà liée à CE client) : renvoie l'état déjà produit par le
+        tout premier appel — `receipt_email` reflète la DERNIÈRE
+        communication existante pour cette vente/ce client (`None` si le
+        premier appel avait `send_receipt=False`) — sans rien rejouer."""
+        from app.models.communication import Communication
+
+        comm = (
+            await self.db.execute(
+                select(Communication)
+                .where(
+                    Communication.transaction_id == transaction.id,
+                    Communication.client_id == client.id,
+                )
+                .order_by(Communication.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        receipt_result = (
+            {"status": comm.status.value, "provider": comm.provider.value} if comm is not None else None
+        )
+        return {"client": client, "receipt_email": receipt_result, "brevo": None}
+
+    async def resend_receipt_email(
+        self,
+        *,
+        transaction: Transaction,
+        email: str | None,
+        user_id: uuid.UUID | None,
+    ) -> dict:
+        """Orchestre `POST /pos/transactions/{id}/receipt/email` (§4) :
+        e-mail par défaut = celui du client lié, sinon `email` est requis
+        (422 `email_required`). Incrémente `duplicate_count` et journalise
+        `receipt.duplicate` (§4.4), en plus de `receipt.emailed`/
+        `receipt.email_failed`."""
+        from app.models.client import Client
+        from app.services.client_service import normalize_email
+
+        client = None
+        if transaction.client_id is not None:
+            client = (
+                await self.db.execute(select(Client).where(Client.id == transaction.client_id))
+            ).scalar_one_or_none()
+
+        to = email or (client.email if client is not None else None)
+        if not to:
+            raise PosServiceError(
+                "Adresse e-mail requise : aucun client lié à cette vente.",
+                code="email_required",
+                status_code=422,
+            )
+        to = normalize_email(to)
+
+        result = await self._send_receipt_email(
+            transaction=transaction,
+            to=to,
+            client_id=client.id if client is not None else None,
+            user_id=user_id,
+        )
+
+        receipt = await self.get_receipt(transaction.id)
+        if receipt is not None:
+            receipt.duplicate_count += 1
+            await JournalService(self.db).record(
+                EVENT_RECEIPT_DUPLICATE,
+                user_id=user_id,
+                payload={"transaction_id": str(transaction.id), "duplicate_count": receipt.duplicate_count},
+            )
+            await self.db.flush()
+        return result
+
+    async def _send_receipt_email(
+        self,
+        *,
+        transaction: Transaction,
+        to: str,
+        client_id: uuid.UUID | None,
+        user_id: uuid.UUID | None,
+    ) -> dict:
+        from app.models.communication import (
+            Communication,
+            CommunicationChannel,
+            CommunicationKind,
+            CommunicationProvider,
+            CommunicationStatus,
+        )
+        from app.services.email_gateway import send_email
+        from app.services.receipt_email import build_receipt_email
+
+        shop = await SettingsService(self.db).get("shop")
+        receipt = await self.get_receipt(transaction.id)
+        receipt_text = (
+            receipt.content
+            if receipt is not None
+            else ReceiptService().generate(transaction, shop=shop)
+        )
+        dpo_email = shop.get("dpo_email") if isinstance(shop, dict) else None
+        message = build_receipt_email(
+            transaction, to=to, receipt_text=receipt_text, shop=shop, dpo_email=dpo_email
+        )
+        result = await send_email(message)
+
+        provider_map = {
+            "brevo": CommunicationProvider.brevo,
+            "smtp": CommunicationProvider.smtp,
+            "simulated": CommunicationProvider.simulated,
+        }
+        status_map = {
+            "sent": CommunicationStatus.sent,
+            "failed": CommunicationStatus.failed,
+            "simulated": CommunicationStatus.simulated,
+        }
+        self.db.add(
+            Communication(
+                client_id=client_id,
+                transaction_id=transaction.id,
+                kind=CommunicationKind.receipt,
+                channel=CommunicationChannel.email,
+                recipient=to,
+                subject=message.subject,
+                provider=provider_map.get(result.provider, CommunicationProvider.simulated),
+                status=status_map.get(result.status, CommunicationStatus.failed),
+                provider_message_id=result.message_id,
+                error=result.error,
+            )
+        )
+        await self.db.flush()
+
+        event = EVENT_RECEIPT_EMAIL_FAILED if result.status == "failed" else EVENT_RECEIPT_EMAILED
+        await JournalService(self.db).record(
+            event,
+            user_id=user_id,
+            payload={
+                "transaction_number": transaction.transaction_number,
+                "provider": result.provider,
+                "status": result.status,
+            },
+        )
+        await self.db.flush()
+        return {"status": result.status, "provider": result.provider}

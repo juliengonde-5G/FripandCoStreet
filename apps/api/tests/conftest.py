@@ -137,7 +137,8 @@ async def _truncate() -> None:
             text(
                 "TRUNCATE users, journal_events, app_settings, transactions, "
                 "transaction_items, payments, cash_drawers, z_reports, "
-                "cash_movements, payment_attempts, receipts "
+                "cash_movements, payment_attempts, receipts, "
+                "clients, consents, communications "
                 "RESTART IDENTITY CASCADE"
             )
         )

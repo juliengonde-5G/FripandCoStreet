@@ -86,7 +86,21 @@ l'API pousse le montant sur le TPE via l'API SumUp, aucune saisie sur le TPE.
 Sans ces trois variables ou TPE hors ligne, la caisse n'accepte que les espèces.
 État visible dans l'écran Administration.
 
-## 7. Déploiement automatique
+## 7. E-mail des tickets et newsletter (PR3)
+
+Compte Brevo **partagé** avec Vintiz Vernon : la caisse n'utilise que sa
+liste dédiée « Frip & Co Street ». Variables `.env` : `BREVO_API_KEY`,
+`BREVO_LIST_ID` (numéro de la liste dédiée, créée dans Brevo), `BREVO_WEBHOOK_TOKEN`
+(secret partagé ; côté Brevo, URL du webhook `https://street.fripco.fr/api/brevo/webhook?token=<secret>`
+sur l'événement « désinscription »), `EMAIL_FROM_ADDRESS`, `EMAIL_FROM_NAME`,
+et **`BREVO_ANONYMOUS_TRACKING=true`** uniquement si le compte Brevo est réglé en
+suivi d'ouverture anonyme (CNIL) ; sinon les tickets partent par SMTP
+(`SMTP_*`) ou ne partent pas (mode simulation, signalé en administration).
+La caisse ne touche jamais à la blocklist globale d'un contact ni ne supprime
+un contact Brevo : un désabonnement ou une suppression RGPD retire le contact
+de la liste dédiée et anonymise la fiche locale.
+
+## 8. Déploiement automatique
 
 `.github/workflows/deploy.yml` (actif dans le dépôt dédié) : après une CI verte
 sur `main`, connexion SSH et `./scripts/deploy.sh --pull`. Secrets à créer dans

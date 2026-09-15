@@ -60,6 +60,21 @@ EVENT_CONFIG_CHANGED = "config.changed"
 EVENT_SYSTEM_JOB_FAILED = "system.job_failed"
 EVENT_FISCAL_INTEGRITY_CHECKED = "fiscal.integrity_checked"
 
+# PR3 — client, e-mail (Brevo), newsletter, consentement, RGPD
+# (docs/ARCHITECTURE_PR3.md §3)
+EVENT_CLIENT_CREATED = "client.created"
+EVENT_CLIENT_UPDATED = "client.updated"
+EVENT_CLIENT_LINKED = "client.linked"
+EVENT_CONSENT_GRANTED = "consent.granted"
+EVENT_CONSENT_REVOKED = "consent.revoked"
+EVENT_RECEIPT_EMAILED = "receipt.emailed"
+EVENT_RECEIPT_EMAIL_FAILED = "receipt.email_failed"
+EVENT_BREVO_SYNCED = "brevo.synced"
+EVENT_BREVO_SYNC_FAILED = "brevo.sync_failed"
+EVENT_BREVO_WEBHOOK_RECEIVED = "brevo.webhook_received"
+EVENT_CLIENT_ANONYMIZED = "client.anonymized"
+EVENT_CLIENT_EXPORTED = "client.exported"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""

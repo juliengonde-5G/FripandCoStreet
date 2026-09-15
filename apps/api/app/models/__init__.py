@@ -19,6 +19,14 @@ from app.models.cash_movement import (
 )
 from app.models.payment_attempt import PaymentAttempt, PaymentAttemptStatus
 from app.models.receipt import Receipt
+from app.models.client import Client, Consent, ConsentPurpose, ConsentSource
+from app.models.communication import (
+    Communication,
+    CommunicationChannel,
+    CommunicationKind,
+    CommunicationProvider,
+    CommunicationStatus,
+)
 
 __all__ = [
     "Base",
@@ -39,4 +47,13 @@ __all__ = [
     "PaymentAttempt",
     "PaymentAttemptStatus",
     "Receipt",
+    "Client",
+    "Consent",
+    "ConsentPurpose",
+    "ConsentSource",
+    "Communication",
+    "CommunicationChannel",
+    "CommunicationKind",
+    "CommunicationProvider",
+    "CommunicationStatus",
 ]
