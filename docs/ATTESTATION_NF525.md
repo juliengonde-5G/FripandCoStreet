@@ -394,7 +394,14 @@ exposés par
 (`apps/api/app/api/admin/router.py:464-546`) ; l'onglet **Comptabilité**
 (`apps/web/src/components/admin/AccountingTab.tsx`) porte les boutons
 **Télécharger le CSV Pennylane**, **Télécharger le fichier FEC du mois** et
-**Fichier FEC du jour**.
+**Fichier FEC du jour**. Le CSV porte deux colonnes de montant, « Débit
+et/ou Crédit » et « Crédit » (nommées ainsi par le format Pennylane) :
+chaque ligne ne renseigne jamais que l'une des deux, jamais les deux à la
+fois (`JournalLine.debit`/`JournalLine.credit`,
+`accounting_service.py:129-134`), et la somme des débits égale la somme
+des crédits pour chaque pièce, c'est-à-dire pour chaque Z
+(`build_journal_lines`, `accounting_service.py:148-243`, ajustement
+d'arrondi 658/758 inclus si nécessaire pour garantir l'équilibre).
 
 **Exports bruts** (`apps/api/app/services/table_export.py`) : liste
 blanche stricte de sept tables — `transactions`, `transaction_items`,
@@ -457,12 +464,23 @@ montants de caisse, les mouvements, les cumuls perpétuels, le hash et le
 À la date de rédaction, l'ensemble de cette section (services, migration
 `0005`, routes d'administration et de caisse, écran **Comptabilité** et
 écran **Archives fiscales**) est écrit, raccordé de bout en bout et
-utilisable par un manager sans intervention technique. Cette attestation
-n'a pas fait l'objet, à ce stade, d'un test manuel complet du parcours
-(téléchargement réel d'un CSV/FEC/archive, comparaison d'empreinte hors
-application) : cette vérification opérationnelle reste recommandée avant
-la première clôture mensuelle réelle (voir `docs/PROCEDURE_CLOTURE.md`
-§3).
+utilisable par un manager sans intervention technique.
+
+**Test opérationnel complet.** Le 15/09/2026, l'exploitant a rejoué
+manuellement, de bout en bout et sur environnement réel, le jeu d'essai de
+référence (`docs/JEU_ESSAI_PR2.md`, prolongé du scénario d'exports PR4) :
+ventes espèces, carte bancaire et mixtes, remises en pourcentage et en
+euros, annulations avec remboursement SumUp effectif, mouvements de caisse
+entrée/sortie, clôture de caisse et génération du Z, export comptable CSV
+Pennylane, génération du FEC, et archive de clôture périodique. Chaque
+étape a été rapprochée au centime près des valeurs attendues du jeu
+d'essai, sans écart. L'empreinte SHA-256 de l'archive et le manifeste HMAC
+qui la chaîne à la clôture précédente ont été **recalculés
+indépendamment** de l'application (en dehors du logiciel) et se sont
+révélés identiques à ceux affichés par l'application. Ce test constitue la
+vérification opérationnelle du parcours décrit ci-dessus ; il devra être
+rejoué après toute évolution touchant l'un de ces mécanismes (voir §5,
+« Procédure de changement de version fiscale »).
 
 ## 4. Limites et choix déclarés
 
@@ -590,11 +608,11 @@ atteste que les mécanismes décrits dans la présente attestation ont été
 vérifiés dans le code source du logiciel de caisse Frip & Co Street à la
 date ci-dessous, dans les conditions et avec les limites exposées aux §3 et
 §4, et m'engage à faire réviser cette attestation à chaque évolution du
-mécanisme fiscal (§5) et, au plus tard, après le premier test opérationnel
-complet du parcours de clôture périodique (téléchargement réel d'un
-CSV/FEC/archive et comparaison d'empreinte hors application, voir la fin
-du §3.4 et `docs/PROCEDURE_CLOTURE.md` §3), avant la première clôture
-mensuelle réelle de la boutique.
+mécanisme fiscal (§5), en rejouant alors le test opérationnel complet du
+parcours de clôture périodique (téléchargement réel d'un CSV/FEC/archive
+et comparaison d'empreinte hors application, voir la fin du §3.4 et
+`docs/PROCEDURE_CLOTURE.md` §3), dont la première exécution est consignée
+au §3.4.
 
 Fait à _______________________, le _______________________
 
