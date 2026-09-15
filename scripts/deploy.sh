@@ -9,7 +9,7 @@
 #
 # Pré-requis serveur : Docker Engine 24+ avec Compose v2, un fichier .env
 # rempli (cp .env.example .env), le reverse-proxy du VPS rattaché au réseau
-# `fripco-network` avec le bloc `street.fripco.fr` (docker/Caddyfile.fragment).
+# `fripco-network` avec le bloc `lloomi.fr` (docker/Caddyfile.fragment).
 #
 # Le script fonctionne aussi bien depuis un clone dédié (/opt/fripco-street)
 # que depuis le sous-dossier fripco-street/ d'un autre dépôt : tous les
@@ -144,4 +144,4 @@ if [ -z "$(docker exec fripco-db psql -U "$(read_env_value POSTGRES_USER)" -d "$
   warn "Aucun compte : créer l'unique manager avec"
   echo "    docker exec -it fripco-api python scripts/create_manager.py --username <nom> --email <email>"
 fi
-log "Déploiement terminé — https://street.fripco.fr"
+log "Déploiement terminé — https://lloomi.fr"

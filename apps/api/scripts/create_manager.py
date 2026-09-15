@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Extrait de Vintiz (scripts/create_manager.py) — plus de role (compte
+# Extrait de l'application source (scripts/create_manager.py) — plus de role (compte
 # unique) : refuse toujours de creer un deuxieme compte.
 """Cree interactivement le compte unique, sans mot de passe par defaut."""
 

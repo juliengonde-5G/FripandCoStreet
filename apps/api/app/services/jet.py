@@ -1,11 +1,12 @@
 # Nouveau service — Journal des Evenements Techniques (JET).
 #
-# Modelise sur le chainage HMAC-SHA256 de app/services/fiscal.py de Vintiz
-# (methodes `_canonical`, `_hmac`, `_iso`, `_get_previous_*_hash`, genesis
-# "0") et sur le verrou `pg_advisory_xact_lock` utilise pour serialiser
-# l'attribution des numeros de sequence (voir app/services/pos.py:103-107
-# et app/services/fiscal.py:247-248 dans Vintiz). Contrairement a
-# `EventService` (Vintiz), ce service NE PIEGE JAMAIS les exceptions : un
+# Modelise sur le chainage HMAC-SHA256 de app/services/fiscal.py de
+# l'application source (methodes `_canonical`, `_hmac`, `_iso`,
+# `_get_previous_*_hash`, genesis "0") et sur le verrou
+# `pg_advisory_xact_lock` utilise pour serialiser l'attribution des numeros
+# de sequence (voir app/services/pos.py:103-107 et app/services/fiscal.py:247-248
+# dans l'application source). Contrairement a `EventService` (l'application
+# source), ce service NE PIEGE JAMAIS les exceptions : un
 # echec d'ecriture du JET doit faire echouer la requete plutot que de laisser
 # passer un evenement de securite non journalise (pilier "securisation" de
 # l'auto-attestation NF525, cf. CDC Frip & Co Street §3.1).
@@ -74,6 +75,18 @@ EVENT_BREVO_SYNC_FAILED = "brevo.sync_failed"
 EVENT_BREVO_WEBHOOK_RECEIVED = "brevo.webhook_received"
 EVENT_CLIENT_ANONYMIZED = "client.anonymized"
 EVENT_CLIENT_EXPORTED = "client.exported"
+
+# PR3b — impression physique des tickets (MUNBYN 047P ESC/POS, réseau ou
+# WebUSB) et ouverture du tiroir-caisse Safescan SD-4141 (décision Julien :
+# même matériel que l'application source). Voir `app/api/pos/router.py`.
+EVENT_RECEIPT_PRINTED = "receipt.printed"
+EVENT_DRAWER_KICKED = "drawer.kicked"
+# Echec TCP vers la MUNBYN (connexion ou envoi) — payload host/port
+# seulement, jamais l'exception systeme brute (celle-ci va au log serveur).
+# Le `detail` renvoye au client HTTP est toujours un message metier
+# generique, sans IP/port/errno (persona vendeuse) — voir
+# `app/services/escpos_service.py::PRINTER_UNREACHABLE_MESSAGE`.
+EVENT_PRINTER_UNREACHABLE = "printer.unreachable"
 
 
 class JournalService:

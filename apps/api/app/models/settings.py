@@ -1,6 +1,6 @@
-# Extrait de Vintiz (structure inspiree de apps/api/app/services/app_config.py
+# Extrait de l'application source (structure inspiree de apps/api/app/services/app_config.py
 # et de la table `app_settings` du meme depot) — remplace le fichier JSON
-# `data/app_config.json` de Vintiz : ici les parametres boutique vivent en
+# `data/app_config.json` de l'application source : ici les parametres boutique vivent en
 # base (D13 du contrat PR2) et toute ecriture est journalisee au JET par
 # `SettingsService.set` (evenement `config.changed`), jamais silencieuse.
 #

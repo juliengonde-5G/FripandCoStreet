@@ -1,11 +1,11 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/pos/ReceiptPreviewCard.tsx`,
- * jetons `vz-*` → `fc-*` — impression ESC/POS, SMS et facture PDF retirés
- * (hors périmètre matériel de ce dépôt). PR3 : le bloc « Envoyer le ticket
- * par e-mail » retiré en PR2 (bouton désactivé « bientôt disponible ») est
- * livré ici — §5 ARCHITECTURE_PR3.md, `POST /pos/transactions/{id}/client`.
+ * Extrait de l'application source `apps/web/src/components/pos/ReceiptPreviewCard.tsx`,
+ * jetons `vz-*` → `fc-*` — SMS et facture PDF retirés (hors périmètre de
+ * ce dépôt). PR3 : le bloc « Envoyer le ticket par e-mail » retiré en PR2
+ * (bouton désactivé « bientôt disponible ») est livré ici — §5
+ * ARCHITECTURE_PR3.md, `POST /pos/transactions/{id}/client`.
  *
  * Correctif persona vendeuse (tablette 1024×768) : deux colonnes plutôt
  * qu'une pile verticale unique — gauche l'aperçu du ticket (défilement
@@ -13,12 +13,19 @@
  * ticket » (toujours visible, jamais en bas d'un contenu qui déborde).
  * Avec un ticket de 3 lignes, tient sans le moindre défilement — voir
  * …/scratchpad/front-pr3-fix/ (captures + mesure `scrollHeight`).
+ *
+ * PR3b : impression physique du ticket (MUNBYN, réseau ou USB tablette) —
+ * bouton « Imprimer le ticket » sous l'aperçu, impression automatique à
+ * l'affichage si `hardware.auto_print_on_sale` (une seule fois, jamais
+ * bloquante), ouverture du tiroir combinée à la première impression d'une
+ * vente espèces si `hardware.auto_kick_on_cash` — voir lib/printing.ts.
  */
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { formatCurrency, isValidEmail } from "@/lib/format";
-import type { AttachClientResponse } from "@/lib/types";
+import { kickDrawer, printReceipt } from "@/lib/printing";
+import type { AttachClientResponse, HardwareSettings } from "@/lib/types";
 
 interface Props {
   /** Id de la vente — sert au rattachement client + envoi du ticket. */
@@ -31,6 +38,15 @@ interface Props {
    * (un renvoi générique « demandez en boutique » remplace alors
    * l'adresse — jamais un tiret nu). */
   dpoEmail?: string;
+  /** Réglages matériel (Paramètres > Matériel). `undefined` tant que le
+   * chargement est en cours — l'impression automatique attend ce
+   * chargement plutôt que de conclure prématurément à « désactivée » ;
+   * `null` si le chargement a échoué (bouton masqué, comme en mode
+   * `none`). */
+  hardware: HardwareSettings | null | undefined;
+  /** Vrai si un des moyens de paiement de cette vente est « espèces » —
+   * seul cas où `auto_kick_on_cash` s'applique (§3). */
+  isCashSale: boolean;
   onNewSale: () => void;
 }
 
@@ -41,8 +57,55 @@ export default function ReceiptPreviewCard({
   isCancellation,
   receiptText,
   dpoEmail,
+  hardware,
+  isCashSale,
   onNewSale,
 }: Props) {
+  // Une impression réussie ouvre le tiroir sur une vente espèces (§3 :
+  // kick uniquement à la PREMIÈRE impression) — les réimpressions
+  // manuelles suivantes n'ouvrent plus le tiroir.
+  const printedOnceRef = useRef(false);
+  const autoFiredRef = useRef(false);
+  const [printing, setPrinting] = useState(false);
+  const [printError, setPrintError] = useState<string | null>(null);
+  const [printedMessage, setPrintedMessage] = useState<string | null>(null);
+
+  const printerAvailable = !!hardware && hardware.printer_mode !== "none";
+
+  const runPrint = async (): Promise<void> => {
+    if (!hardware) return;
+    setPrinting(true);
+    setPrintError(null);
+    const kick = !!hardware.auto_kick_on_cash && isCashSale && !printedOnceRef.current;
+    const result = await printReceipt(transactionId, hardware, { kick });
+    setPrinting(false);
+    if (result.ok) {
+      printedOnceRef.current = true;
+      setPrintedMessage(result.message);
+    } else {
+      setPrintError(result.message);
+    }
+  };
+
+  // Impression (et, à défaut, ouverture du tiroir) automatique à
+  // l'affichage — attend que `hardware` soit résolu (`undefined` =
+  // chargement en cours) pour ne se déclencher qu'une seule fois, avec la
+  // bonne configuration, sans jamais bloquer l'affichage de l'écran.
+  useEffect(() => {
+    if (autoFiredRef.current || hardware === undefined) return;
+    autoFiredRef.current = true;
+    if (!hardware || hardware.printer_mode === "none" || isCancellation) return;
+    if (hardware.auto_print_on_sale) {
+      void runPrint();
+    } else if (hardware.auto_kick_on_cash && isCashSale) {
+      void (async () => {
+        const result = await kickDrawer(hardware, "cash_sale");
+        if (!result.ok) setPrintError(result.message);
+      })();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hardware]);
+
   return (
     <div className="grid h-full min-h-0 gap-4 md:grid-cols-[300px_1fr]">
       {/* Colonne gauche : confirmation + aperçu du ticket */}
@@ -68,6 +131,33 @@ export default function ReceiptPreviewCard({
         >
           {receiptText}
         </pre>
+
+        {printerAvailable && (
+          <div className="flex-shrink-0 space-y-2">
+            {printError && (
+              <div role="alert" className="rounded-fc-lg bg-fc-danger-soft border border-fc-danger/30 p-2.5 flex items-center justify-between gap-3">
+                <span className="text-sm text-fc-danger">Impression impossible : {printError}</span>
+                <button
+                  type="button"
+                  onClick={() => void runPrint()}
+                  disabled={printing}
+                  className="text-xs font-semibold text-fc-danger underline flex-shrink-0 disabled:opacity-50 disabled:no-underline"
+                >
+                  {printing ? "Nouvel essai…" : "Réessayer"}
+                </button>
+              </div>
+            )}
+            {!printError && printedMessage && <p className="text-xs font-medium text-fc-primary-deep">{printedMessage}</p>}
+            <button
+              type="button"
+              onClick={() => void runPrint()}
+              disabled={printing}
+              className="w-full min-h-touch rounded-fc-lg border border-fc-line bg-fc-surface px-4 py-3 text-sm font-semibold text-fc-ink hover:bg-fc-bg-alt disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {printing ? "Impression…" : "Imprimer le ticket"}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Colonne droite : e-mail (si vente) + « Nouveau ticket » — ce
@@ -141,13 +231,13 @@ function SendReceiptByEmail({
     return (
       <div className="space-y-2">
         {emailFailed ? (
-          <div role="alert" className="rounded-fc-lg bg-red-50 border border-red-200 p-3 space-y-2">
-            <p className="text-sm font-medium text-red-700">Envoi impossible : le ticket n&apos;a pas pu être envoyé.</p>
+          <div role="alert" className="rounded-fc-lg bg-fc-danger-soft border border-fc-danger/30 p-3 space-y-2">
+            <p className="text-sm font-medium text-fc-danger">Envoi impossible : le ticket n&apos;a pas pu être envoyé.</p>
             <button
               type="button"
               onClick={() => void handleSend()}
               disabled={sending}
-              className="text-sm font-semibold text-red-700 underline disabled:opacity-50 disabled:no-underline"
+              className="text-sm font-semibold text-fc-danger underline disabled:opacity-50 disabled:no-underline"
             >
               {sending ? "Nouvel essai…" : "Réessayer"}
             </button>
@@ -171,13 +261,13 @@ function SendReceiptByEmail({
       <p className="text-sm font-semibold text-fc-ink">Envoyer le ticket par e-mail</p>
 
       {sendError && (
-        <div role="alert" className="rounded-fc bg-red-50 border border-red-200 p-2 flex items-center justify-between gap-3">
-          <span className="text-sm text-red-700">Envoi impossible : {sendError}</span>
+        <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 p-2 flex items-center justify-between gap-3">
+          <span className="text-sm text-fc-danger">Envoi impossible : {sendError}</span>
           <button
             type="button"
             onClick={() => void handleSend()}
             disabled={sending}
-            className="text-xs font-semibold text-red-700 underline flex-shrink-0 disabled:opacity-50 disabled:no-underline"
+            className="text-xs font-semibold text-fc-danger underline flex-shrink-0 disabled:opacity-50 disabled:no-underline"
           >
             {sending ? "Envoi…" : "Réessayer"}
           </button>

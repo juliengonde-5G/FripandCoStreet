@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/ui/Modal.tsx`, jetons
+ * Extrait de l'application source `apps/web/src/components/ui/Modal.tsx`, jetons
  * `vz-*` → `fc-*`, sinon inchangé (accessibilité : ESC, piège de focus,
  * restauration du focus).
  */

@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/api/auth/router.py, L46-109) — magic-link
+# Extrait de l'application source (apps/api/app/api/auth/router.py, L46-109) — magic-link
 # client retire (pas d'espace client public ici), /me + /logout ajoutes,
 # emission JET sur chaque evenement d'authentification.
 import logging

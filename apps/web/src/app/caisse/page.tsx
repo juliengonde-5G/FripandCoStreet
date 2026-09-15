@@ -2,7 +2,7 @@
 
 /**
  * Écran de caisse (§6 PR2) — réécrit pour ce dépôt (l'exclusion explicite
- * porte sur `apps/pos/page.tsx` de Vintiz, 3 777 lignes catalogue +
+ * porte sur `apps/pos/page.tsx` de l'application source, 3 777 lignes catalogue +
  * douchette ; les modales et primitives, elles, sont extraites — voir
  * components/pos/*).
  *
@@ -10,6 +10,7 @@
  * panier défile. Aucun jargon technique visible (§3.2 CDC).
  */
 import React, { useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 
 import RequireAuth from "@/components/layout/RequireAuth";
@@ -25,10 +26,12 @@ import TicketsPanel from "@/components/pos/TicketsPanel";
 import { api, ApiError } from "@/lib/api";
 import { formatCurrency } from "@/lib/format";
 import { clampDiscountValue, computeBrut, computeDiscountAmount } from "@/lib/posCalc";
+import { kickDrawer, loadHardwareSettings } from "@/lib/printing";
 import type {
   CbStatusConfig,
   DiscountInput,
   DrawerCurrentResponse,
+  HardwareSettings,
   PaymentInput,
   ShopSettings,
   TransactionOut,
@@ -79,6 +82,13 @@ export default function CaissePage() {
   const [ticketsOpen, setTicketsOpen] = useState(false);
   const [closeDrawerOpen, setCloseDrawerOpen] = useState(false);
   const [lastZ, setLastZ] = useState<ZReport | null>(null);
+
+  // PR3b — réglages matériel (imprimante ticket + tiroir-caisse).
+  // `undefined` tant que le chargement est en cours : `ReceiptPreviewCard`
+  // attend cette valeur pour décider de l'impression/l'ouverture
+  // automatique sans jamais conclure prématurément à « désactivée ».
+  const [hardware, setHardware] = useState<HardwareSettings | null | undefined>(undefined);
+  const [drawerKicking, setDrawerKicking] = useState(false);
 
   const clientUuidRef = useRef<string>(newUuid());
 
@@ -138,7 +148,16 @@ export default function CaissePage() {
     void loadDrawer();
     void loadCbConfig();
     void loadShopSettings();
+    void loadHardwareSettings().then(setHardware);
   }, []);
+
+  const handleKickDrawer = async (): Promise<void> => {
+    if (drawerKicking) return;
+    setDrawerKicking(true);
+    const result = await kickDrawer(hardware ?? null, "manual");
+    setDrawerKicking(false);
+    if (!result.ok) setBanner(result.message);
+  };
 
   const runGuarded = async (fn: () => Promise<void>): Promise<void> => {
     try {
@@ -279,9 +298,14 @@ export default function CaissePage() {
         {/* Barre haute */}
         <header className="flex-shrink-0 bg-fc-surface border-b border-fc-line px-4 py-2 flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2 min-w-0">
-            <div aria-hidden className="h-8 w-8 rounded-fc bg-fc-primary text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
-              F&amp;C
-            </div>
+            <Image
+              src="/brand/logo-mark.png"
+              alt=""
+              aria-hidden
+              width={40}
+              height={40}
+              className="h-10 w-10 rounded-fc flex-shrink-0"
+            />
             <span className="font-semibold text-fc-ink truncate">Frip &amp; Co Street</span>
           </div>
 
@@ -299,6 +323,16 @@ export default function CaissePage() {
           <div className="flex-1" />
 
           <CashMovementButton disabled={!drawerState?.open} onSubmit={handleCashMovement} />
+          {hardware?.drawer_enabled && (
+            <button
+              type="button"
+              onClick={() => void handleKickDrawer()}
+              disabled={drawerKicking || !drawerState?.open}
+              className="min-h-touch rounded-fc border border-fc-line bg-fc-surface px-4 py-2 text-sm font-medium text-fc-ink hover:bg-fc-bg-alt disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {drawerKicking ? "Ouverture…" : "Ouvrir le tiroir"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setTicketsOpen(true)}
@@ -325,9 +359,9 @@ export default function CaissePage() {
         </header>
 
         {banner && (
-          <div role="alert" className="flex-shrink-0 bg-red-50 border-b border-red-200 px-4 py-2 flex items-center gap-3">
-            <span className="text-sm text-red-700 flex-1">{banner}</span>
-            <button type="button" onClick={() => setBanner(null)} className="text-red-700 text-sm font-medium hover:underline">
+          <div role="alert" className="flex-shrink-0 bg-fc-danger-soft border-b border-fc-danger/30 px-4 py-2 flex items-center gap-3">
+            <span className="text-sm text-fc-danger flex-1">{banner}</span>
+            <button type="button" onClick={() => setBanner(null)} className="text-fc-danger text-sm font-medium hover:underline">
               Fermer
             </button>
           </div>
@@ -348,6 +382,8 @@ export default function CaissePage() {
                 totalTtc={successTx.total_ttc}
                 receiptText={successTx.receipt_text}
                 dpoEmail={dpoEmail}
+                hardware={hardware}
+                isCashSale={successTx.payments.some((p) => p.method === "cash")}
                 onNewSale={handleNewTicket}
               />
             </div>
@@ -386,7 +422,7 @@ export default function CaissePage() {
                   <div key={l.id} className="flex items-center gap-2 rounded-fc-lg border border-fc-line bg-fc-surface px-3 py-2">
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium text-fc-ink truncate">{l.label}</div>
-                      <div className="text-xs text-fc-ink-mute font-mono">{formatCurrency(l.unitPrice)} / pièce</div>
+                      <div className="text-xs text-fc-ink-mute font-mono tabular-nums">{formatCurrency(l.unitPrice)} / pièce</div>
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
                       <button
@@ -414,7 +450,7 @@ export default function CaissePage() {
                       type="button"
                       onClick={() => removeLine(l.id)}
                       aria-label="Retirer cet article"
-                      className="min-h-touch min-w-touch rounded-fc text-fc-danger hover:bg-red-50 flex items-center justify-center flex-shrink-0"
+                      className="min-h-touch min-w-touch rounded-fc text-fc-danger hover:bg-fc-danger-soft flex items-center justify-center flex-shrink-0"
                     >
                       ✕
                     </button>

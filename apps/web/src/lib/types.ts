@@ -402,3 +402,54 @@ export interface MessagingStatus {
     webhook_token_set: boolean;
   };
 }
+
+// ---------------------------------------------------------------------------
+// Matériel — imprimante ticket MUNBYN 047P + tiroir-caisse Safescan
+// SD-4141 (PR3b). Aucun secret : uniquement de la config réseau/USB/tiroir
+// (`GET/PUT /admin/settings/hardware`).
+// ---------------------------------------------------------------------------
+
+export type PrinterMode = "network" | "webusb" | "none";
+
+export interface HardwareSettings {
+  printer_mode: PrinterMode;
+  printer_host: string;
+  printer_port: number;
+  drawer_enabled: boolean;
+  /** 0 ou 1 — broche d'impulsion du tiroir sur le connecteur RJ-12. */
+  drawer_pin: 0 | 1;
+  auto_print_on_sale: boolean;
+  auto_kick_on_cash: boolean;
+}
+
+/** `GET /hardware/printer/status` — pastille 🟢/🔴 de l'écran Matériel.
+ * `online`/`latency_ms` valent `null` hors mode réseau (aucune sonde
+ * serveur possible pour une imprimante branchée en USB sur la tablette). */
+export interface PrinterStatus {
+  mode: PrinterMode;
+  host: string | null;
+  port: number;
+  online: boolean | null;
+  latency_ms: number | null;
+}
+
+/** `POST /hardware/receipt/test` — ticket de test envoyé à l'imprimante réseau. */
+export interface ReceiptTestResponse {
+  printed: boolean;
+  host: string;
+  port: number;
+}
+
+/** `POST /pos/transactions/{id}/print` — impression réseau du ticket de vente. */
+export interface PrintReceiptResponse {
+  printed: boolean;
+  printed_count: number;
+  duplicate: boolean;
+}
+
+export type DrawerKickReason = "cash_sale" | "manual";
+
+/** `POST /pos/drawer/kick` — impulsion seule du tiroir-caisse (réseau). */
+export interface DrawerKickResponse {
+  kicked: boolean;
+}

@@ -2,13 +2,13 @@
  * Client API — Frip & Co Street.
  *
  * Déploiement même origine en production (site + API sous
- * https://street.fripco.fr, API sous /api/*) : NEXT_PUBLIC_API_URL reste
+ * https://lloomi.fr, API sous /api/*) : NEXT_PUBLIC_API_URL reste
  * vide et les chemins d'API sont donc relatifs. En dev, on pointe vers
  * l'API locale (http://localhost:8000 par défaut).
  */
 
 import { ApiError, extractErrorCode, extractErrorDetail } from "./apiError";
-import { mockFetchAPI, isMockEnabled } from "./mockApi";
+import { mockFetchAPI, mockFetchBytes, isMockEnabled } from "./mockApi";
 
 export { ApiError };
 
@@ -119,8 +119,62 @@ export async function fetchAPI<T = unknown>(
   return data as T;
 }
 
+/**
+ * Variante binaire de `fetchAPI` — pour les octets ESC/POS bruts
+ * (`GET /hardware/receipt/test-escpos`, `GET
+ * /pos/transactions/{id}/escpos`, `GET /pos/drawer/kick-escpos`), servis
+ * en mode WebUSB (tablette) : le corps n'est jamais du JSON, donc jamais
+ * envoyé à `fetchAPI` (qui suppose text/JSON). Même gestion d'erreurs
+ * (Bearer, timeout, 401, `ApiError`) que la variante JSON.
+ */
+export async function fetchBytes(endpoint: string, options?: FetchAPIOptions): Promise<Uint8Array> {
+  if (isMockEnabled()) {
+    return mockFetchBytes(endpoint, options);
+  }
+
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const controller = new AbortController();
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${endpoint}`, {
+      ...options,
+      signal: options?.signal ?? controller.signal,
+      headers: { ...headers, ...options?.headers },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 401) {
+    handleUnauthorized();
+  }
+
+  if (!res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    const data = contentType.includes("application/json")
+      ? await res.json().catch(() => null)
+      : await res.text().catch(() => null);
+    throw new ApiError(res.status, extractErrorDetail(data), extractErrorCode(data));
+  }
+
+  return new Uint8Array(await res.arrayBuffer());
+}
+
 export const api = {
   get: <T = unknown>(url: string) => fetchAPI<T>(url),
+  /** GET renvoyant des octets bruts (endpoints `*escpos*`, mode WebUSB). */
+  getBytes: (url: string) => fetchBytes(url),
   post: <T = unknown>(url: string, data?: unknown) =>
     fetchAPI<T>(url, { method: "POST", body: data !== undefined ? JSON.stringify(data) : undefined }),
   put: <T = unknown>(url: string, data?: unknown) =>

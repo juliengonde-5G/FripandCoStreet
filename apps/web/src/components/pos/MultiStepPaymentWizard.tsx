@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Réécriture, tenant du même rôle que Vintiz
- * `apps/web/src/components/pos/MultiStepPaymentWizard.tsx` — orchestrateur
+ * Réécriture, tenant du même rôle que dans l'application source
+ * (`apps/web/src/components/pos/MultiStepPaymentWizard.tsx`) — orchestrateur
  * du paiement 3 gestes (§6 PR2) : Espèces / Carte bancaire / Mixte.
  * Sans lien de paiement, sans coupon, sans fidélité, sans avoir/chèque
  * (hors modèle `payments.method` du contrat, §2). Assure elle-même le

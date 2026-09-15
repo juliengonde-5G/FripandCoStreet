@@ -1,6 +1,6 @@
-# Extrait de Vintiz (apps/api/app/services/tva_service.py), copie fidele —
+# Extrait de l'application source (apps/api/app/services/tva_service.py), copie fidele —
 # regime normal France (CGI art. 256 et suivants, D8 du contrat PR2). A la
-# difference de Vintiz (ou ce module existait mais n'etait pas branche — ecart
+# difference de l'application source (ou ce module existait mais n'etait pas branche — ecart
 # C-10 de l'audit), il est ici appele depuis `services/pos.py` a chaque vente.
 """Calcul TVA en regime normal France (CGI art. 256 et suivants).
 

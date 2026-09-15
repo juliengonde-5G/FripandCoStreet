@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/services/receipt.py), reduit — pas de
+# Extrait de l'application source (apps/api/app/services/receipt.py), reduit — pas de
 # fidelite/facture B2B (hors perimetre PR2, §4.4 du contrat). Mention
 # legale conforme a D14 (jamais « conforme NF525 »).
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/tests/test_cash_payment_validator.py), copie
+# Extrait de l'application source (apps/api/tests/test_cash_payment_validator.py), copie
 # fidele — le module n'a pas change de contrat public.
 from decimal import Decimal
 

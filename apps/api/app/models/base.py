@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/models/base.py)
+# Extrait de l'application source (apps/api/app/models/base.py)
 # Pas de portabilite SQLite necessaire ici : les tests tournent contre
 # PostgreSQL (les triggers d'immuabilite NF525 doivent etre testes pour de
 # vrai), donc les types PostgreSQL natifs (UUID) sont utilises directement.

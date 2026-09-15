@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Extrait de Vintiz `apps/web/src/components/pos/DenominationGrid.tsx`,
+ * Extrait de l'application source `apps/web/src/components/pos/DenominationGrid.tsx`,
  * jetons `vz-*` → `fc-*`, sinon inchangé.
  */
 import React, { useMemo } from "react";

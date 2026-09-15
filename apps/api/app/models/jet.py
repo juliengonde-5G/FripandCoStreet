@@ -1,7 +1,8 @@
 # Nouveau modele — Journal des Evenements Techniques (JET), pilier
 # "securisation" de l'auto-attestation NF525 (voir docs/COMPLIANCE_NF525.md
-# cote Vintiz et le cahier des charges Frip & Co Street §3.1). Modelise sur
-# le chainage HMAC de app/services/fiscal.py (signature v2) de Vintiz, mais
+# cote application source et le cahier des charges Frip & Co Street §3.1).
+# Modelise sur le chainage HMAC de app/services/fiscal.py (signature v2) de
+# l'application source, mais
 # generique : un seul journal couvre tous les evenements techniques
 # (connexion, deconnexion, rate-limit, demarrage...) au lieu d'un journal
 # par type d'objet metier.

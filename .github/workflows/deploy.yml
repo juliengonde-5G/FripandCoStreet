@@ -1,7 +1,7 @@
 # Déploiement production Frip & Co Street — actif une fois le code dans son
 # propre dépôt (secrets VPS_HOST / VPS_USER / VPS_SSH_KEY / VPS_PORT à créer
-# dans ce dépôt ; ils peuvent pointer sur le même VPS que Vintiz, le clone
-# vivant dans /opt/fripco-street).
+# dans ce dépôt ; ils peuvent pointer sur le même VPS que l'application
+# source, le clone vivant dans /opt/fripco-street).
 name: Deploy Production
 
 on:

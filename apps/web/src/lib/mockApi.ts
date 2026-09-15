@@ -34,12 +34,17 @@ import type {
   ConsentUpdateRequest,
   CreateTransactionRequest,
   DrawerCurrentResponse,
+  DrawerKickResponse,
   FiscalSettings,
+  HardwareSettings,
   JetEvent,
   MessagingStatus,
   PaymentInput,
   PaymentOut,
+  PrinterStatus,
+  PrintReceiptResponse,
   ReceiptSettings,
+  ReceiptTestResponse,
   SendReceiptEmailRequest,
   ShopSettings,
   TransactionItemOut,
@@ -122,10 +127,16 @@ interface CbAttempt {
 }
 const cbAttempts = new Map<string, CbAttempt>();
 
+/** Compteur d'impressions PHYSIQUES par ticket (PR3b — distinct de
+ * `_dup`/`duplicate_count`, qui compte les lectures du TEXTE du ticket via
+ * `GET .../receipt`). Persistant en mémoire, remis à zéro par `reset()`. */
+const printCounts = new Map<string, number>();
+
 let settings: {
   shop: ShopSettings;
   fiscal: FiscalSettings;
   receipt: ReceiptSettings;
+  hardware: HardwareSettings;
 } = {
   shop: {
     name: "Frip & Co Street",
@@ -145,12 +156,25 @@ let settings: {
     footer_note: "Merci de votre visite !",
     return_policy: "Ni repris ni échangé, hors erreur de caisse.",
   },
+  // Démo réaliste : imprimante réseau déjà configurée, tiroir activé,
+  // impression + ouverture automatiques à la vente — comme une boutique
+  // qui a fini son paramétrage (§3, écran de fin de vente).
+  hardware: {
+    printer_mode: "network",
+    printer_host: "192.168.1.50",
+    printer_port: 9100,
+    drawer_enabled: true,
+    drawer_pin: 0,
+    auto_print_on_sale: true,
+    auto_kick_on_cash: true,
+  },
 };
 
 function reset(): void {
   drawer = null;
   transactions = [];
   cancelledToRefund.clear();
+  printCounts.clear();
   cashMovements = [];
   zReports = [];
   jetEvents = [];
@@ -785,8 +809,8 @@ export async function mockFetchAPI<T = unknown>(
   }
 
   // --- Administration ---------------------------------------------------
-  if ((m = path.match(/^\/api\/admin\/settings\/(shop|fiscal|receipt)$/))) {
-    const key = m[1] as "shop" | "fiscal" | "receipt";
+  if ((m = path.match(/^\/api\/admin\/settings\/(shop|fiscal|receipt|hardware)$/))) {
+    const key = m[1] as "shop" | "fiscal" | "receipt" | "hardware";
     if (method === "GET") return settings[key] as unknown as T;
     if (method === "PUT") {
       const body = parseBody<Record<string, unknown>>(options);
@@ -796,10 +820,93 @@ export async function mockFetchAPI<T = unknown>(
       if (key === "fiscal" && typeof body.tva_rate === "string" && !(TVA_RATES as readonly string[]).includes(body.tva_rate)) {
         fail(422, "Taux de TVA non autorisé.", "invalid_tva_rate");
       }
+      if (key === "hardware") {
+        const merged = { ...settings.hardware, ...body } as HardwareSettings;
+        const host = (merged.printer_host || "").trim();
+        if (merged.printer_mode === "network" && !host) {
+          fail(422, "Adresse IP requise en mode réseau.", "invalid_setting");
+        }
+        if (host && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) {
+          fail(422, "Adresse IP de l'imprimante invalide (format IPv4 attendu, ex. 192.168.1.50).", "invalid_setting");
+        }
+        const port = Number(merged.printer_port);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          fail(422, "Port invalide (1 à 65535 attendu).", "invalid_setting");
+        }
+      }
       settings = { ...settings, [key]: { ...settings[key], ...body } };
       logJet("config.changed", { key, diff: body });
       return settings[key] as unknown as T;
     }
+  }
+
+  // --- Matériel — imprimante ticket + tiroir-caisse (PR3b) ----------------
+
+  if (path === "/api/hardware/printer/status" && method === "GET") {
+    const hw = settings.hardware;
+    if (hw.printer_mode !== "network") {
+      return { mode: hw.printer_mode, host: hw.printer_host || null, port: hw.printer_port, online: null, latency_ms: null } as unknown as T;
+    }
+    const online = Boolean(hw.printer_host);
+    const status: PrinterStatus = {
+      mode: hw.printer_mode,
+      host: hw.printer_host || null,
+      port: hw.printer_port,
+      online,
+      // Latence simulée — juste assez de variation pour ne pas sembler figée.
+      latency_ms: online ? 18 + Math.round(Math.random() * 30) : null,
+    };
+    return status as unknown as T;
+  }
+
+  if (path === "/api/hardware/receipt/test" && method === "POST") {
+    const hw = settings.hardware;
+    if (hw.printer_mode !== "network") {
+      fail(409, "Imprimante ticket non configurée en réseau (Paramètres > Matériel).", "printer_disabled");
+    }
+    const response: ReceiptTestResponse = { printed: true, host: hw.printer_host, port: hw.printer_port };
+    logJet("receipt.test_printed", { host: hw.printer_host, port: hw.printer_port });
+    return response as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/print$/)) && method === "POST") {
+    const tx = transactions.find((t) => t.id === m![1]);
+    if (!tx) fail(404, "Ticket introuvable.", "not_found");
+    const hw = settings.hardware;
+    if (hw.printer_mode === "webusb") {
+      fail(
+        409,
+        "Imprimante configurée en mode tablette (USB) : utilisez l'impression depuis la caisse plutôt que ce point d'entrée réseau.",
+        "printer_webusb",
+      );
+    }
+    if (hw.printer_mode !== "network") {
+      fail(409, "Imprimante ticket désactivée : configurez-la dans Paramètres > Matériel.", "printer_disabled");
+    }
+    const body = parseBody<{ kick?: boolean }>(options);
+    const prior = printCounts.get(tx!.id) ?? 0;
+    printCounts.set(tx!.id, prior + 1);
+    if (body.kick && hw.drawer_enabled) {
+      logJet("drawer.kicked", { reason: "cash_sale" });
+    }
+    logJet("receipt.printed", { number: tx!.transaction_number, mode: "network", duplicate: prior > 0 });
+    const response: PrintReceiptResponse = { printed: true, printed_count: prior + 1, duplicate: prior > 0 };
+    return response as unknown as T;
+  }
+
+  if (path === "/api/pos/drawer/kick" && method === "POST") {
+    const hw = settings.hardware;
+    if (hw.printer_mode !== "network" || !hw.drawer_enabled) {
+      fail(
+        409,
+        "Tiroir-caisse indisponible : imprimante réseau et tiroir activé requis (Paramètres > Matériel).",
+        "drawer_unavailable",
+      );
+    }
+    const body = parseBody<{ reason?: string }>(options);
+    logJet("drawer.kicked", { reason: body.reason || "manual" });
+    const response: DrawerKickResponse = { kicked: true };
+    return response as unknown as T;
   }
 
   if (path === "/api/admin/fiscal/integrity" && method === "GET") {
@@ -989,6 +1096,56 @@ export async function mockFetchAPI<T = unknown>(
     const page = pool.slice(0, limit);
     const next = page.length === limit ? page[page.length - 1]?.seq : null;
     return { events: page, next_before_seq: next } as unknown as T;
+  }
+
+  fail(501, `Route non simulée en mode démo : ${method} ${path}`, "mock_not_implemented");
+}
+
+// ---------------------------------------------------------------------------
+// Octets ESC/POS bruts (PR3b, mode WebUSB) — dispatcher séparé de
+// `mockFetchAPI` : ces routes ne renvoient jamais de JSON côté réel
+// (`Content-Type: application/octet-stream`), donc `lib/api.ts::fetchBytes`
+// les route ici plutôt que vers `mockFetchAPI`. Les octets renvoyés sont
+// factices (texte UTF-8 encodé) : seul le mode démo WebUSB (couplage +
+// envoi) est exercé, jamais une vraie imprimante.
+// ---------------------------------------------------------------------------
+
+function fakeEscposPayload(label: string): Uint8Array {
+  return new TextEncoder().encode(`ESC/POS (démo) — ${label}\n`);
+}
+
+export async function mockFetchBytes(endpoint: string, options?: FetchAPIOptions): Promise<Uint8Array> {
+  const [path, queryString] = endpoint.split("?");
+  const query = new URLSearchParams(queryString ?? "");
+  const method = (options?.method ?? "GET").toUpperCase();
+
+  await new Promise((r) => setTimeout(r, 120));
+
+  let m: RegExpMatchArray | null;
+
+  if (path === "/api/hardware/receipt/test-escpos" && method === "GET") {
+    return fakeEscposPayload("ticket de test");
+  }
+
+  if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/escpos$/)) && method === "GET") {
+    const tx = transactions.find((t) => t.id === m![1]);
+    if (!tx) fail(404, "Ticket introuvable.", "not_found");
+    const kick = query.get("kick") === "1" || query.get("kick") === "true";
+    const prior = printCounts.get(tx!.id) ?? 0;
+    printCounts.set(tx!.id, prior + 1);
+    if (kick && settings.hardware.drawer_enabled) {
+      logJet("drawer.kicked", { reason: "cash_sale" });
+    }
+    logJet("receipt.printed", { number: tx!.transaction_number, mode: "webusb", duplicate: prior > 0 });
+    return fakeEscposPayload(`ticket n° ${tx!.transaction_number}`);
+  }
+
+  if (path === "/api/pos/drawer/kick-escpos" && method === "GET") {
+    if (!settings.hardware.drawer_enabled) {
+      fail(409, "Tiroir-caisse désactivé (Paramètres > Matériel).", "drawer_unavailable");
+    }
+    logJet("drawer.kicked", { reason: "manual" });
+    return fakeEscposPayload("ouverture tiroir");
   }
 
   fail(501, `Route non simulée en mode démo : ${method} ${path}`, "mock_not_implemented");

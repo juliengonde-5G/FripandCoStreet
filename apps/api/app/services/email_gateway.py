@@ -1,11 +1,11 @@
-# Extrait de Vintiz (apps/api/app/services/email_gateway.py), reduit au
+# Extrait de l'application source (apps/api/app/services/email_gateway.py), reduit au
 # perimetre PR3 (docs/ARCHITECTURE_PR3.md §3/E6) : un seul type de message
 # (le ticket), pas de templates editables, pas de piece jointe, pas de tags
 # analytics/idempotency-key. Retire : suivi d'ouverture PAR CONSENTEMENT
 # INDIVIDUEL (Fripco n'envoie aucun e-mail marketing — seul le ticket, un
 # envoi transactionnel), Twilio (pas de SMS, cf. CLAUDE.md). Conserve la
 # garde CNIL "pixel d'ouverture" (E6) : le compte Brevo etant PARTAGE avec
-# Vintiz, un envoi Brevo est refuse tant que `BREVO_ANONYMOUS_TRACKING`
+# la boutique de Vernon, un envoi Brevo est refuse tant que `BREVO_ANONYMOUS_TRACKING`
 # n'est pas confirme.
 #
 # Client HTTP : `httpx.AsyncClient`, avec un point d'injection de transport
@@ -101,7 +101,7 @@ async def _send_via_brevo(message: EmailMessage) -> EmailResult:
     if not api_key:
         raise EmailDeliveryError("BREVO_API_KEY non configurée")
     # Garde E6 — pixel d'ouverture CNIL : le compte Brevo est PARTAGÉ avec
-    # Vintiz. Tant que le suivi anonyme n'est pas confirmé, on refuse
+    # la boutique de Vernon. Tant que le suivi anonyme n'est pas confirmé, on refuse
     # d'envoyer via Brevo (repli SMTP/simulation décidé par `send_email`).
     if not settings.BREVO_ANONYMOUS_TRACKING:
         raise EmailDeliveryError(

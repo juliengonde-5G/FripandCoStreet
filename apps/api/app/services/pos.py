@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/services/pos.py), fortement reduit au
+# Extrait de l'application source (apps/api/app/services/pos.py), fortement reduit au
 # perimetre PR2 (docs/ARCHITECTURE_PR2.md §4.1/§4.3) : pas de produits,
 # clients, fidelite, coupons, Solde — un panier de lignes libres (label +
 # prix TTC), une remise globale, deux moyens de paiement (especes / CB).

@@ -1,8 +1,9 @@
 # Nouveau routeur (PR3, docs/ARCHITECTURE_PR3.md §4/E9) — webhook public
 # Brevo -> Fripco. Authentifie par token partage (`BREVO_WEBHOOK_TOKEN`),
 # PAS par JWT (Brevo ne porte pas de Bearer applicatif) : sans token
-# configure, 403 (fail-closed). Meme patron d'authentification que Vintiz
-# `api/brevo/router.py`, adapte a `settings` (pydantic-settings) plutot que
+# configure, 403 (fail-closed). Meme patron d'authentification que le
+# module equivalent de l'application source (`api/brevo/router.py`), adapte
+# a `settings` (pydantic-settings) plutot que
 # `os.getenv` direct.
 from __future__ import annotations
 

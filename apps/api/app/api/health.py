@@ -1,4 +1,5 @@
-# Nouveau — extrait/simplifie du endpoint /api/health de Vintiz (apps/api/app/main.py)
+# Nouveau — extrait/simplifie du endpoint /api/health de l'application
+# source (module équivalent de l'application source : apps/api/app/main.py)
 from fastapi import APIRouter
 
 from app.core.config import settings

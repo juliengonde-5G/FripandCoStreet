@@ -1,4 +1,4 @@
-# Extrait de Vintiz (apps/api/app/models/user.py) — compte unique : pas de
+# Extrait de l'application source (apps/api/app/models/user.py) — compte unique : pas de
 # role, pas de PIN caisse (mono-utilisateur, cf. CLAUDE.md).
 from sqlalchemy import Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
