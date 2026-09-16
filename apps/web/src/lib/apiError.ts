@@ -21,6 +21,15 @@ export class ApiError extends Error {
    * traité comme une donnée inconnue : on ne suppose jamais sa forme.
    */
   body?: unknown;
+  /**
+   * Identifiant de la requête (PR12 N5) — en-tête `X-Request-ID` de la
+   * réponse, ou champ `request_id` du corps quand la frontière 500 du
+   * serveur le renvoie. Sert à corréler ce que voit la vendeuse avec la
+   * ligne de log du serveur ; affiché par `ErrorReference`, et seulement
+   * pour une 5xx ou une panne réseau (une 4xx métier se suffit à
+   * elle-même).
+   */
+  requestId?: string;
 
   constructor(status: number, detail: string, code?: string) {
     super(detail);
@@ -88,4 +97,17 @@ export function extractErrorCode(data: unknown): string | undefined {
   if (!data || typeof data !== "object") return undefined;
   const code = (data as Record<string, unknown>).code;
   return typeof code === "string" && code.length > 0 ? code : undefined;
+}
+
+/**
+ * Identifiant de requête porté par un corps d'erreur JSON (PR12 N5) —
+ * la frontière 500 du serveur renvoie `{detail, request_id, error_type}`.
+ * Sert de repli quand l'en-tête `X-Request-ID` n'a pas pu être lu (CORS
+ * restrictif, proxy qui l'efface). Toujours traité comme une donnée
+ * inconnue : on ne suppose jamais la forme du corps.
+ */
+export function extractRequestId(data: unknown): string | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const value = (data as Record<string, unknown>).request_id;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
