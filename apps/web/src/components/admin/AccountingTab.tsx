@@ -20,7 +20,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Modal from "@/components/ui/Modal";
-import { api, ApiError } from "@/lib/api";
+import ErrorNotice from "@/components/ui/ErrorNotice";
+import { api } from "@/lib/api";
+import { describeError, type DisplayableError } from "@/lib/apiError";
 import { downloadFile } from "@/lib/download";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { downloadInvoicePdf, invoiceAmount, invoiceKindLabel, listInvoices } from "@/lib/invoices";
@@ -44,15 +46,6 @@ import {
   type AccountingSettings,
   type ExportableTable,
 } from "@/lib/types";
-
-function ErrorNotice({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
-      {message}
-    </div>
-  );
-}
 
 function SavedNotice({ show }: { show: boolean }) {
   if (!show) return null;
@@ -123,10 +116,10 @@ function JournalCard() {
 
   const [journal, setJournal] = useState<AccountingJournal | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<DisplayableError>(null);
   const [downloadOk, setDownloadOk] = useState<string | null>(null);
 
   const period = useMemo(() => monthRange(year, month), [year, month]);
@@ -148,7 +141,7 @@ function JournalCard() {
       .catch((err) => {
         if (cancelled) return;
         setJournal(null);
-        setError(err instanceof ApiError ? err.detail : "Impossible de charger le journal comptable.");
+        setError(describeError(err, "Impossible de charger le journal comptable."));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -173,7 +166,7 @@ function JournalCard() {
       await downloadFile(monthlyCsvUrl(year, month), filename);
       setDownloadOk(`${filename} téléchargé.`);
     } catch (err) {
-      setDownloadError(err instanceof ApiError ? err.detail : "Échec du téléchargement.");
+      setDownloadError(describeError(err, "Échec du téléchargement."));
     } finally {
       setDownloading(false);
     }
@@ -345,13 +338,13 @@ function AccountingSettingsCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     api
       .get<AccountingSettings>("/api/admin/settings/accounting")
       .then((data) => setForm({ ...EMPTY_ACCOUNTING, ...data }))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les comptes comptables."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les comptes comptables.")))
       .finally(() => setLoading(false));
   }, []);
 
@@ -368,7 +361,7 @@ function AccountingSettingsCard() {
       setForm({ ...EMPTY_ACCOUNTING, ...data });
       setSaved(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -459,15 +452,15 @@ function AccountingEntriesCard() {
 
   const [list, setList] = useState<AccountingExportSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const [downloading, setDownloading] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<DisplayableError>(null);
   const [downloadOk, setDownloadOk] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<AccountingExportDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<DisplayableError>(null);
 
   const load = () => {
     setLoading(true);
@@ -475,7 +468,7 @@ function AccountingEntriesCard() {
     api
       .get<AccountingExportsMonthResponse>(`/api/admin/accounting/exports?year=${year}&month=${month}`)
       .then((data) => setList(data.exports))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les écritures du mois."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les écritures du mois.")))
       .finally(() => setLoading(false));
   };
 
@@ -491,7 +484,7 @@ function AccountingEntriesCard() {
       await downloadFile(path, filename);
       setDownloadOk(`${filename} téléchargé.`);
     } catch (err) {
-      setDownloadError(err instanceof ApiError ? err.detail : "Échec du téléchargement.");
+      setDownloadError(describeError(err, "Échec du téléchargement."));
     } finally {
       setDownloading(null);
     }
@@ -506,7 +499,7 @@ function AccountingEntriesCard() {
     api
       .get<AccountingExportDetail>(`/api/admin/accounting/exports/${zReportId}`)
       .then(setDetail)
-      .catch((err) => setDetailError(err instanceof ApiError ? err.detail : "Impossible de charger le détail de l'écriture."))
+      .catch((err) => setDetailError(describeError(err, "Impossible de charger le détail de l'écriture.")))
       .finally(() => setDetailLoading(false));
   };
 
@@ -686,16 +679,16 @@ function InvoicesCard() {
   const [year, setYear] = useState(() => new Date().getFullYear());
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     setLoading(true);
     setError(null);
     listInvoices(year)
       .then(setInvoices)
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les factures."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les factures.")))
       .finally(() => setLoading(false));
   }, [year]);
 
@@ -705,7 +698,7 @@ function InvoicesCard() {
     try {
       await downloadInvoicePdf(invoice);
     } catch (err) {
-      setDownloadError(err instanceof ApiError ? err.detail : "Échec du téléchargement du PDF.");
+      setDownloadError(describeError(err, "Échec du téléchargement du PDF."));
     } finally {
       setDownloadingId(null);
     }
@@ -795,7 +788,7 @@ function RawTableExportsCard() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [downloading, setDownloading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [ok, setOk] = useState<string | null>(null);
 
   const handleDownload = async (): Promise<void> => {
@@ -811,7 +804,7 @@ function RawTableExportsCard() {
       await downloadFile(`/api/admin/exports/table/${table}${query ? `?${query}` : ""}`, filename);
       setOk(`${filename} téléchargé.`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec du téléchargement.");
+      setError(describeError(err, "Échec du téléchargement."));
     } finally {
       setDownloading(false);
     }

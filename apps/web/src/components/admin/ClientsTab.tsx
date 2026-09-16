@@ -21,7 +21,9 @@ import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import Modal from "@/components/ui/Modal";
-import { api, ApiError } from "@/lib/api";
+import ErrorNotice from "@/components/ui/ErrorNotice";
+import { api } from "@/lib/api";
+import { describeError, type DisplayableError } from "@/lib/apiError";
 import {
   cancelClientDeletion,
   CLIENT_FILTERS,
@@ -42,15 +44,6 @@ import type { AnonymizeRequest, Client, ClientFull, ConsentUpdateRequest } from 
 // Mêmes deux aides d'affichage que les autres onglets extraits
 // (CashiersTab, PaymentsTab) : chacun porte sa copie plutôt qu'une
 // dépendance croisée vers la page.
-function ErrorNotice({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
-      {message}
-    </div>
-  );
-}
-
 function StatusPill({ ok, okLabel, koLabel }: { ok: boolean; okLabel: string; koLabel: string }) {
   return (
     <span
@@ -98,7 +91,7 @@ function preferredWinner(clients: DuplicateGroupClient[]): DuplicateGroupClient 
 function DuplicatesCard({ refreshKey, onMerged }: { refreshKey: number; onMerged: (winnerId: string) => void }) {
   const [groups, setGroups] = useState<DuplicateGroup[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [openGroup, setOpenGroup] = useState<DuplicateGroup | null>(null);
 
   useEffect(() => {
@@ -112,7 +105,7 @@ function DuplicatesCard({ refreshKey, onMerged }: { refreshKey: number; onMerged
       })
       .catch((err) => {
         if (cancelled) return;
-        setError(err instanceof ApiError ? err.detail : "Impossible de chercher les doublons.");
+        setError(describeError(err, "Impossible de chercher les doublons."));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -197,7 +190,7 @@ function MergeModal({
 }) {
   const [winnerId, setWinnerId] = useState<string>(() => preferredWinner(group.clients)?.id ?? group.clients[0].id);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const sources = useMemo(() => group.clients.filter((c) => c.id !== winnerId), [group.clients, winnerId]);
   const salesToMove = sources.reduce((sum, c) => sum + c.visits_count, 0);
@@ -212,7 +205,7 @@ function MergeModal({
       }
       onMerged(winnerId);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "La fusion a échoué.");
+      setError(describeError(err, "La fusion a échoué."));
     } finally {
       setBusy(false);
     }
@@ -309,13 +302,13 @@ export default function ClientsTab() {
   const [query, setQuery] = useState("");
   const [list, setList] = useState<Client[]>([]);
   const [loadingList, setLoadingList] = useState(true);
-  const [listError, setListError] = useState<string | null>(null);
+  const [listError, setListError] = useState<DisplayableError>(null);
   // PR11 (M4) : la liste se restreint aux abonnées à la newsletter ou aux
   // fiches dont la suppression est programmée. Les deux puces s'ajoutent à
   // la recherche libre, elles ne la remplacent pas.
   const [filter, setFilter] = useState<ClientListFilter>("all");
   const [exporting, setExporting] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<DisplayableError>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Recompté après chaque fusion : la carte des doublons se relit sans
   // que la page entière ne se remonte.
@@ -329,7 +322,7 @@ export default function ClientsTab() {
     setListError(null);
     fetchClients({ q, ...clientFilterParams(listFilter) })
       .then((clients) => setList(clients))
-      .catch((err) => setListError(err instanceof ApiError ? err.detail : "Impossible de charger les clients."))
+      .catch((err) => setListError(describeError(err, "Impossible de charger les clients.")))
       .finally(() => setLoadingList(false));
   };
 
@@ -350,7 +343,7 @@ export default function ClientsTab() {
     try {
       await downloadNewsletterCsv();
     } catch (err) {
-      setExportError(err instanceof ApiError ? err.detail : "Impossible de préparer l'export.");
+      setExportError(describeError(err, "Impossible de préparer l'export."));
     } finally {
       setExporting(false);
     }
@@ -525,9 +518,9 @@ function ClientDetailCard({
 }) {
   const [data, setData] = useState<ClientFull | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [consentBusy, setConsentBusy] = useState(false);
-  const [consentError, setConsentError] = useState<string | null>(null);
+  const [consentError, setConsentError] = useState<DisplayableError>(null);
 
   const load = () => {
     setLoading(true);
@@ -535,7 +528,7 @@ function ClientDetailCard({
     api
       .get<ClientFull>(`/api/admin/clients/${clientId}`)
       .then(setData)
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger la fiche client."))
+      .catch((err) => setError(describeError(err, "Impossible de charger la fiche client.")))
       .finally(() => setLoading(false));
   };
 
@@ -561,7 +554,7 @@ function ClientDetailCard({
       load();
       onChanged();
     } catch (err) {
-      setConsentError(err instanceof ApiError ? err.detail : "Échec de la mise à jour.");
+      setConsentError(describeError(err, "Échec de la mise à jour."));
     } finally {
       setConsentBusy(false);
     }
@@ -722,16 +715,16 @@ function ClientDetailCard({
 function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void }) {
   const [exportJson, setExportJson] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<DisplayableError>(null);
 
   const [scheduleBusy, setScheduleBusy] = useState(false);
-  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [scheduleError, setScheduleError] = useState<DisplayableError>(null);
 
   const [immediateOpen, setImmediateOpen] = useState(false);
   const [reason, setReason] = useState("");
   const [confirmWord, setConfirmWord] = useState("");
   const [anonymizing, setAnonymizing] = useState(false);
-  const [anonymizeError, setAnonymizeError] = useState<string | null>(null);
+  const [anonymizeError, setAnonymizeError] = useState<DisplayableError>(null);
 
   const clientId = client.id;
   const scheduledFor = client.deletion_scheduled_for ?? null;
@@ -743,7 +736,7 @@ function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void
       const data = await api.get<Record<string, unknown>>(`/api/admin/clients/${clientId}/export`);
       setExportJson(JSON.stringify(data, null, 2));
     } catch (err) {
-      setExportError(err instanceof ApiError ? err.detail : "Échec de l'export.");
+      setExportError(describeError(err, "Échec de l'export."));
     } finally {
       setExporting(false);
     }
@@ -756,7 +749,7 @@ function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void
       await requestClientDeletion(clientId);
       onChanged();
     } catch (err) {
-      setScheduleError(err instanceof ApiError ? err.detail : "Impossible de programmer la suppression.");
+      setScheduleError(describeError(err, "Impossible de programmer la suppression."));
     } finally {
       setScheduleBusy(false);
     }
@@ -769,7 +762,7 @@ function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void
       await cancelClientDeletion(clientId);
       onChanged();
     } catch (err) {
-      setScheduleError(err instanceof ApiError ? err.detail : "Impossible d'annuler la suppression programmée.");
+      setScheduleError(describeError(err, "Impossible d'annuler la suppression programmée."));
     } finally {
       setScheduleBusy(false);
     }
@@ -789,7 +782,7 @@ function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void
       setConfirmWord("");
       onChanged();
     } catch (err) {
-      setAnonymizeError(err instanceof ApiError ? err.detail : "Échec de la suppression.");
+      setAnonymizeError(describeError(err, "Échec de la suppression."));
     } finally {
       setAnonymizing(false);
     }

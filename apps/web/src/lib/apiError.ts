@@ -161,6 +161,14 @@ export function describeError(err: unknown, fallback: string): ErrorDetails {
   return reference ? { message, reference } : { message };
 }
 
+/** Même chose, avec un message imposé par l'écran : certaines erreurs
+ * métier sont reformulées en langage de boutique (« une sauvegarde est
+ * déjà en cours… »), sans pour autant perdre la référence d'une panne. */
+export function describeErrorAs(err: unknown, message: string): ErrorDetails {
+  const reference = errorReference(err);
+  return reference ? { message, reference } : { message };
+}
+
 /** Message d'une erreur affichable, qu'elle soit déjà décrite ou simple
  * chaîne — les écrans mélangent les deux formes. */
 export type DisplayableError = string | ErrorDetails | null | undefined;

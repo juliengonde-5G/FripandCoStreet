@@ -14,19 +14,12 @@ import React, { useEffect, useState } from "react";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
+import ErrorNotice from "@/components/ui/ErrorNotice";
 import { api, ApiError } from "@/lib/api";
+import { describeError, describeErrorAs, type DisplayableError } from "@/lib/apiError";
 import { copyToClipboard, downloadFile, shortHash } from "@/lib/download";
 import { formatBytes, formatDateTime, formatRelativeTime } from "@/lib/format";
 import type { DatabaseBackup, DatabaseBackupConfig, DatabaseBackupListResponse, DatabaseState } from "@/lib/types";
-
-function ErrorNotice({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
-      {message}
-    </div>
-  );
-}
 
 function SavedNotice({ show }: { show: boolean }) {
   if (!show) return null;
@@ -82,7 +75,7 @@ export default function BackupsTab() {
 function DatabaseStateCard({ refreshToken }: { refreshToken: number }) {
   const [state, setState] = useState<DatabaseState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const load = (): void => {
     setLoading(true);
@@ -90,7 +83,7 @@ function DatabaseStateCard({ refreshToken }: { refreshToken: number }) {
     api
       .get<DatabaseState>("/api/admin/database/state")
       .then(setState)
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger l'état de la base."))
+      .catch((err) => setError(describeError(err, "Impossible de charger l'état de la base.")))
       .finally(() => setLoading(false));
   };
 
@@ -196,13 +189,13 @@ function BackupConfigCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     api
       .get<DatabaseBackupConfig>("/api/admin/database/config")
       .then((data) => setForm({ ...EMPTY_CONFIG, ...data }))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les réglages de sauvegarde."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les réglages de sauvegarde.")))
       .finally(() => setLoading(false));
   }, []);
 
@@ -215,7 +208,7 @@ function BackupConfigCard() {
       setForm({ ...EMPTY_CONFIG, ...data });
       setSaved(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -294,21 +287,21 @@ function runErrorMessage(err: ApiError): string {
 function BackupsListCard({ onChanged }: { onChanged: () => void }) {
   const [list, setList] = useState<DatabaseBackup[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const [running, setRunning] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
+  const [runError, setRunError] = useState<DisplayableError>(null);
   const [runSuccess, setRunSuccess] = useState<string | null>(null);
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<DisplayableError>(null);
   const [downloadedHash, setDownloadedHash] = useState<{ id: string; hash: string } | null>(null);
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<DisplayableError>(null);
 
   const [expandedErrorId, setExpandedErrorId] = useState<string | null>(null);
 
@@ -318,7 +311,7 @@ function BackupsListCard({ onChanged }: { onChanged: () => void }) {
     api
       .get<DatabaseBackupListResponse>("/api/admin/database/backups?limit=50")
       .then((data) => setList(data.backups))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les sauvegardes."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les sauvegardes.")))
       .finally(() => setLoading(false));
   };
 
@@ -334,7 +327,11 @@ function BackupsListCard({ onChanged }: { onChanged: () => void }) {
       load();
       onChanged();
     } catch (err) {
-      setRunError(err instanceof ApiError ? runErrorMessage(err) : "Échec du lancement de la sauvegarde.");
+      setRunError(
+        err instanceof ApiError
+          ? describeErrorAs(err, runErrorMessage(err))
+          : describeError(err, "Échec du lancement de la sauvegarde."),
+      );
       // Une sauvegarde en échec écrit quand même une ligne (G1) : on
       // recharge la liste pour qu'elle apparaisse.
       load();
@@ -360,7 +357,7 @@ function BackupsListCard({ onChanged }: { onChanged: () => void }) {
       const hash = headers["x-backup-sha256"];
       if (hash) setDownloadedHash({ id: backup.id, hash });
     } catch (err) {
-      setDownloadError(err instanceof ApiError ? err.detail : "Échec du téléchargement de la sauvegarde.");
+      setDownloadError(describeError(err, "Échec du téléchargement de la sauvegarde."));
     } finally {
       setDownloadingId(null);
     }
@@ -375,7 +372,7 @@ function BackupsListCard({ onChanged }: { onChanged: () => void }) {
       load();
       onChanged();
     } catch (err) {
-      setDeleteError(err instanceof ApiError ? err.detail : "Échec de la suppression.");
+      setDeleteError(describeError(err, "Échec de la suppression."));
     } finally {
       setDeletingId(null);
     }

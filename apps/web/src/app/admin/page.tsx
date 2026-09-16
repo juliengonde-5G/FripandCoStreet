@@ -20,10 +20,10 @@ import RequireAuth from "@/components/layout/RequireAuth";
 import Sidebar from "@/components/layout/Sidebar";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
-import ErrorReference from "@/components/ui/ErrorReference";
+import ErrorNotice from "@/components/ui/ErrorNotice";
 import Input from "@/components/ui/Input";
 import { api } from "@/lib/api";
-import { describeError, errorRef, errorText, type DisplayableError } from "@/lib/apiError";
+import { describeError, errorText, type DisplayableError } from "@/lib/apiError";
 import {
   DEFAULT_WEEKDAY_OPEN,
   WEEKDAY_LABELS,
@@ -200,22 +200,6 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
 function SavedNotice({ show }: { show: boolean }) {
   if (!show) return null;
   return <span className="text-sm text-fc-success font-medium">Enregistré.</span>;
-}
-
-/**
- * Message d'erreur générique de l'administration. Affiche, pour une panne
- * du serveur ou du réseau uniquement, la référence à noter (PR12 N5) —
- * jamais sur une erreur métier.
- */
-function ErrorNotice({ message }: { message: DisplayableError }) {
-  const text = errorText(message);
-  if (!text) return null;
-  return (
-    <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
-      {text}
-      <ErrorReference reference={errorRef(message)} />
-    </div>
-  );
 }
 
 // ---------------------------------------------------------------------------
