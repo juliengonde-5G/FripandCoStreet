@@ -8,12 +8,17 @@
  */
 import React from "react";
 
+import ErrorReference from "@/components/ui/ErrorReference";
+
 export type PaymentStatus = "pending" | "paid" | "failed" | "cancelled" | "timeout";
 
 interface Props {
   status: PaymentStatus;
   label?: string;
   detail?: string;
+  /** Référence à noter (PR12 N5) — posée seulement quand l'échec vient du
+   * serveur ou du réseau, jamais sur un refus de carte. */
+  reference?: string | null;
   actionLabel?: string;
   onAction?: () => void;
   secondaryActionLabel?: string;
@@ -32,6 +37,7 @@ export default function PaymentStatusBanner({
   status,
   label,
   detail,
+  reference,
   actionLabel,
   onAction,
   secondaryActionLabel,
@@ -74,6 +80,7 @@ export default function PaymentStatusBanner({
         </div>
       </div>
       {detail && <p className="mt-1 text-sm opacity-80">{detail}</p>}
+      <ErrorReference reference={reference} />
     </div>
   );
 }

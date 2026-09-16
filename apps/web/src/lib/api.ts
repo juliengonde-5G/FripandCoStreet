@@ -7,10 +7,12 @@
  * l'API locale (http://localhost:8000 par défaut).
  */
 
-import { ApiError, extractErrorCode, extractErrorDetail, extractRequestId } from "./apiError";
+import { ApiError, NetworkError, extractErrorCode, extractErrorDetail, extractRequestId } from "./apiError";
 import { mockFetchAPI, mockFetchBytes, mockFetchBytesWithHeaders, isMockEnabled } from "./mockApi";
 
-export { ApiError };
+export { ApiError, NetworkError };
+export { describeError, errorReference } from "./apiError";
+export type { ErrorDetails } from "./apiError";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -118,10 +120,13 @@ export async function fetchAPI<T = unknown>(
       headers: { ...headers, ...options?.headers },
     });
   } catch (err) {
+    // Pas de réponse : on garde le message d'origine (les écrans ont leur
+    // propre repli) mais on attache l'identifiant envoyé, seule trace
+    // commune avec le serveur (N5).
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+      throw new NetworkError(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`, requestId, { cause: err });
     }
-    throw err;
+    throw new NetworkError(err instanceof Error ? err.message : "Connexion impossible", requestId, { cause: err });
   } finally {
     clearTimeout(timer);
   }
@@ -192,10 +197,13 @@ export async function fetchBytes(endpoint: string, options?: FetchAPIOptions): P
       headers: { ...headers, ...options?.headers },
     });
   } catch (err) {
+    // Pas de réponse : on garde le message d'origine (les écrans ont leur
+    // propre repli) mais on attache l'identifiant envoyé, seule trace
+    // commune avec le serveur (N5).
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+      throw new NetworkError(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`, requestId, { cause: err });
     }
-    throw err;
+    throw new NetworkError(err instanceof Error ? err.message : "Connexion impossible", requestId, { cause: err });
   } finally {
     clearTimeout(timer);
   }
@@ -259,10 +267,13 @@ export async function fetchBytesWithHeaders(
       headers: { ...headers, ...options?.headers },
     });
   } catch (err) {
+    // Pas de réponse : on garde le message d'origine (les écrans ont leur
+    // propre repli) mais on attache l'identifiant envoyé, seule trace
+    // commune avec le serveur (N5).
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+      throw new NetworkError(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`, requestId, { cause: err });
     }
-    throw err;
+    throw new NetworkError(err instanceof Error ? err.message : "Connexion impossible", requestId, { cause: err });
   } finally {
     clearTimeout(timer);
   }

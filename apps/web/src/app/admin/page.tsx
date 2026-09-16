@@ -19,8 +19,10 @@ import RequireAuth from "@/components/layout/RequireAuth";
 import Sidebar from "@/components/layout/Sidebar";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
+import ErrorReference from "@/components/ui/ErrorReference";
 import Input from "@/components/ui/Input";
-import { api, ApiError } from "@/lib/api";
+import { api } from "@/lib/api";
+import { describeError, errorRef, errorText, type DisplayableError } from "@/lib/apiError";
 import {
   DEFAULT_WEEKDAY_OPEN,
   WEEKDAY_LABELS,
@@ -186,11 +188,18 @@ function SavedNotice({ show }: { show: boolean }) {
   return <span className="text-sm text-fc-success font-medium">Enregistré.</span>;
 }
 
-function ErrorNotice({ message }: { message: string | null }) {
-  if (!message) return null;
+/**
+ * Message d'erreur générique de l'administration. Affiche, pour une panne
+ * du serveur ou du réseau uniquement, la référence à noter (PR12 N5) —
+ * jamais sur une erreur métier.
+ */
+function ErrorNotice({ message }: { message: DisplayableError }) {
+  const text = errorText(message);
+  if (!text) return null;
   return (
     <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
-      {message}
+      {text}
+      <ErrorReference reference={errorRef(message)} />
     </div>
   );
 }
@@ -217,13 +226,13 @@ function ShopSettingsCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     api
       .get<ShopSettings>("/api/admin/settings/shop")
       .then((data) => setForm({ ...EMPTY_SHOP, ...data }))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les informations boutique."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les informations boutique.")))
       .finally(() => setLoading(false));
   }, []);
 
@@ -240,7 +249,7 @@ function ShopSettingsCard() {
       setForm({ ...EMPTY_SHOP, ...data });
       setSaved(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -291,13 +300,13 @@ function FiscalSettingsCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     api
       .get<FiscalSettings>("/api/admin/settings/fiscal")
       .then((data) => setRate(data.tva_rate))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger le taux de TVA."))
+      .catch((err) => setError(describeError(err, "Impossible de charger le taux de TVA.")))
       .finally(() => setLoading(false));
   }, []);
 
@@ -309,7 +318,7 @@ function FiscalSettingsCard() {
       setRate(data.tva_rate);
       setSaved(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -405,7 +414,7 @@ function TargetsCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     api
@@ -418,7 +427,7 @@ function TargetsCard() {
         setCurrentMonth(toAmountInput(monthly[monthKeys.current] ?? monthly.default));
         setNextMonth(toAmountInput(monthly[monthKeys.next] ?? monthly.default));
       })
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les objectifs."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les objectifs.")))
       .finally(() => setLoading(false));
   }, [monthKeys]);
 
@@ -460,7 +469,7 @@ function TargetsCard() {
       setNextMonth(toAmountInput(monthly[monthKeys.next]));
       setSaved(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -530,13 +539,13 @@ function OpeningDaysCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     fetchCahierConfig()
       .then((config) => setDays(config.weekday_open))
       .catch((err) =>
-        setError(err instanceof ApiError ? err.detail : "Impossible de charger les jours d'ouverture."),
+        setError(describeError(err, "Impossible de charger les jours d'ouverture.")),
       )
       .finally(() => setLoading(false));
   }, []);
@@ -554,7 +563,7 @@ function OpeningDaysCard() {
       setDays(config.weekday_open);
       setSaved(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -641,7 +650,7 @@ function WeatherCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     fetchWeatherSettings()
@@ -650,7 +659,7 @@ function WeatherCard() {
         if (typeof data.api_key_configured === "boolean") setKeyConfigured(data.api_key_configured);
       })
       .catch((err) =>
-        setError(err instanceof ApiError ? err.detail : "Impossible de charger les réglages météo."),
+        setError(describeError(err, "Impossible de charger les réglages météo.")),
       )
       .finally(() => setLoading(false));
     // Relevé courant : confirme d'un coup d'œil que la ville saisie répond,
@@ -676,7 +685,7 @@ function WeatherCard() {
       if (typeof data.api_key_configured === "boolean") setKeyConfigured(data.api_key_configured);
       setSaved(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -758,13 +767,13 @@ function ReceiptSettingsCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     api
       .get<ReceiptSettings>("/api/admin/settings/receipt")
       .then((data) => setForm({ ...EMPTY_RECEIPT, ...data }))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger le pied de ticket."))
+      .catch((err) => setError(describeError(err, "Impossible de charger le pied de ticket.")))
       .finally(() => setLoading(false));
   }, []);
 
@@ -781,7 +790,7 @@ function ReceiptSettingsCard() {
       setForm({ ...EMPTY_RECEIPT, ...data });
       setSaved(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -822,7 +831,7 @@ const EMAIL_PROVIDER_LABELS: Record<string, string> = {
 function MessagingStatusCard() {
   const [status, setStatus] = useState<MessagingStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const load = () => {
     setLoading(true);
@@ -830,7 +839,7 @@ function MessagingStatusCard() {
     api
       .get<MessagingStatus>("/api/admin/messaging/status")
       .then(setStatus)
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger l'état de la messagerie."))
+      .catch((err) => setError(describeError(err, "Impossible de charger l'état de la messagerie.")))
       .finally(() => setLoading(false));
   };
 
@@ -891,14 +900,14 @@ function MessagingStatusCard() {
 function TerminalStatusCard() {
   const [status, setStatus] = useState<CbStatusConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const load = () => {
     setLoading(true);
     api
       .get<CbStatusConfig>("/api/pos/payments/cb/status")
       .then(setStatus)
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de contacter le terminal."))
+      .catch((err) => setError(describeError(err, "Impossible de contacter le terminal.")))
       .finally(() => setLoading(false));
   };
 
@@ -970,22 +979,22 @@ function HardwareSettingsCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const [status, setStatus] = useState<PrinterStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
 
   const [testMessage, setTestMessage] = useState<string | null>(null);
-  const [testError, setTestError] = useState<string | null>(null);
+  const [testError, setTestError] = useState<DisplayableError>(null);
   const [testing, setTesting] = useState(false);
 
   const [kickMessage, setKickMessage] = useState<string | null>(null);
-  const [kickError, setKickError] = useState<string | null>(null);
+  const [kickError, setKickError] = useState<DisplayableError>(null);
   const [kicking, setKicking] = useState(false);
 
   const [pairedLabel, setPairedLabel] = useState<string | null>(null);
   const [pairing, setPairing] = useState(false);
-  const [pairError, setPairError] = useState<string | null>(null);
+  const [pairError, setPairError] = useState<DisplayableError>(null);
 
   const loadStatus = (): void => {
     setStatusLoading(true);
@@ -1000,7 +1009,7 @@ function HardwareSettingsCard() {
     api
       .get<HardwareSettings>("/api/admin/settings/hardware")
       .then((data) => setForm({ ...EMPTY_HARDWARE, ...data }))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les réglages matériel."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les réglages matériel.")))
       .finally(() => setLoading(false));
     loadStatus();
     setPairedLabel(getStoredPrinter()?.label ?? null);
@@ -1020,7 +1029,7 @@ function HardwareSettingsCard() {
       setSaved(true);
       loadStatus();
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -1043,7 +1052,7 @@ function HardwareSettingsCard() {
         setTestMessage("Ticket de test envoyé à l'imprimante (USB).");
       }
     } catch (err) {
-      setTestError(err instanceof ApiError ? err.detail : err instanceof Error ? err.message : "Échec du test.");
+      setTestError(describeError(err, err instanceof Error ? err.message : "Échec du test."));
     } finally {
       setTesting(false);
     }
@@ -1235,15 +1244,15 @@ function HardwareSettingsCard() {
 function ZReportsCard() {
   const [list, setList] = useState<ZReport[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
+  const [pdfError, setPdfError] = useState<DisplayableError>(null);
   const [pdfBusyId, setPdfBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     api
       .get<{ z_reports: ZReport[] }>("/api/pos/z-reports")
       .then((data) => setList(data.z_reports))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les clôtures."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les clôtures.")))
       .finally(() => setLoading(false));
   }, []);
 
@@ -1253,7 +1262,7 @@ function ZReportsCard() {
     try {
       await downloadFile(`/api/pos/z-reports/${z.id}/pdf`, `Z${String(z.report_number).padStart(4, "0")}.pdf`);
     } catch (err) {
-      setPdfError(err instanceof ApiError ? err.detail : "Échec du téléchargement du PDF.");
+      setPdfError(describeError(err, "Échec du téléchargement du PDF."));
     } finally {
       setPdfBusyId(null);
     }
@@ -1318,7 +1327,7 @@ function ZReportsCard() {
 function IntegrityCard() {
   const [result, setResult] = useState<FiscalIntegrityResponse | null>(null);
   const [checking, setChecking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const handleCheck = async (): Promise<void> => {
     setChecking(true);
@@ -1327,7 +1336,7 @@ function IntegrityCard() {
       const data = await api.get<FiscalIntegrityResponse>("/api/admin/fiscal/integrity");
       setResult(data);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec du contrôle d'intégrité.");
+      setError(describeError(err, "Échec du contrôle d'intégrité."));
     } finally {
       setChecking(false);
     }
@@ -1370,7 +1379,7 @@ function IntegrityTile({ label, check }: { label: string; check: { ok?: boolean;
 function EventLogCard() {
   const [events, setEvents] = useState<JetEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [nextBeforeSeq, setNextBeforeSeq] = useState<number | null | undefined>(undefined);
   const [history, setHistory] = useState<(number | undefined)[]>([undefined]);
 
@@ -1385,7 +1394,7 @@ function EventLogCard() {
         setEvents(data.events);
         setNextBeforeSeq(data.next_before_seq ?? null);
       })
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger le journal des événements."))
+      .catch((err) => setError(describeError(err, "Impossible de charger le journal des événements.")))
       .finally(() => setLoading(false));
   };
 

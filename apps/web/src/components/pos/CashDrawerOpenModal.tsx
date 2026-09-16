@@ -7,7 +7,9 @@
  */
 import React, { useId, useState } from "react";
 
+import ErrorReference from "@/components/ui/ErrorReference";
 import NumPad from "@/components/ui/NumPad";
+import { errorRef, errorText, type DisplayableError } from "@/lib/apiError";
 import { formatCurrency } from "@/lib/format";
 import { useDialogA11y } from "@/lib/useDialogA11y";
 
@@ -15,7 +17,9 @@ import DenominationGrid, { type DenominationLine, totalFromBreakdown } from "./D
 
 interface Props {
   onSubmit: (payload: { opening_amount: number; opening_breakdown: DenominationLine[] | null }) => Promise<void> | void;
-  error?: string | null;
+  /** Message d'erreur d'ouverture, avec sa référence quand la panne vient
+   * du serveur ou du réseau (PR12 N5). */
+  error?: DisplayableError;
 }
 
 /**
@@ -102,9 +106,10 @@ export default function CashDrawerOpenModal({ onSubmit, error }: Props) {
               : "Saisis directement le total, si le fond de caisse n'a pas changé."}
           </section>
 
-          {error && (
+          {errorText(error) && (
             <section role="alert" className="rounded-fc-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-              {error}
+              {errorText(error)}
+              <ErrorReference reference={errorRef(error)} />
             </section>
           )}
 

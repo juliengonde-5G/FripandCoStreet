@@ -12,6 +12,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import RequireAuth from "@/components/layout/RequireAuth";
+import ErrorReference from "@/components/ui/ErrorReference";
 import Modal from "@/components/ui/Modal";
 import NumPad from "@/components/ui/NumPad";
 import CashDrawerOpenModal from "@/components/pos/CashDrawerOpenModal";
@@ -25,6 +26,7 @@ import PosTopBar from "@/components/pos/PosTopBar";
 import ReceiptPreviewCard from "@/components/pos/ReceiptPreviewCard";
 import TicketsPanel from "@/components/pos/TicketsPanel";
 import { api, ApiError } from "@/lib/api";
+import { describeError, errorRef, errorText, type DisplayableError } from "@/lib/apiError";
 import { fetchPosSettings, releaseCashier } from "@/lib/cashier";
 import { formatClientName, formatCurrency } from "@/lib/format";
 import { clampDiscountValue, computeBrut, computeDiscountAmount } from "@/lib/posCalc";
@@ -57,7 +59,7 @@ function newUuid(): string {
 export default function CaissePage() {
   const [drawerState, setDrawerState] = useState<DrawerCurrentResponse | null>(null);
   const [drawerLoading, setDrawerLoading] = useState(true);
-  const [openDrawerError, setOpenDrawerError] = useState<string | null>(null);
+  const [openDrawerError, setOpenDrawerError] = useState<DisplayableError>(null);
 
   const [cart, setCart] = useState<CartLine[]>([]);
   const [discount, setDiscount] = useState<DiscountInput | null>(null);
@@ -68,7 +70,10 @@ export default function CaissePage() {
   const [label, setLabel] = useState("");
   const [price, setPrice] = useState(0);
 
-  const [banner, setBanner] = useState<string | null>(null);
+  // Bandeau d'erreur de la caisse — vente, mouvement d'espèces, relève,
+  // lecture du tiroir. Porte la référence à noter quand la panne vient du
+  // serveur ou du réseau (PR12 N5).
+  const [banner, setBanner] = useState<DisplayableError>(null);
 
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [successTx, setSuccessTx] = useState<TransactionOut | null>(null);
@@ -158,7 +163,7 @@ export default function CaissePage() {
       // ne touche pas à la vendeuse connue plutôt que de l'effacer.
       if ("current_cashier" in data) setCashier(data.current_cashier ?? null);
     } catch (err) {
-      setBanner(err instanceof ApiError ? err.detail : "Impossible de contacter la caisse.");
+      setBanner(describeError(err, "Impossible de contacter la caisse."));
     } finally {
       setDrawerLoading(false);
     }
@@ -204,13 +209,13 @@ export default function CaissePage() {
       await fn();
     } catch (err) {
       if (err instanceof ApiError) {
-        setBanner(err.detail);
+        setBanner(describeError(err, err.detail));
         if (err.code === "drawer_closed") void loadDrawer();
         // Le serveur exige une vendeuse : on ouvre l'écran plutôt que de
         // laisser un message d'erreur sans geste possible.
         if (err.code === "cashier_required") openCashierScreen("Identifie-toi pour continuer.");
       } else {
-        setBanner("Une erreur inattendue est survenue.");
+        setBanner(describeError(err, "Une erreur inattendue est survenue."));
       }
       throw err;
     }
@@ -236,7 +241,7 @@ export default function CaissePage() {
       });
       await loadDrawer();
     } catch (err) {
-      setOpenDrawerError(err instanceof ApiError ? err.detail : "Impossible d'ouvrir la caisse.");
+      setOpenDrawerError(describeError(err, "Impossible d'ouvrir la caisse."));
     }
   };
 
@@ -298,7 +303,7 @@ export default function CaissePage() {
       setCashier(null);
       await loadDrawer();
     } catch (err) {
-      setBanner(err instanceof ApiError ? err.detail : "Relève impossible.");
+      setBanner(describeError(err, "Relève impossible."));
     } finally {
       setCashierBusy(false);
     }
@@ -475,7 +480,10 @@ export default function CaissePage() {
 
         {banner && (
           <div role="alert" className="flex-shrink-0 bg-fc-danger-soft border-b border-fc-danger/30 px-4 py-2 flex items-center gap-3">
-            <span className="text-sm text-fc-danger flex-1">{banner}</span>
+            <span className="text-sm text-fc-danger flex-1">
+              {errorText(banner)}
+              <ErrorReference reference={errorRef(banner)} className="text-fc-danger" />
+            </span>
             <button type="button" onClick={() => setBanner(null)} className="text-fc-danger text-sm font-medium hover:underline">
               Fermer
             </button>
