@@ -179,6 +179,15 @@ EVENT_CLIENT_MERGED = "client.merged"
 EVENT_CLIENT_DELETION_REQUESTED = "client.deletion_requested"
 EVENT_CLIENT_DELETION_CANCELLED = "client.deletion_cancelled"
 
+# PR11 — cahier du jour (docs/ARCHITECTURE_PR11.md, M2). Payloads :
+# LA JOURNEE ET LA NATURE DU GESTE, jamais le contenu. `cahier.text_updated`
+# porte le jour et les NOMS des champs touches (`message`, `operation`) ;
+# `cahier.signed` le jour et le role (`manager` / `team`). Les textes libres
+# du cahier et le nom saisi pour l'equipe n'y figurent pas : le JET est
+# immuable, et une ardoise qu'on corrige tous les jours n'a rien a y faire.
+EVENT_CAHIER_TEXT_UPDATED = "cahier.text_updated"
+EVENT_CAHIER_SIGNED = "cahier.signed"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""
