@@ -143,10 +143,14 @@ l'opération.
 
 ```bash
 cd /opt/fripco-street
-./scripts/deploy.sh          # build → base → migrations (rôle propriétaire) → démarrage → health-check
+./scripts/deploy.sh          # build → base → migrations (rôle propriétaire) → démarrage → health-check → tests de fumée
 ./scripts/deploy.sh --pull   # idem après mise à jour depuis origin/main
 ./scripts/deploy.sh --rollback
 ```
+
+Le script se termine par les **tests de fumée** (§13). Ils tournent après le
+message de fin : le déploiement a eu lieu, ils disent seulement si ce qui
+tourne maintenant répond correctement.
 
 Premier démarrage : créer l'unique compte manager.
 
@@ -365,3 +369,94 @@ La carte météo de l'accueil et du cahier du jour interroge OpenWeather.
 `.github/workflows/deploy.yml` (actif dans le dépôt dédié) : après une CI verte
 sur `main`, connexion SSH et `./scripts/deploy.sh --pull`. Secrets à créer dans
 le dépôt : `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_PORT` (optionnel).
+
+## 12. Jour de l'ouverture — remise à zéro
+
+Avant l'ouverture, la boutique s'essaie : ventes fictives, tickets, rapports
+Z, clientes de test. Le jour J, rien de tout cela ne doit subsister — la
+première vente réelle doit porter le **numéro 1**, le premier Z le **numéro
+1**, et le journal des événements repartir de son origine.
+
+```bash
+# 1. TOUJOURS commencer par l'essai à blanc : il n'écrit rien.
+docker exec -it fripco-api python scripts/go_live_reset.py --dry-run
+
+# 2. Exécuter réellement (le script fait lui-même une sauvegarde avant).
+docker exec -it fripco-api python scripts/go_live_reset.py --confirm
+```
+
+**Ce qui est conservé** : le compte manager (`users`), tout le paramétrage
+(`app_settings` : coordonnées, TVA, mentions du ticket, matériel, plan de
+comptes, objectifs, réglages de sauvegarde), les vendeuses et leurs codes PIN
+(`cashiers`), et les sauvegardes déjà faites (`database_backups`, lignes et
+fichiers).
+
+**Ce qui est vidé** : ventes, lignes de vente, encaissements, tickets,
+tentatives et échecs carte, journal des échanges avec le terminal, tiroirs et
+mouvements de caisse, rapports Z, écritures comptables et leurs lignes,
+clôtures fiscales, factures et avoirs, journal des événements techniques,
+fiches clientes, consentements, e-mails envoyés, cahier du jour.
+
+Quelques garde-fous, dans l'ordre où ils se déclenchent :
+
+- **Aucune liste implicite.** Les deux listes de tables sont écrites en toutes
+  lettres dans le script et confrontées à la base : une table présente en base
+  et absente des deux listes fait échouer l'opération **avant toute écriture**.
+  Une migration future ne pourra donc jamais voir sa table vidée — ou oubliée —
+  par accident.
+- **Une seule fois.** Une fois faite, la remise à zéro pose le réglage
+  `system.go_live_done_at` et tout nouveau lancement est refusé. Après
+  l'ouverture, les ventes sont des données fiscales : elles ne s'effacent pas.
+  `--force` existe pour une réouverture préparée et exige de **retaper le nom
+  de la boutique**.
+- **Sauvegarde d'abord.** Le script déclenche lui-même une sauvegarde
+  applicative complète (`pg_dump | gzip`, relue et vérifiée) et s'arrête si
+  elle échoue. On ne vide pas une base dont on n'a pas réussi à faire une
+  copie ; cette sauvegarde reste téléchargeable depuis Administration →
+  Sauvegardes.
+- **Tout ou rien.** Le vidage, la remise à 1 des compteurs, le premier
+  événement du journal et la pose du verrou se font dans **une seule
+  transaction** : la moindre erreur annule l'ensemble.
+- **Les protections ne sont jamais levées.** Les triggers d'inaltérabilité
+  restent en place du début à la fin ; `TRUNCATE` ne les déclenche simplement
+  pas, là où un `DELETE` serait refusé.
+- **Une trace.** Le tout premier événement du nouveau journal est
+  `system.go_live_reset` : il porte l'horodatage, les comptages d'avant et
+  l'identifiant de la sauvegarde. La remise à zéro est donc elle-même
+  documentée dans la chaîne qu'elle inaugure.
+
+Le script se connecte par `MIGRATION_DATABASE_URL` (rôle **propriétaire**,
+§4) : le rôle applicatif n'est pas propriétaire des tables et ne peut pas les
+tronquer — c'est voulu.
+
+## 13. Tests de fumée après déploiement
+
+```bash
+./scripts/smoke_prod.sh                        # https://app.lloomi.fr
+./scripts/smoke_prod.sh http://127.0.0.1:8000  # une autre cible
+```
+
+Neuf contrôles de **lecture seule** (bash + `curl` + `python3`, aucune
+dépendance à installer), une ligne `[OK]` ou `[KO]` chacun, code de retour 1
+dès qu'un contrôle échoue :
+
+| # | Contrôle |
+|---|---|
+| 1 | `/api/health` répond 200, c'est bien notre API, la révision de schéma attendue est la tête Alembic du dépôt et le `build_sha` est le commit déployé |
+| 2 | `/` répond 200 et contient le nom de la boutique |
+| 3 | `/login` répond 200 |
+| 4 | `/manifest.webmanifest` répond 200 et est du JSON valide (sans lui, plus d'installation sur la tablette) |
+| 5 | `/sw.js` répond 200 |
+| 6 | `/api/openapi.json` répond 200 |
+| 7 | le certificat TLS est valide plus de 14 jours |
+| 8 | `/api/health` répond en moins de 2 s |
+| 9 | `/api/admin/monitoring` sans jeton répond 401 (l'administration n'est pas publique) |
+
+Le contrôle 1 est celui qui attrape le cas le plus vicieux : un déploiement
+« réussi » qui sert en réalité l'image précédente.
+
+`scripts/deploy.sh` lance ces tests en **étape 6/6**, après son message de
+fin. Un `[KO]` affiche `Rollback : ./scripts/deploy.sh --rollback` et sort en
+1 — **sans** défaire le déploiement : celui-ci a déjà eu lieu, et le défaire
+sans qu'un humain ait lu la raison ferait plus de dégâts que le problème.
+Pour tester une autre URL depuis `deploy.sh`, poser `FRIPCO_SMOKE_URL`.

@@ -663,6 +663,20 @@ acceptables pour une caisse mono-poste auto-attestée.
   et son procès-verbal conservé — critère d'acceptation explicite du cahier
   des charges. Cette sauvegarde protège la disponibilité des données ; elle
   ne remplace pas la copie hors site des archives fiscales évoquée au §4.
+- **Remise à zéro d'avant-ouverture.** Le logiciel comporte un script de
+  remise à zéro (`apps/api/scripts/go_live_reset.py`, documenté à
+  `docs/DEPLOIEMENT.md` §12) dont l'unique objet est d'effacer les ventes,
+  tickets, rapports Z, clôtures et fiches d'essai accumulés **pendant la mise
+  en service, avant la première vente réelle**, afin que la numérotation et
+  les chaînes de preuve démarrent à 1 le jour de l'ouverture : il exige une
+  sauvegarde complète préalable, s'exécute en une seule transaction,
+  n'interrompt à aucun moment les triggers d'inaltérabilité, inscrit son
+  propre passage comme **premier événement** (`system.go_live_reset`) de la
+  chaîne qu'il inaugure — avec les comptages effacés et l'identifiant de la
+  sauvegarde —, puis pose un verrou (`system.go_live_done_at`) qui le rend
+  définitivement inopérant. Il n'est donc **pas** un moyen d'effacer des
+  données fiscales après l'ouverture : passé ce point, toute suppression
+  reste impossible (§3.1) et la conservation de 6 ans s'applique.
 - **Conservation de `FISCAL_SIGNING_KEY`.** Cette clé scelle irrévocablement
   toute la chaîne de preuve créée depuis son entrée en service : sa perte
   rend impossible toute nouvelle vérification de la chaîne existante (les
