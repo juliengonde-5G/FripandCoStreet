@@ -120,3 +120,107 @@ async def receipt_test_escpos(
         media_type="application/octet-stream",
         headers={"Cache-Control": "no-store"},
     )
+
+
+# ---------------------------------------------------------------------------
+# PR12 (N4) — tableau du matériel compatible
+# ---------------------------------------------------------------------------
+
+# Liste STATIQUE, volontairement dans le code et non en base : ce n'est pas un
+# réglage de la boutique mais un état de nos essais. Elle se met à jour avec
+# une PR (et sa relecture), pas depuis un écran d'administration où personne
+# ne saurait dire si « testé » a été constaté ou espéré.
+#
+# `status` :
+#   tested        — matériel réellement branché et exercé de bout en bout ;
+#   recommended   — compatible et conseillé, non nécessaire au fonctionnement ;
+#   not_supported — ne marche pas, avec la raison (pour éviter l'achat).
+HARDWARE_COMPATIBILITY: tuple[dict[str, str], ...] = (
+    {
+        "category": "Tablette de caisse",
+        "model": "Tablette Android + Chrome",
+        "connection": "Wi-Fi de la boutique",
+        "status": "tested",
+        "notes": (
+            "Le poste de caisse. Chrome est nécessaire pour l'impression USB "
+            "(WebUSB) et pour installer l'application sur l'écran d'accueil."
+        ),
+    },
+    {
+        "category": "Tablette de caisse",
+        "model": "iPad / Safari",
+        "connection": "Wi-Fi de la boutique",
+        "status": "not_supported",
+        "notes": (
+            "Safari n'a pas WebUSB : l'imprimante branchée en USB sur la "
+            "tablette est impossible, et Chrome ne s'installe pas sur iPad. "
+            "Envisageable uniquement avec une imprimante en réseau."
+        ),
+    },
+    {
+        "category": "Imprimante ticket",
+        "model": "MUNBYN 047P (ESC/POS 80 mm)",
+        "connection": "Réseau, TCP 9100",
+        "status": "tested",
+        "notes": (
+            "IP fixe (réservation DHCP) ; l'API doit pouvoir joindre cette IP. "
+            "Se configure dans Administration → Matériel."
+        ),
+    },
+    {
+        "category": "Imprimante ticket",
+        "model": "MUNBYN 047P (ESC/POS 80 mm)",
+        "connection": "USB-OTG sur la tablette (WebUSB)",
+        "status": "tested",
+        "notes": (
+            "C'est la tablette qui envoie les octets, pas le serveur : aucune "
+            "contrainte réseau. Association une fois depuis Administration → "
+            "Matériel ; HTTPS obligatoire."
+        ),
+    },
+    {
+        "category": "Tiroir-caisse",
+        "model": "Safescan SD-4141",
+        "connection": "RJ-12 sur l'imprimante ticket",
+        "status": "tested",
+        "notes": (
+            "Ouvert par l'impulsion envoyée par l'imprimante (ESC p m) : il "
+            "n'existe pas de branchement direct sur la tablette, le tiroir "
+            "suppose donc une imprimante configurée."
+        ),
+    },
+    {
+        "category": "Terminal de paiement",
+        "model": "SumUp Solo",
+        "connection": "Wi-Fi, compte SumUp",
+        "status": "tested",
+        "notes": (
+            "Le montant est poussé depuis la caisse quand l'identifiant du "
+            "terminal est configuré : rien à retaper sur le terminal."
+        ),
+    },
+    {
+        "category": "Douchette code-barres",
+        "model": "Douchette USB HID (mode clavier)",
+        "connection": "USB sur la tablette",
+        "status": "recommended",
+        "notes": (
+            "Non nécessaire : la caisse est en saisie libre, sans catalogue "
+            "d'articles à scanner."
+        ),
+    },
+)
+
+
+@router.get("/compatibility")
+async def hardware_compatibility(
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    """Matériel testé, conseillé ou à éviter — carte « Matériel compatible ».
+
+    Lecture pure : aucun accès base, aucun réglage, aucun secret. La liste
+    répond à la question posée avant un achat (« est-ce que ça marchera ? »),
+    pas à celle de l'état courant du matériel installé, qui est le rôle de
+    `GET /hardware/printer/status`.
+    """
+    return {"items": [dict(item) for item in HARDWARE_COMPATIBILITY]}

@@ -159,3 +159,43 @@ async def test_receipt_test_escpos_returns_bytes_regardless_of_mode(client, auth
     assert r.headers["content-type"] == "application/octet-stream"
     assert escpos_service.encode_text("Ticket de test") in r.content
     assert r.content.endswith(escpos_service.CUT_PARTIAL)
+
+
+# ---------------------------------------------------------------------------
+# GET /hardware/compatibility (PR12, N4)
+# ---------------------------------------------------------------------------
+
+
+async def test_compatibility_requires_authentication(client):
+    r = await client.get("/api/hardware/compatibility")
+    assert r.status_code == 401
+
+
+async def test_compatibility_lists_the_tested_hardware(client, auth_headers):
+    r = await client.get("/api/hardware/compatibility", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert len(items) >= 7
+
+    # Forme exacte du contrat : cinq champs, pas un de plus (rien qui puisse
+    # laisser passer une IP, un identifiant de terminal ou un secret).
+    for item in items:
+        assert set(item) == {"category", "model", "connection", "status", "notes"}
+        assert item["status"] in {"tested", "recommended", "not_supported"}
+        assert item["category"] and item["model"] and item["connection"]
+
+    models = [item["model"] for item in items]
+    assert any("MUNBYN" in m for m in models)
+    assert any("Safescan" in m for m in models)
+    assert any("SumUp" in m for m in models)
+
+    # L'iPad est listé pour dire qu'il ne convient PAS : c'est la question la
+    # plus fréquente avant un achat.
+    ipad = next(item for item in items if "iPad" in item["model"])
+    assert ipad["status"] == "not_supported"
+
+    # L'imprimante apparaît deux fois : une par mode de branchement, chacun
+    # ayant ses contraintes.
+    munbyn = [item for item in items if "MUNBYN" in item["model"]]
+    assert len(munbyn) == 2
+    assert {item["status"] for item in munbyn} == {"tested"}

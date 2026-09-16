@@ -153,3 +153,38 @@ L'écran se rafraîchit tout seul chaque minute tant qu'il est affiché. En
 rouge — base injoignable, révision de base inattendue, chaînage invalide —
 on prévient le prestataire **avant** de continuer à encaisser. Aucun
 réglage ne se modifie depuis cet écran, et aucun secret n'y apparaît.
+
+## Matériel compatible
+
+Administration → **Matériel** → carte **Matériel compatible**. Le tableau
+répond à la question qu'on se pose avant d'acheter : « est-ce que ça
+marchera ? ». Trois statuts : **testé** (branché et utilisé pour de vrai),
+**conseillé** (compatible, mais dont on peut se passer) et **non supporté**
+(ne marche pas, avec la raison — autant l'apprendre ici que sur le parking).
+
+| Matériel | Branchement | Statut |
+|---|---|---|
+| Tablette Android + Chrome | Wi-Fi de la boutique | testé |
+| iPad / Safari | Wi-Fi de la boutique | **non supporté** |
+| Imprimante ticket MUNBYN 047P (ESC/POS 80 mm) | réseau, TCP 9100 | testé |
+| Imprimante ticket MUNBYN 047P (ESC/POS 80 mm) | USB-OTG sur la tablette | testé |
+| Tiroir-caisse Safescan SD-4141 | RJ-12 sur l'imprimante | testé |
+| Terminal SumUp Solo | Wi-Fi, compte SumUp | testé |
+| Douchette code-barres USB (mode clavier) | USB sur la tablette | conseillé |
+
+Trois choses à retenir :
+
+- **L'iPad ne convient pas.** Safari ne sait pas parler à une imprimante
+  branchée en USB, et Chrome ne s'installe pas sur iPad. Un iPad ne
+  fonctionne qu'avec une imprimante en réseau, et sans l'application
+  installée sur l'écran d'accueil.
+- **Le tiroir-caisse suppose une imprimante.** Il ne se branche pas sur la
+  tablette : c'est l'imprimante qui lui envoie l'impulsion d'ouverture. Pas
+  d'imprimante configurée, pas de tiroir qui s'ouvre tout seul.
+- **La douchette n'est pas nécessaire.** La caisse est en saisie libre, sans
+  catalogue d'articles : il n'y a rien à scanner.
+
+Cette liste vit dans le code et se met à jour avec les versions ; elle dit
+ce qui a été essayé, pas ce qui est réglé. L'état du matériel réellement
+installé (imprimante joignable, terminal en ligne) est au-dessus, dans la
+même page.
