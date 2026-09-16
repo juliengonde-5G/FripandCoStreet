@@ -11,6 +11,9 @@
  *
  * PR8 (J6) : carte « Factures » — factures pro et avoirs d'une année, avec
  * le PDF de chaque document (`GET /api/admin/invoices?year=`).
+ *
+ * PR12 (N1) : carte « Journal » en tête — toutes les écritures ligne à
+ * ligne sur une période, avec le cumul débit/crédit et son équilibre.
  */
 import React, { useEffect, useMemo, useState } from "react";
 
@@ -21,6 +24,16 @@ import { api, ApiError } from "@/lib/api";
 import { downloadFile } from "@/lib/download";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { downloadInvoicePdf, invoiceAmount, invoiceKindLabel, listInvoices } from "@/lib/invoices";
+import {
+  fetchAccountingJournal,
+  isZeroAmount,
+  journalAmount,
+  monthlyCsvFilename,
+  monthlyCsvUrl,
+  monthRange,
+  shiftMonth,
+  type AccountingJournal,
+} from "@/lib/accounting";
 import { formatSiret } from "@/lib/siret";
 import type { Invoice } from "@/lib/types";
 import {
@@ -72,11 +85,225 @@ function yearOptions(): number[] {
 export default function AccountingTab() {
   return (
     <div className="space-y-6">
+      <JournalCard />
       <AccountingSettingsCard />
-      <AccountingEntriesCard />
+      {/* Cible du renvoi depuis l'avertissement « Z sans export » de la
+          carte « Journal » — `scroll-mt` laisse le titre sous l'en-tête. */}
+      <div id={ENTRIES_CARD_ID} className="scroll-mt-24">
+        <AccountingEntriesCard />
+      </div>
       <InvoicesCard />
       <RawTableExportsCard />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Journal comptable (PR12, N1)
+// ---------------------------------------------------------------------------
+
+/** Identifiant d'ancre de la carte des écritures : l'avertissement « Z sans
+ * export » y renvoie, pour que la personne aille vérifier la clôture
+ * concernée sans chercher dans la page. */
+const ENTRIES_CARD_ID = "ecritures-comptables";
+
+/** Hauteur du cadre défilant du journal : le tableau défile dans son cadre,
+ * jamais la page — les filtres et le pied Totaux restent à l'écran. */
+const JOURNAL_SCROLL_CLASS = "max-h-[400px] overflow-y-auto overflow-x-auto";
+
+function JournalCard() {
+  const now = useMemo(() => new Date(), []);
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  // Saisie brute du filtre de compte + valeur réellement envoyée : on
+  // attend une courte pause de frappe pour ne pas interroger l'API à
+  // chaque caractère.
+  const [accountInput, setAccountInput] = useState("");
+  const [account, setAccount] = useState("");
+
+  const [journal, setJournal] = useState<AccountingJournal | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadOk, setDownloadOk] = useState<string | null>(null);
+
+  const period = useMemo(() => monthRange(year, month), [year, month]);
+  const monthLabel = `${MONTH_LABELS[month - 1]} ${year}`;
+
+  useEffect(() => {
+    const timer = setTimeout(() => setAccount(accountInput.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [accountInput]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetchAccountingJournal({ from: period.from, to: period.to, account })
+      .then((data) => {
+        if (!cancelled) setJournal(data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setJournal(null);
+        setError(err instanceof ApiError ? err.detail : "Impossible de charger le journal comptable.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [period.from, period.to, account]);
+
+  const goToMonth = (delta: number): void => {
+    const next = shiftMonth(year, month, delta);
+    setYear(next.year);
+    setMonth(next.month);
+  };
+
+  const handleCsv = async (): Promise<void> => {
+    setDownloading(true);
+    setDownloadError(null);
+    setDownloadOk(null);
+    const filename = monthlyCsvFilename(year, month);
+    try {
+      await downloadFile(monthlyCsvUrl(year, month), filename);
+      setDownloadOk(`${filename} téléchargé.`);
+    } catch (err) {
+      setDownloadError(err instanceof ApiError ? err.detail : "Échec du téléchargement.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const lines = journal?.lines ?? [];
+  const totals = journal?.totals ?? null;
+  const missing = journal?.z_without_export ?? [];
+
+  return (
+    <Card
+      title="Journal"
+      subtitle="Toutes les écritures de la période, ligne à ligne, telles qu'elles seront remises au comptable."
+    >
+      <div className="space-y-4">
+        <ErrorNotice message={error} />
+
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <span className="block text-[11px] uppercase tracking-[0.12em] font-medium text-fc-ink-soft mb-1.5">Période</span>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => goToMonth(-1)} aria-label="Mois précédent">
+                ‹
+              </Button>
+              <span className="min-w-[140px] text-center text-sm font-semibold text-fc-ink">{monthLabel}</span>
+              <Button variant="outline" size="sm" onClick={() => goToMonth(1)} aria-label="Mois suivant">
+                ›
+              </Button>
+            </div>
+          </div>
+          <label className="block">
+            <span className="block text-[11px] uppercase tracking-[0.12em] font-medium text-fc-ink-soft mb-1.5">Compte</span>
+            <input
+              value={accountInput}
+              onChange={(e) => setAccountInput(e.target.value)}
+              inputMode="numeric"
+              maxLength={8}
+              placeholder="Ex. 7"
+              aria-label="Filtrer par numéro de compte (début du numéro)"
+              className="w-full max-w-[140px] min-h-touch px-4 py-2.5 rounded-fc border border-fc-line bg-fc-surface text-fc-ink focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary font-mono"
+            />
+          </label>
+          <Button variant="outline" onClick={() => void handleCsv()} disabled={downloading}>
+            {downloading ? "Préparation…" : "CSV du mois"}
+          </Button>
+        </div>
+
+        <ErrorNotice message={downloadError} />
+        {downloadOk && !downloadError && <p className="text-sm text-fc-primary-deep">{downloadOk}</p>}
+
+        {missing.length > 0 && (
+          <div className="rounded-fc bg-fc-warn-soft border border-fc-warn/30 px-3 py-2 text-sm text-fc-warn">
+            {missing.length === 1 ? "Clôture sans écriture enregistrée : " : "Clôtures sans écriture enregistrée : "}
+            <span className="font-mono tabular-nums">{missing.map((n) => `Z${String(n).padStart(4, "0")}`).join(", ")}</span>
+            {" — leurs lignes sont recalculées ici. "}
+            <a href={`#${ENTRIES_CARD_ID}`} className="underline font-medium">
+              Voir les écritures comptables
+            </a>
+          </div>
+        )}
+
+        {loading ? (
+          <p className="text-sm text-fc-ink-soft">Chargement…</p>
+        ) : error ? null : lines.length === 0 ? (
+          <p className="text-sm text-fc-ink-soft">
+            Aucune écriture sur cette période{account ? ` pour les comptes commençant par ${account}` : ""}.
+          </p>
+        ) : (
+          <div className={`rounded-fc-lg border border-fc-line ${JOURNAL_SCROLL_CLASS}`}>
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-fc-surface border-b border-fc-line">
+                <tr className="text-left text-fc-ink-mute uppercase text-xs tracking-wide">
+                  <th className="py-2 px-3 whitespace-nowrap">Date</th>
+                  <th className="py-2 px-3 whitespace-nowrap">Z</th>
+                  <th className="py-2 px-3 whitespace-nowrap">Compte</th>
+                  <th className="py-2 px-3">Libellé</th>
+                  <th className="py-2 px-3 text-right whitespace-nowrap">Débit</th>
+                  <th className="py-2 px-3 text-right whitespace-nowrap">Crédit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((line, index) => (
+                  <tr key={`${line.z_report_id}-${line.account_number}-${index}`} className="border-t border-fc-line align-top">
+                    <td className="py-2 px-3 whitespace-nowrap">{formatDate(line.date)}</td>
+                    <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap">
+                      {`Z${String(line.z_report_number).padStart(4, "0")}`}
+                      {line.source === "computed" && (
+                        <span className="block text-[11px] font-sans text-fc-warn">recalculé</span>
+                      )}
+                    </td>
+                    <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap">
+                      {line.account_number}
+                      <span className="block text-xs text-fc-ink-mute font-sans">{line.account_label}</span>
+                    </td>
+                    <td className="py-2 px-3 text-fc-ink-soft">{line.label}</td>
+                    <td className="py-2 px-3 font-mono tabular-nums text-right whitespace-nowrap">
+                      {isZeroAmount(line.debit) ? "" : formatCurrency(journalAmount(line.debit))}
+                    </td>
+                    <td className="py-2 px-3 font-mono tabular-nums text-right whitespace-nowrap">
+                      {isZeroAmount(line.credit) ? "" : formatCurrency(journalAmount(line.credit))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {totals && !loading && !error && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-fc-line pt-3">
+            <span className="text-sm font-semibold text-fc-ink">Totaux</span>
+            <div className="flex flex-wrap items-center gap-4">
+              <span className="text-sm text-fc-ink-soft">
+                Débit <span className="font-mono tabular-nums font-semibold text-fc-ink">{formatCurrency(journalAmount(totals.debit))}</span>
+              </span>
+              <span className="text-sm text-fc-ink-soft">
+                Crédit <span className="font-mono tabular-nums font-semibold text-fc-ink">{formatCurrency(journalAmount(totals.credit))}</span>
+              </span>
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-fc px-2.5 py-1 text-xs font-medium ${
+                  totals.balanced ? "bg-fc-success-soft text-fc-success" : "bg-fc-danger-soft text-fc-danger"
+                }`}
+              >
+                {totals.balanced ? "✔ Équilibré" : "⚠ Déséquilibré"}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }
 
