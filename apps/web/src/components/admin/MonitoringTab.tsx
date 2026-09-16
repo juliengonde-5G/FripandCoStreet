@@ -220,15 +220,22 @@ export default function MonitoringTab() {
       {data && (
         <>
           <GlobalBanner data={data} onRefresh={() => void load()} />
-          <div className="grid gap-6 lg:grid-cols-2">
+          {/* `min-w-0` sur les cartes : sans cela, une grille laisse ses
+              colonnes s'élargir à la largeur naturelle du tableau des
+              tâches, et la page défile latéralement sur un écran étroit. */}
+          <div className="grid gap-6 lg:grid-cols-2 [&>*]:min-w-0">
             <AppCard data={data} />
             <DatabaseCard data={data} />
             <BackupsCard data={data} />
-            <JobsCard data={data} />
+            <PrinterCard data={data} />
             <IntegrityCard data={data} checking={checking} error={checkError} onCheck={() => void handleCheck()} />
             <ExternalCard data={data} />
-            <PrinterCard data={data} />
             <QueuesCard data={data} />
+            {/* Le tableau des tâches a quatre colonnes : il prend la
+                largeur entière plutôt que d'obliger à le faire défiler. */}
+            <div className="lg:col-span-2">
+              <JobsCard data={data} />
+            </div>
           </div>
           <RecentErrorsCard data={data} />
         </>
@@ -337,7 +344,7 @@ function BackupsCard({ data }: { data: Monitoring }) {
 function JobsCard({ data }: { data: Monitoring }) {
   const jobs = data.jobs ?? [];
   return (
-    <Card title="Tâches planifiées" subtitle="Ce que la caisse fait toute seule, et comment ça s'est passé.">
+    <Card title="Tâches planifiées" subtitle="Ce que la caisse fait toute seule, et comment ça s'est passé." className="h-full">
       {jobs.length === 0 ? (
         <p className="text-sm text-fc-ink-soft">Aucune tâche planifiée.</p>
       ) : (

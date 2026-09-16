@@ -2858,17 +2858,38 @@ const monitoringRecentErrors: MonitoringRecentError[] = [
  * l'ouverture de la page. */
 let monitoringIntegrity: MonitoringIntegrity | null = null;
 
-function demoFailurePrefix(): string | null {
+/** Lit l'interrupteur : `préfixe` (panne serveur) ou `409:préfixe` pour
+ * une erreur métier — de quoi montrer côte à côte la 500 qui affiche une
+ * référence et la 4xx qui n'en affiche jamais. */
+function demoFailureSwitch(): { status: number; prefix: string } | null {
+  let value: string | null = null;
   try {
-    const value = typeof localStorage !== "undefined" ? localStorage.getItem(DEMO_FAILURE_KEY) : null;
-    return value && value.trim() ? value.trim() : null;
+    value = typeof localStorage !== "undefined" ? localStorage.getItem(DEMO_FAILURE_KEY) : null;
   } catch {
     return null;
   }
+  if (!value || !value.trim()) return null;
+  const raw = value.trim();
+  const sep = raw.indexOf(":");
+  if (sep > 0) {
+    const status = parseInt(raw.slice(0, sep), 10);
+    const prefix = raw.slice(sep + 1);
+    if (!Number.isNaN(status) && prefix) return { status, prefix };
+  }
+  return { status: 500, prefix: raw };
 }
 
 /** Panne simulée : 500 avec une référence, poussée dans le tampon des
- * dernières erreurs (au plus cinquante, comme le vrai tampon). */
+ * dernières erreurs (au plus cinquante, comme le vrai tampon). Une
+ * erreur métier simulée (statut < 500) n'a, elle, ni référence ni trace :
+ * elle n'a rien d'une panne. */
+function failDemoError(status: number, method: string, path: string): never {
+  if (status < 500) {
+    fail(status, "Caisse fermée : ouvrez la caisse avant d'encaisser.", "drawer_closed");
+  }
+  return failDemoServerError(method, path);
+}
+
 function failDemoServerError(method: string, path: string): never {
   const requestId = Math.random().toString(16).slice(2).padEnd(16, "0").slice(0, 16);
   monitoringRecentErrors.unshift({
@@ -3037,8 +3058,8 @@ export async function mockFetchAPI<T = unknown>(
   let m: RegExpMatchArray | null;
 
   // PR12 (N5) — panne simulée : voir le bloc « supervision/matériel ».
-  const failurePrefix = demoFailurePrefix();
-  if (failurePrefix && path.startsWith(failurePrefix)) failDemoServerError(method, path);
+  const failure = demoFailureSwitch();
+  if (failure && path.startsWith(failure.prefix)) failDemoError(failure.status, method, path);
 
   // --- Caisse espèces -------------------------------------------------
   if (path === "/api/pos/drawer/current" && method === "GET") {

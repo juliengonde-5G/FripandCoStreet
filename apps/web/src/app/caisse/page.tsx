@@ -480,10 +480,10 @@ export default function CaissePage() {
 
         {banner && (
           <div role="alert" className="flex-shrink-0 bg-fc-danger-soft border-b border-fc-danger/30 px-4 py-2 flex items-center gap-3">
-            <span className="text-sm text-fc-danger flex-1">
+            <div className="text-sm text-fc-danger flex-1">
               {errorText(banner)}
               <ErrorReference reference={errorRef(banner)} className="text-fc-danger" />
-            </span>
+            </div>
             <button type="button" onClick={() => setBanner(null)} className="text-fc-danger text-sm font-medium hover:underline">
               Fermer
             </button>
