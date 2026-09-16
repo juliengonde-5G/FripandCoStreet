@@ -118,6 +118,13 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
     # contrat). La CLE d'API n'est PAS ici : c'est un secret, donc une
     # variable d'environnement (`OPENWEATHER_API_KEY`), jamais un reglage.
     "weather": {"city": "", "lat": None, "lon": None},
+    # PR11 (M2, docs/ARCHITECTURE_PR11.md) — jours d'ouverture de la
+    # boutique, du lundi au dimanche (meme ordre que `date.weekday()`, pas
+    # celui de `strftime('%w')` qui commence le dimanche). Sert a repartir
+    # l'objectif mensuel sur les seuls jours ouverts : un dimanche ferme ne
+    # doit porter aucun objectif, sinon la boutique est en retard des le
+    # lundi matin. Defaut : ouvert du lundi au samedi.
+    "cahier": {"weekday_open": [True, True, True, True, True, True, False]},
 }
 
 # Bornes du delai de suppression RGPD (L5). Le clamp vit ici, a cote du

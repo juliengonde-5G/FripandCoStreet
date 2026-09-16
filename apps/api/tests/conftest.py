@@ -144,7 +144,11 @@ async def _truncate() -> None:
                 # PR9 — `failed_payments` tomberait deja par CASCADE (FK sur
                 # `payment_attempts`), `sumup_exchanges` non : elle n'a
                 # aucune cle etrangere, il faut la nommer.
-                "failed_payments, sumup_exchanges "
+                "failed_payments, sumup_exchanges, "
+                # PR11 — le cahier du jour est cree a la premiere lecture
+                # d'une journee : sans TRUNCATE, l'objectif fige par un test
+                # serait relu par le suivant.
+                "cahier_days "
                 "RESTART IDENTITY CASCADE"
             )
         )
