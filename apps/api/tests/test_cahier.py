@@ -480,3 +480,15 @@ async def test_config_refuses_a_short_week(client, auth_headers):
         "/api/cahier/config", json={"weekday_open": [True] * 6}, headers=auth_headers
     )
     assert r.status_code == 422
+
+
+async def test_required_daily_is_null_without_any_open_day_left(client, auth_headers):
+    today = _today()
+    await _set_weekday_open(client, auth_headers, [False] * 7)
+    await _set_targets(client, auth_headers, monthly={_month_key(today): "1000.00"})
+
+    body = await _get_day(client, auth_headers, today.isoformat())
+    assert body["target"]["month_remaining"] == "1000.00"
+    # Plus aucun jour ouvert : rien a repartir. « 0,00 € par jour » se lirait
+    # comme un objectif atteint alors que le mois est entierement en retard.
+    assert body["target"]["required_daily_rest_of_month"] is None

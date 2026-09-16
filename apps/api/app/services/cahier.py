@@ -396,13 +396,12 @@ async def read_day(
                 else None
             ),
             "month_remaining": _amount(month_remaining) if monthly_target > 0 else None,
+            # `null` quand il ne reste aucun jour ouvert : il n'y a plus
+            # rien a repartir, et « 0,00 € par jour » se lirait comme un
+            # objectif atteint alors que le mois peut etre tres en retard.
             "required_daily_rest_of_month": (
-                _amount(
-                    _money(month_remaining / remaining_open_days)
-                    if remaining_open_days > 0
-                    else ZERO
-                )
-                if monthly_target > 0
+                _amount(_money(month_remaining / remaining_open_days))
+                if monthly_target > 0 and remaining_open_days > 0
                 else None
             ),
         },
