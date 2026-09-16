@@ -10,7 +10,7 @@
 import ipaddress
 import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -605,6 +605,185 @@ async def get_accounting_export(
             "Aucune écriture comptable pour ce Z.", code="export_not_found", status_code=404
         )
     return _serialize_accounting_export(export, z)
+
+
+# ---------------------------------------------------------------------------
+# Journal comptable consultable (PR12, docs/ARCHITECTURE_PR12.md §1, N1)
+# ---------------------------------------------------------------------------
+
+# Garde-fou de periode : au-dela d'un an, la reponse deviendrait enorme et
+# l'ecran illisible — l'export CSV mensuel existe pour ca.
+_JOURNAL_MAX_DAYS = 366
+
+
+def _parse_journal_date(raw: str, field: str) -> date:
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise PosServiceError(
+            f"Date {field} invalide (AAAA-MM-JJ).", code="invalid_date", status_code=422
+        )
+
+
+def _amount(value) -> str:
+    """Montant en chaine a deux decimales — jamais un flottant.
+
+    Le journal comptable se lit centime par centime : un `float` JSON
+    ferait apparaitre des 12.340000000000001 dans un tableau destine a etre
+    rapproche d'une comptabilite.
+    """
+    return f"{Decimal(str(value if value is not None else 0)).quantize(Decimal('0.01')):.2f}"
+
+
+@router.get("/accounting/journal")
+async def accounting_journal(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    date_from: str | None = Query(default=None, alias="from"),
+    date_to: str | None = Query(default=None, alias="to"),
+    account: str | None = Query(default=None),
+    z: int | None = Query(default=None),
+):
+    """Journal comptable ligne a ligne sur une periode (N1).
+
+    Source de verite : l'ecriture ENREGISTREE du Z quand elle existe
+    (`source="export"`, relue depuis `accounting_export_lines`, immuable) —
+    c'est elle qui a ete transmise au comptable. Un Z sans ecriture (cas
+    d'un Z anterieur a la mise en place des exports) est recalcule a la
+    volee (`source="computed"`) et signale dans `z_without_export` : mieux
+    vaut un journal complet qui dit d'ou vient chaque ligne qu'un journal
+    muet sur ses trous.
+
+    Lecture seule : aucune ecriture, aucun evenement au JET.
+    """
+    today = datetime.now(timezone.utc).date()
+    if date_from:
+        period_from = _parse_journal_date(date_from, "de debut")
+    else:
+        period_from = today.replace(day=1)
+    if date_to:
+        period_to = _parse_journal_date(date_to, "de fin")
+    else:
+        period_to = today
+    if period_to < period_from:
+        raise PosServiceError(
+            "La date de fin precede la date de debut.", code="invalid_date", status_code=422
+        )
+    if (period_to - period_from).days + 1 > _JOURNAL_MAX_DAYS:
+        raise PosServiceError(
+            "Periode trop longue (366 jours maximum).",
+            code="period_too_long",
+            status_code=422,
+        )
+
+    # Bornes en UTC, coherentes avec `AccountingExport.export_date`, calculee
+    # par `create_export_for_z` a partir de `closed_at` (UTC).
+    start = datetime.combine(period_from, datetime.min.time(), tzinfo=timezone.utc)
+    end = datetime.combine(period_to, datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=1)
+
+    z_query = (
+        select(ZReport)
+        .where(ZReport.closed_at >= start, ZReport.closed_at < end)
+        .order_by(ZReport.report_number.asc())
+    )
+    if z is not None:
+        z_query = z_query.where(ZReport.report_number == z)
+    z_rows = (await db.execute(z_query)).scalars().all()
+
+    exports_by_z = {}
+    if z_rows:
+        exports_by_z = {
+            e.z_report_id: e
+            for e in (
+                await db.execute(
+                    select(AccountingExport).where(
+                        AccountingExport.z_report_id.in_([row.id for row in z_rows])
+                    )
+                )
+            ).scalars().all()
+        }
+
+    service = AccountingService(db)
+    cfg = await service.get_config()
+    prefix = (account or "").strip()
+
+    lines: list[dict] = []
+    z_without_export: list[int] = []
+    for z_row in z_rows:
+        export = exports_by_z.get(z_row.id)
+        if export is not None:
+            source = "export"
+            line_date = export.export_date
+            raw_lines = [
+                (ln.account_number, ln.account_label, ln.label, ln.debit, ln.credit)
+                for ln in sorted(export.lines, key=lambda x: x.line_number)
+            ]
+        else:
+            source = "computed"
+            z_without_export.append(z_row.report_number)
+            line_date = z_row.closed_at.date()
+            raw_lines = [
+                (ln.account_number, ln.account_label, ln.label, ln.debit, ln.credit)
+                for ln in service.build_journal_lines(z_row, cfg)
+            ]
+        for number, label_account, label, debit, credit in raw_lines:
+            if prefix and not number.startswith(prefix):
+                continue
+            lines.append(
+                {
+                    "date": line_date.isoformat(),
+                    "z_report_number": z_row.report_number,
+                    "z_report_id": str(z_row.id),
+                    "account_number": number,
+                    "account_label": label_account,
+                    "label": label,
+                    "debit": _amount(debit),
+                    "credit": _amount(credit),
+                    "source": source,
+                }
+            )
+
+    lines.sort(key=lambda ln: (ln["date"], ln["z_report_number"], ln["account_number"]))
+
+    total_debit = sum(Decimal(ln["debit"]) for ln in lines) if lines else Decimal("0")
+    total_credit = sum(Decimal(ln["credit"]) for ln in lines) if lines else Decimal("0")
+
+    accounts: dict[str, dict] = {}
+    for ln in lines:
+        bucket = accounts.setdefault(
+            ln["account_number"],
+            {
+                "account_number": ln["account_number"],
+                "account_label": ln["account_label"],
+                "debit": Decimal("0"),
+                "credit": Decimal("0"),
+            },
+        )
+        bucket["debit"] += Decimal(ln["debit"])
+        bucket["credit"] += Decimal(ln["credit"])
+
+    return {
+        "period": {"from": period_from.isoformat(), "to": period_to.isoformat()},
+        "lines": lines,
+        "totals": {
+            "debit": _amount(total_debit),
+            "credit": _amount(total_credit),
+            # Un filtre par compte desequilibre forcement le sous-ensemble
+            # affiche : c'est attendu, la pastille reflete ce qui est a
+            # l'ecran, pas l'ecriture complete.
+            "balanced": total_debit == total_credit,
+        },
+        "accounts": [
+            {
+                "account_number": bucket["account_number"],
+                "account_label": bucket["account_label"],
+                "debit": _amount(bucket["debit"]),
+                "credit": _amount(bucket["credit"]),
+            }
+            for bucket in sorted(accounts.values(), key=lambda b: b["account_number"])
+        ],
+        "z_without_export": sorted(z_without_export),
+    }
 
 
 @router.get("/accounting/monthly-csv/{year}/{month}")
