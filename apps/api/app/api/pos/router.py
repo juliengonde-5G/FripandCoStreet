@@ -1062,6 +1062,56 @@ async def search_pos_clients(
     return {"clients": [_serialize_pos_client(c, stats) for c in clients]}
 
 
+@router.get("/clients/duplicates")
+async def find_pos_client_duplicates(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    first_name: str | None = Query(default=None),
+    last_name: str | None = Query(default=None),
+    email: str | None = Query(default=None),
+    phone: str | None = Query(default=None),
+):
+    """« Une fiche existe peut-etre deja » (PR10/L2), appele PENDANT la
+    saisie d'un nouveau client en caisse.
+
+    Au moins un critere non vide, sinon 422 `criteria_required` : sans quoi
+    la caisse demanderait a la base de comparer une fiche vide a toutes les
+    autres. Une saisie encore incomplete (e-mail sans `@`, numero a trois
+    chiffres) n'est PAS une erreur ici — le critere est simplement ignore,
+    la vendeuse tape encore.
+    """
+    criteria = (first_name, last_name, email, phone)
+    if not any((value or "").strip() for value in criteria):
+        raise PosServiceError(
+            "Renseignez au moins un critère (nom, prénom, e-mail ou téléphone).",
+            code="criteria_required",
+            status_code=422,
+        )
+    service = ClientService(db)
+    candidates = await service.find_duplicate_candidates(
+        email=email,
+        phone=phone,
+        first_name=first_name,
+        last_name=last_name,
+    )
+    stats = await service.visit_stats([item["client"].id for item in candidates])
+    return {
+        "candidates": [
+            {
+                "id": str(item["client"].id),
+                "first_name": item["client"].first_name,
+                "last_name": item["client"].last_name,
+                "email_masked": mask_email(item["client"].email),
+                "phone_masked": mask_phone(item["client"].phone),
+                "visits_count": stats.get(str(item["client"].id), {}).get("visits_count", 0),
+                "last_visit_at": stats.get(str(item["client"].id), {}).get("last_visit_at"),
+                "reason": item["reason"],
+            }
+            for item in candidates
+        ]
+    }
+
+
 @router.post("/clients", status_code=201)
 async def create_pos_client(
     body: CreatePosClientRequest,

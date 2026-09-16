@@ -9,16 +9,24 @@
 # `create_or_get(email?, phone?)` sous verrou consultatif, masquage du
 # numero, effacement par l'anonymisation, synchro Brevo sans objet sans
 # e-mail.
+#
+# PR10 (docs/ARCHITECTURE_PR10.md, L2/L3) — la meme personne finit par avoir
+# deux fiches : elle a donne son telephone un jour, son e-mail un autre, ou
+# son nom a ete tape avec un accent en moins. D'ou la detection des doublons
+# (`name_key`, `find_duplicate_candidates`, `list_duplicate_groups`) et la
+# FUSION (`merge`), qui ne touche jamais une vente au sens fiscal : elle
+# repointe `transactions.client_id`, seule colonne mutable hors hash (E3).
 from __future__ import annotations
 
 import hashlib
 import logging
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 
 from email_validator import EmailNotValidError, validate_email
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +42,7 @@ from app.services.jet import (
     EVENT_CLIENT_CREATED,
     EVENT_CLIENT_EXPORTED,
     EVENT_CLIENT_LINKED,
+    EVENT_CLIENT_MERGED,
     EVENT_CLIENT_UNLINKED,
     EVENT_CLIENT_UPDATED,
     EVENT_CONSENT_GRANTED,
@@ -73,6 +82,43 @@ class ClientAlreadyLinked(PosServiceError):
 
     def __init__(self):
         super().__init__("Cette vente est déjà liée à un autre client.")
+
+
+class MergeSameClient(PosServiceError):
+    """PR10/L3 — fusionner une fiche avec elle-meme."""
+
+    status_code = 409
+    code = "same_client"
+
+    def __init__(self):
+        super().__init__("Choisissez deux fiches différentes.")
+
+
+class MergeClientInactive(PosServiceError):
+    """PR10/L3 — l'une des deux fiches est anonymisee (RGPD) ou a deja ete
+    absorbee par une autre fusion : il n'y a plus rien a y fusionner, et la
+    rattacher une seconde fois romprait la chaine des renvois."""
+
+    status_code = 409
+    code = "client_inactive"
+
+    def __init__(self, message: str = "Cette fiche n'est plus active (anonymisée ou déjà fusionnée)."):
+        super().__init__(message)
+
+
+class MergeDeletionPending(PosServiceError):
+    """PR10/L3 — la fiche CONSERVEE est programmee pour suppression. On
+    refuse plutot que de deverser sur elle l'historique d'une autre fiche
+    qui serait efface a la date d'effet : la vendeuse annule d'abord la
+    suppression, puis fusionne."""
+
+    status_code = 409
+    code = "deletion_pending"
+
+    def __init__(self):
+        super().__init__(
+            "La fiche conservée a une suppression programmée : annulez-la avant de fusionner."
+        )
 
 
 def normalize_email(raw: str) -> str:
@@ -223,6 +269,107 @@ def mask_phone(phone: str | None) -> str | None:
     return "•" * (len(phone) - 2) + phone[-2:]
 
 
+# Separateurs internes a un nom, reduits a un espace simple : espaces (y
+# compris insecables), tirets ordinaires et typographiques, apostrophes.
+# « Anne-Marie », « Anne Marie » et « anne  marie » designent la meme
+# personne aux yeux du dedoublonnage.
+_NAME_SEPARATORS = re.compile(r"[\s\-\u00a0\u202f\u2010-\u2015']+")
+
+# Nombre maximal de fiches parcourues par la detection de doublons. La
+# comparaison se fait en Python (accents retires) et non en SQL : cela
+# exigerait l'extension `unaccent`, donc une extension Postgres a installer
+# sur le VPS pour un seul ecran de back-office. Une boutique mono-caisse
+# n'atteindra pas ce plafond avant des annees ; au-dela, la detection
+# resterait correcte sur les fiches parcourues, simplement partielle.
+DUPLICATE_SCAN_LIMIT = 5000
+# Au plus 5 suggestions a la vendeuse (L2) : au-dela, ce n'est plus une
+# aide a la saisie, c'est une liste a trier en pleine file d'attente.
+DUPLICATE_CANDIDATES_MAX = 5
+
+
+def _normalize_name_part(value: str | None) -> str:
+    """Minuscules, accents retires (NFKD), separateurs reduits a un espace."""
+    decomposed = unicodedata.normalize("NFKD", (value or "").strip())
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return _NAME_SEPARATORS.sub(" ", stripped).strip().lower()
+
+
+def name_key(first_name: str | None, last_name: str | None) -> str | None:
+    """Cle de comparaison d'identite (PR10/L2) — « Elodie DUPONT-Martin » et
+    « elodie dupont martin » donnent la meme cle.
+
+    ``None`` quand le NOM DE FAMILLE est vide : un prenom seul ne suffit pas
+    a soupconner un doublon (deux « Sophie » differentes passent a la caisse
+    dans la meme journee), et on ne veut surtout pas proposer a la vendeuse
+    de fusionner deux clientes distinctes.
+    """
+    last = _normalize_name_part(last_name)
+    if not last:
+        return None
+    first = _normalize_name_part(first_name)
+    return f"{first} {last}".strip()
+
+
+def phone_variants(digits: str) -> list[str]:
+    """Toutes les ecritures sous lesquelles un meme numero a pu etre stocke.
+
+    `normalize_phone` canonise depuis PR7, mais l'index unique partiel
+    `uq_clients_phone_present` (0007) interdit deja deux fiches portant le
+    MEME texte : un doublon par telephone n'existe donc que si les deux
+    fiches ont ete stockees sous des ecritures differentes du meme numero
+    (`+33699887766` d'un cote, `699887766` de l'autre pour un numero dicte
+    sans indicatif). Comparer les chaines telles quelles ne trouverait rien ;
+    on interroge donc la base sur toutes les ecritures possibles de la meme
+    ligne — recherche exacte, donc indexable, contrairement a un `LIKE`.
+    """
+    return [digits, f"+{digits}", f"0{digits}", f"33{digits}", f"+33{digits}", f"0033{digits}"]
+
+
+def _safe_normalize_email(raw: str | None) -> str | None:
+    """`normalize_email` tolerant : une saisie invalide n'est pas une erreur
+    ici, juste un critere inutilisable.
+
+    La detection de doublons est appelee PENDANT la frappe (L7, debounce
+    400 ms) : refuser la requete en 422 parce que l'adresse n'est pas encore
+    finie ferait clignoter une erreur sous les doigts de la vendeuse.
+    """
+    if not (raw or "").strip():
+        return None
+    try:
+        return normalize_email(raw)
+    except InvalidEmail:
+        return None
+
+
+def _safe_normalize_phone(raw: str | None) -> str | None:
+    """`normalize_phone` tolerant — meme raison que `_safe_normalize_email`."""
+    try:
+        return normalize_phone(raw)
+    except InvalidPhone:
+        return None
+
+
+def serialize_duplicate_client(client: Client, stats: dict[str, dict] | None = None) -> dict:
+    """Fiche telle qu'elle apparait dans un groupe de doublons.
+
+    Coordonnees MASQUEES : reconnaitre la bonne fiche n'exige pas de lire
+    l'adresse entiere, et cet ecran peut etre ouvert devant du public.
+    `created_at` sert au front a preselectionner la fiche a conserver (la
+    plus visitee, puis la plus ancienne).
+    """
+    row = (stats or {}).get(str(client.id), {})
+    return {
+        "id": str(client.id),
+        "first_name": client.first_name,
+        "last_name": client.last_name,
+        "email_masked": mask_email(client.email),
+        "phone_masked": mask_phone(client.phone),
+        "visits_count": row.get("visits_count", 0),
+        "last_visit_at": row.get("last_visit_at"),
+        "created_at": client.created_at.isoformat() if client.created_at else None,
+    }
+
+
 class ClientService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
@@ -236,15 +383,48 @@ class ClientService:
             await self.db.execute(select(Client).where(Client.id == client_id))
         ).scalar_one_or_none()
 
+    def _not_merged(self, query):
+        """Filtre commun (PR10/L3) : une fiche ABSORBEE n'existe plus pour
+        les lectures courantes. Elle n'est pas supprimee — ses ventes ont
+        ete repointees, son URL repond encore pour rediriger vers la fiche
+        conservee — mais elle ne doit jamais ressortir d'une recherche ni
+        etre retrouvee par `create_or_get` : ce serait ressusciter le
+        doublon qu'on vient tout juste de resorber."""
+        return query.where(Client.merged_into_client_id.is_(None))
+
     async def get_by_email(self, email: str) -> Client | None:
         return (
-            await self.db.execute(select(Client).where(Client.email == email))
+            await self.db.execute(
+                self._not_merged(select(Client).where(Client.email == email))
+            )
         ).scalar_one_or_none()
 
     async def get_by_phone(self, phone: str) -> Client | None:
         return (
-            await self.db.execute(select(Client).where(Client.phone == phone))
+            await self.db.execute(
+                self._not_merged(select(Client).where(Client.phone == phone))
+            )
         ).scalar_one_or_none()
+
+    async def _contact_taken(self, *, email: str | None = None, phone: str | None = None) -> bool:
+        """Ce moyen de contact est-il DEJA porte par une ligne `clients`,
+        fiches absorbees comprises ?
+
+        Distinct de `get_by_email`/`get_by_phone` a dessein : ces deux-la
+        ignorent les fiches absorbees (c'est le comportement metier voulu),
+        alors qu'ici on interroge l'index unique PARTIEL de la base (0007),
+        qui, lui, ne connait pas cette nuance. Confondre les deux, c'est
+        recopier un e-mail deja pris et se prendre une violation d'unicite
+        au flush, en pleine caisse.
+        """
+        query = select(Client.id).limit(1)
+        if email is not None:
+            query = query.where(Client.email == email)
+        elif phone is not None:
+            query = query.where(Client.phone == phone)
+        else:
+            return False
+        return (await self.db.execute(query)).first() is not None
 
     async def search(
         self, q: str | None, *, limit: int = 50, include_anonymized: bool = True
@@ -261,7 +441,9 @@ class ClientService:
         nom/e-mail est inchangee ; une saisie alphabetique ne declenche
         jamais de clause `phone` (le numero stocke n'a pas de lettres).
         """
-        query = select(Client).order_by(Client.created_at.desc()).limit(limit)
+        query = self._not_merged(
+            select(Client).order_by(Client.created_at.desc()).limit(limit)
+        )
         if not include_anonymized:
             query = query.where(Client.anonymized_at.is_(None))
         if q and q.strip():
@@ -298,9 +480,15 @@ class ClientService:
                     func.count(Transaction.id),
                     func.max(Transaction.created_at),
                 )
+                # PR10/L3 — une fiche absorbee ne compte aucune visite : ses
+                # ventes ont ete repointees vers la fiche conservee, et si
+                # une ligne residuelle la referencait encore, elle serait
+                # comptee deux fois a l'ecran.
+                .join(Client, Client.id == Transaction.client_id)
                 .where(
                     Transaction.client_id.in_(ids),
                     Transaction.transaction_type == TransactionType.sale,
+                    Client.merged_into_client_id.is_(None),
                 )
                 .group_by(Transaction.client_id)
             )
@@ -312,6 +500,161 @@ class ClientService:
             }
             for client_id, count, last in rows
         }
+
+    # ------------------------------------------------------------------
+    # Doublons (PR10/L2)
+    # ------------------------------------------------------------------
+
+    def _active_clients(self):
+        """Fiches EXPLOITABLES pour le dedoublonnage : ni anonymisees (il
+        n'y reste rien a rapprocher), ni deja absorbees.
+
+        Une fiche en attente de suppression reste candidate : la personne
+        est toujours cliente jusqu'a la date d'effet, et la fusion annule sa
+        demande (L3, operation 4).
+        """
+        return select(Client).where(
+            Client.anonymized_at.is_(None),
+            Client.merged_into_client_id.is_(None),
+        )
+
+    async def find_duplicate_candidates(
+        self,
+        *,
+        email: str | None = None,
+        phone: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        exclude_id: uuid.UUID | None = None,
+    ) -> list[dict]:
+        """Fiches susceptibles d'etre la MEME personne que ce qu'on est en
+        train de saisir (L2), dans l'ordre de certitude decroissante :
+        meme e-mail, puis meme telephone, puis meme nom.
+
+        Une fiche deja retenue sur un critere plus sur n'est pas reproposee
+        sur un critere plus faible : c'est le premier motif rencontre qui
+        est affiche a la vendeuse (« meme e-mail » est plus parlant que
+        « meme nom » quand les deux sont vrais).
+        """
+        normalized_email = _safe_normalize_email(email)
+        normalized_phone = _safe_normalize_phone(phone)
+        key = name_key(first_name, last_name)
+
+        found: dict[uuid.UUID, dict] = {}
+
+        async def _keep(clients, reason: str) -> None:
+            for candidate in clients:
+                if exclude_id is not None and candidate.id == exclude_id:
+                    continue
+                if candidate.id in found:
+                    continue
+                if len(found) >= DUPLICATE_CANDIDATES_MAX:
+                    return
+                found[candidate.id] = {"client": candidate, "reason": reason}
+
+        if normalized_email:
+            rows = (
+                await self.db.execute(
+                    self._active_clients()
+                    .where(Client.email == normalized_email)
+                    .limit(DUPLICATE_CANDIDATES_MAX)
+                )
+            ).scalars().all()
+            await _keep(rows, "email")
+
+        phone_key = phone_search_digits(normalized_phone)
+        if phone_key and len(found) < DUPLICATE_CANDIDATES_MAX:
+            rows = (
+                await self.db.execute(
+                    self._active_clients()
+                    .where(Client.phone.in_(phone_variants(phone_key)))
+                    .limit(DUPLICATE_CANDIDATES_MAX)
+                )
+            ).scalars().all()
+            await _keep(rows, "phone")
+
+        if key and len(found) < DUPLICATE_CANDIDATES_MAX:
+            # Comparaison en Python (accents retires) : voir
+            # `DUPLICATE_SCAN_LIMIT` pour le choix de ne pas dependre de
+            # l'extension Postgres `unaccent`.
+            rows = (
+                await self.db.execute(
+                    self._active_clients()
+                    .where(Client.last_name.is_not(None))
+                    .order_by(Client.created_at.desc())
+                    .limit(DUPLICATE_SCAN_LIMIT)
+                )
+            ).scalars().all()
+            await _keep(
+                [c for c in rows if name_key(c.first_name, c.last_name) == key],
+                "name",
+            )
+
+        return list(found.values())
+
+    async def list_duplicate_groups(self, limit: int = 50) -> list[dict]:
+        """Groupes de fiches qui semblent designer la meme personne (L2),
+        pour la carte « Doublons possibles » du back-office.
+
+        Un groupe = au moins deux fiches partageant un e-mail, un telephone
+        ou une cle de nom. Un meme ensemble de fiches n'est annonce qu'UNE
+        fois, sur le motif le plus sur : deux fiches qui partagent a la fois
+        l'e-mail et le nom forment un seul doublon, pas deux.
+        """
+        clients = (
+            await self.db.execute(
+                self._active_clients()
+                .order_by(Client.created_at.asc())
+                .limit(DUPLICATE_SCAN_LIMIT)
+            )
+        ).scalars().all()
+
+        buckets: dict[str, dict[str, list[Client]]] = {
+            "email": {},
+            "phone": {},
+            "name": {},
+        }
+        for candidate in clients:
+            if candidate.email:
+                buckets["email"].setdefault(candidate.email, []).append(candidate)
+            # Regroupement sur les chiffres SIGNIFICATIFS du numero (voir
+            # `phone_variants`) : deux fiches portant la meme chaine ne
+            # peuvent pas coexister, seules deux ecritures differentes du
+            # meme numero le peuvent.
+            key_phone = phone_search_digits(candidate.phone)
+            if key_phone:
+                buckets["phone"].setdefault(key_phone, []).append(candidate)
+            key = name_key(candidate.first_name, candidate.last_name)
+            if key:
+                buckets["name"].setdefault(key, []).append(candidate)
+
+        groups: list[tuple[str, list[Client]]] = []
+        already_seen: set[frozenset[uuid.UUID]] = set()
+        for reason in ("email", "phone", "name"):
+            for members in buckets[reason].values():
+                if len(members) < 2:
+                    continue
+                signature = frozenset(c.id for c in members)
+                if signature in already_seen:
+                    continue
+                already_seen.add(signature)
+                groups.append((reason, members))
+                if len(groups) >= limit:
+                    break
+            if len(groups) >= limit:
+                break
+
+        # UNE seule requete de statistiques pour toute la page (jamais une
+        # par fiche) — le back-office affiche le nombre de visites de chaque
+        # fiche pour aider a choisir laquelle conserver.
+        stats = await self.visit_stats([c.id for _, members in groups for c in members])
+        return [
+            {
+                "reason": reason,
+                "clients": [serialize_duplicate_client(c, stats) for c in members],
+            }
+            for reason, members in groups
+        ]
 
     # ------------------------------------------------------------------
     # Upsert / consentement / rattachement (§3)
@@ -469,10 +812,10 @@ class ClientService:
         if last_name and last_name.strip() and client.last_name != last_name.strip():
             client.last_name = last_name.strip()
             changed = True
-        if email and not client.email and (await self.get_by_email(email)) is None:
+        if email and not client.email and not await self._contact_taken(email=email):
             client.email = email
             changed = True
-        if phone and not client.phone and (await self.get_by_phone(phone)) is None:
+        if phone and not client.phone and not await self._contact_taken(phone=phone):
             client.phone = phone
             changed = True
         if changed:
@@ -737,6 +1080,175 @@ class ClientService:
         await self.db.flush()
         return client
 
+    # ------------------------------------------------------------------
+    # Fusion de deux fiches en double (PR10/L3)
+    # ------------------------------------------------------------------
+
+    async def merge(
+        self, *, winner: Client, source: Client, user_id: uuid.UUID | None
+    ) -> dict:
+        """Fusionne la fiche `source` DANS la fiche `winner`.
+
+        Aucune vente n'est modifiee au sens fiscal ni supprimee : seule
+        `transactions.client_id` bouge, la colonne que le trigger
+        d'inaltérabilité laisse passer et qui n'entre pas dans le payload
+        signe (E3/PR3). La chaine HMAC des ventes est donc rigoureusement
+        identique avant et apres la fusion — c'est ce qui rend l'operation
+        possible sans evolution fiscale.
+
+        La fiche absorbee n'est jamais supprimee : elle est videe de ses
+        donnees personnelles (meme mecanique que l'anonymisation) et garde
+        un renvoi vers la fiche conservee, pour que l'ancienne URL et les
+        anciens exports continuent de mener quelque part.
+        """
+        if winner.id == source.id:
+            raise MergeSameClient()
+        for candidate in (winner, source):
+            if candidate.anonymized_at is not None or candidate.merged_into_client_id is not None:
+                raise MergeClientInactive()
+        if winner.deletion_requested_at is not None or winner.deletion_scheduled_for is not None:
+            raise MergeDeletionPending()
+
+        # Meme verrou que `create_or_get`, pris sur les DEUX moyens de
+        # contact et dans un ordre deterministe (tri) : une vente en caisse
+        # qui retrouverait la fiche source pendant la fusion attend la fin
+        # de l'operation, et deux fusions concurrentes ne peuvent pas
+        # s'inter-bloquer en prenant les memes verrous en sens inverse.
+        for key in sorted(
+            {
+                winner.email or winner.phone or str(winner.id),
+                source.email or source.phone or str(source.id),
+            }
+        ):
+            await self._acquire_client_write_lock(key)
+
+        # L'e-mail de la source doit etre capture AVANT qu'elle ne soit
+        # videe : c'est lui qu'il faudra retirer de la liste Brevo.
+        source_email = source.email
+
+        # (1) Les ventes et les annulations changent de fiche. UPDATE
+        # ensembliste (pas de boucle par ligne) : c'est exactement le
+        # rattachement de PR3, applique en masse.
+        moved_transactions = (
+            await self.db.execute(
+                update(Transaction)
+                .where(Transaction.client_id == source.id)
+                .values(client_id=winner.id)
+                .execution_options(synchronize_session=False)
+            )
+        ).rowcount
+
+        # (2) Le registre de consentement et les messages suivent. Le
+        # registre reste INTEGRALEMENT conserve : on ne reecrit aucune ligne
+        # (le trigger `trg_protect_consent` ne laisse passer que le
+        # rattachement, cf. migration 0010), on constate que les deux fiches
+        # n'en faisaient qu'une. L'etat courant reste « derniere ligne par
+        # finalite », donc la plus recente des deux fiches l'emporte.
+        moved_consents = (
+            await self.db.execute(
+                update(Consent)
+                .where(Consent.client_id == source.id)
+                .values(client_id=winner.id)
+                .execution_options(synchronize_session=False)
+            )
+        ).rowcount
+        moved_communications = (
+            await self.db.execute(
+                update(Communication)
+                .where(Communication.client_id == source.id)
+                .values(client_id=winner.id)
+                .execution_options(synchronize_session=False)
+            )
+        ).rowcount
+
+        # (3) Ce que la fiche conservee va recuperer : uniquement ce qui lui
+        # MANQUE. Jamais d'ecrasement — la vendeuse a designe cette fiche-la
+        # comme la bonne, ses valeurs font foi.
+        carried = {
+            field: getattr(source, field)
+            for field in ("email", "phone", "first_name", "last_name")
+            if not getattr(winner, field) and getattr(source, field)
+        }
+        # Le cache d'opt-in est la reunion des deux : une personne qui s'est
+        # abonnee sous l'une de ses deux fiches reste abonnee. Le registre
+        # `consents`, lui, garde la trace exacte de chaque decision.
+        newsletter_optin = bool(winner.newsletter_optin or source.newsletter_optin)
+
+        # (4) La fiche absorbee est videe puis marquee. L'ecriture est
+        # poussee en base AVANT de recopier les coordonnees sur la fiche
+        # conservee : les index uniques PARTIELS de `clients` (0007) sont
+        # verifies a chaque instruction, l'e-mail doit donc etre libere
+        # avant d'etre repris.
+        source.email = f"supprime-{uuid.uuid4()}@anonyme.invalid"
+        source.phone = None
+        source.first_name = None
+        source.last_name = None
+        source.newsletter_optin = False
+        source.brevo_synced_at = None
+        source.brevo_last_error = None
+        source.anonymized_at = datetime.now(timezone.utc)
+        # Une suppression programmee sur la fiche ABSORBEE n'a plus d'objet :
+        # ses donnees personnelles viennent d'etre effacees a l'instant.
+        source.deletion_requested_at = None
+        source.deletion_scheduled_for = None
+        source.deletion_requested_by_user_id = None
+        source.merged_into_client_id = winner.id
+        source.merged_at = datetime.now(timezone.utc)
+        await self.db.flush()
+
+        for field, value in carried.items():
+            setattr(winner, field, value)
+        winner.newsletter_optin = newsletter_optin
+        await self.db.flush()
+
+        # (5) Brevo — la fiche source ne doit plus recevoir de campagne. On
+        # la retire de la liste dediee (JAMAIS `DELETE /v3/contacts` ni la
+        # blocklist globale : le compte Brevo est partage, cf. CLAUDE.md),
+        # puis on synchronise la fiche conservee, qui a pu recuperer un
+        # e-mail ou un opt-in. Meilleur effort de bout en bout : une panne
+        # Brevo ne doit pas faire echouer une fusion deja ecrite en base.
+        from app.services import brevo_contacts
+
+        if brevo_contacts.is_configured():
+            if source_email:
+                try:
+                    result = await brevo_contacts.remove_from_list(source_email)
+                    if not result.ok:
+                        logger.warning(
+                            "brevo: retrait du contact absorbe impossible client_id=%s (%s)",
+                            source.id,
+                            result.detail,
+                        )
+                except Exception:  # noqa: BLE001 — jamais bloquant
+                    logger.warning(
+                        "brevo: retrait du contact absorbe en erreur client_id=%s",
+                        source.id,
+                        exc_info=True,
+                    )
+            await self.sync_brevo(winner, user_id=user_id)
+
+        # (6) JET — identifiants et compteurs seulement (journal immuable).
+        await JournalService(self.db).record(
+            EVENT_CLIENT_MERGED,
+            user_id=user_id,
+            payload={
+                "winner_id": str(winner.id),
+                "source_id": str(source.id),
+                "transactions_moved": moved_transactions,
+                "consents_moved": moved_consents,
+                "communications_moved": moved_communications,
+            },
+        )
+        await self.db.flush()
+        return {
+            "client": _serialize_client(winner),
+            "moved": {
+                "transactions": moved_transactions,
+                "consents": moved_consents,
+                "communications": moved_communications,
+            },
+        }
+
     async def export(self, client: Client, *, user_id: uuid.UUID | None) -> dict:
         """Export RGPD JSON portable (Art. 20) — fiche, consentements,
         communications, tickets (texte)."""
@@ -792,6 +1304,13 @@ def _serialize_client(client: Client) -> dict:
         "newsletter_optin": client.newsletter_optin,
         "created_at": client.created_at.isoformat() if client.created_at else None,
         "anonymized_at": client.anonymized_at.isoformat() if client.anonymized_at else None,
+        # PR10/L3 — renseigne quand cette fiche a ete ABSORBEE par une
+        # autre : le front ouvre alors la fiche conservee, avec un bandeau.
+        # L'URL de l'ancienne fiche continue donc de mener quelque part.
+        "merged_into_client_id": (
+            str(client.merged_into_client_id) if client.merged_into_client_id else None
+        ),
+        "merged_at": client.merged_at.isoformat() if client.merged_at else None,
     }
 
 

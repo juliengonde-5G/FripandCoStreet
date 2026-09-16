@@ -1022,6 +1022,13 @@ class AdminAnonymizeIn(BaseModel):
     reason: str = Field(min_length=3)
 
 
+class AdminMergeIn(BaseModel):
+    """PR10/L3 — fiche a ABSORBER. La fiche conservee est dans l'URL : c'est
+    elle qui survit, et c'est sur elle que le manager reste apres coup."""
+
+    source_id: uuid.UUID
+
+
 def _serialize_client_summary(client: Client) -> dict:
     return {
         "id": str(client.id),
@@ -1048,6 +1055,21 @@ async def list_clients(
     recherche porte alors sur les chiffres, cf. `ClientService.search`)."""
     clients = await ClientService(db).search(q, limit=limit)
     return {"clients": [_serialize_client_summary(c) for c in clients]}
+
+
+@router.get("/clients/duplicates")
+async def list_client_duplicates(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Groupes de fiches qui semblent designer la meme personne (PR10/L2).
+
+    Declaree AVANT `/clients/{client_id}` : sans cela, FastAPI essaierait de
+    lire « duplicates » comme un identifiant et repondrait 422.
+    """
+    groups = await ClientService(db).list_duplicate_groups(limit=limit)
+    return {"groups": groups, "total": len(groups)}
 
 
 @router.get("/clients/{client_id}")
@@ -1112,6 +1134,29 @@ async def anonymize_client(
         await brevo_contacts.remove_from_list(original_email)
     await db.commit()
     return await ClientService(db).get_full(client)
+
+
+@router.post("/clients/{winner_id}/merge")
+async def merge_clients(
+    winner_id: uuid.UUID,
+    body: AdminMergeIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Fusionne une fiche en double DANS celle de l'URL (PR10/L3).
+
+    Aucune vente n'est modifiee ni supprimee : seul `client_id` est
+    repointe, hors signature fiscale. La fiche absorbee est videe de ses
+    donnees personnelles et garde un renvoi vers la fiche conservee.
+    """
+    service = ClientService(db)
+    winner = await service.get_by_id(winner_id)
+    source = await service.get_by_id(body.source_id)
+    if winner is None or source is None:
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    result = await service.merge(winner=winner, source=source, user_id=user.id)
+    await db.commit()
+    return result
 
 
 @router.get("/clients/{client_id}/export")

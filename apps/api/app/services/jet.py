@@ -160,6 +160,15 @@ EVENT_PAYMENT_ABANDONED = "payment.abandoned"
 # un trou dans les traces.
 EVENT_SUMUP_EXCHANGES_PURGED = "sumup_exchanges.purged"
 
+# PR10 — fusion de deux fiches clientes en double (docs/ARCHITECTURE_PR10.md,
+# L3). Payload : IDENTIFIANTS ET COMPTEURS SEULEMENT (`winner_id`,
+# `source_id`, `transactions_moved`, `consents_moved`,
+# `communications_moved`) — jamais un nom, un e-mail ni un numero. Le JET est
+# immuable : une donnee personnelle qui y tomberait ne pourrait plus jamais
+# en sortir, alors meme que la fiche absorbee vient, elle, d'etre videe
+# (art. 17 RGPD).
+EVENT_CLIENT_MERGED = "client.merged"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""
