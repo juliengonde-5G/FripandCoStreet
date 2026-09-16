@@ -1153,6 +1153,37 @@ async def create_pos_client(
     return {"client": _serialize_pos_client(client, stats), "created": created}
 
 
+@router.get("/clients/{client_id}/history")
+async def pos_client_history(
+    client_id: uuid.UUID,
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=5, ge=1, le=20),
+):
+    """Historique d'achats d'une cliente, pour la caisse (PR10/L4).
+
+    Repond a la seule question que se pose la vendeuse au comptoir : « elle
+    est deja venue ? ». En tete les compteurs (visites, derniere visite,
+    cumul depense hors annulations), puis les derniers tickets avec le
+    libelle des articles.
+
+    404 `not_found` pour une fiche inconnue, ANONYMISEE (elle ne porte plus
+    aucune donnee personnelle : il n'y a plus personne a reconnaitre) ou
+    ABSORBEE par une fusion (son historique a ete repointe sur la fiche
+    conservee, c'est celle-la qu'il faut ouvrir). Les montants sont des
+    chaines a deux decimales — rien n'est arrondi en route.
+    """
+    service = ClientService(db)
+    client = await service.get_by_id(client_id)
+    if (
+        client is None
+        or client.anonymized_at is not None
+        or client.merged_into_client_id is not None
+    ):
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    return await service.history(client, limit=limit)
+
+
 @router.delete("/transactions/{transaction_id}/client")
 async def detach_client(
     transaction_id: uuid.UUID,

@@ -24,11 +24,13 @@ import re
 import unicodedata
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from email_validator import EmailNotValidError, validate_email
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models.client import Client, Consent, ConsentPurpose, ConsentSource
 from app.models.communication import Communication
@@ -256,6 +258,25 @@ def mask_email(email: str | None) -> str | None:
     if not sep or not local or not domain:
         return "***"
     return f"{local[0]}***@{domain}"
+
+
+# PR10/L4 — l'historique d'achats est lu EN CAISSE, sur une tablette, par
+# une vendeuse qui a une cliente devant elle : les montants partent en
+# chaines a deux decimales (« 42.00 »), jamais en flottants. Un `float`
+# arrondi a l'affichage finirait par montrer « 41,999999 » sur un ticket que
+# la cliente a paye 42 € — et la caisse, elle, raisonne en `Decimal` de bout
+# en bout (`Numeric(10, 2)`).
+def format_amount(value) -> str:
+    """Montant monetaire tel qu'il part dans une reponse JSON."""
+    return f"{Decimal(str(value if value is not None else 0)):.2f}"
+
+
+# Nombre de lignes d'articles detaillees par ticket dans l'historique CAISSE.
+# Au-dela, la caisse annonce « … et N autres articles » a partir de
+# `items_count` : l'ecran de caisse sert a reconnaitre un achat (« le manteau
+# de la semaine derniere »), pas a reimprimer le ticket — le detail complet
+# reste en back-office.
+HISTORY_ITEMS_PREVIEW = 5
 
 
 def mask_phone(phone: str | None) -> str | None:
@@ -499,6 +520,99 @@ class ClientService:
                 "last_visit_at": last.isoformat() if last else None,
             }
             for client_id, count, last in rows
+        }
+
+    async def _refunded_sale_ids(self, sale_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        """Parmi les ventes passees, celles qu'une annulation reference.
+
+        Une annulation est une transaction `refund` a part entiere qui
+        pointe la vente d'origine (`original_transaction_id`) : rien n'est
+        jamais modifie ni supprime sur la vente elle-meme (CLAUDE.md). Une
+        SEULE requete pour toute la page — l'historique caisse ne doit pas
+        declencher un aller-retour par ticket.
+        """
+        if not sale_ids:
+            return set()
+        refund = aliased(Transaction)
+        rows = (
+            await self.db.execute(
+                select(refund.original_transaction_id).where(
+                    refund.transaction_type == TransactionType.refund,
+                    refund.original_transaction_id.in_(sale_ids),
+                )
+            )
+        ).scalars().all()
+        return {rid for rid in rows if rid is not None}
+
+    async def history(self, client: Client, *, limit: int = 5) -> dict:
+        """Historique d'achats d'une cliente, tel qu'il s'affiche EN CAISSE
+        (PR10/L4) : « elle est deja venue 3 fois, dont la semaine derniere ».
+
+        Ventes uniquement : une annulation n'est pas une visite, elle est
+        signalee sur la vente concernee (`refunded`) et retiree du cumul
+        `total_spent`. Les compteurs (`visits_count`, `last_visit_at`) et le
+        cumul portent sur TOUT l'historique, pas seulement sur les `limit`
+        derniers tickets affiches — d'ou l'agregat SQL separe plutot qu'une
+        somme des lignes chargees.
+        """
+        limit = max(1, min(int(limit or 1), 20))
+        stats = (await self.visit_stats([client.id])).get(str(client.id), {})
+
+        sales = (
+            await self.db.execute(
+                select(Transaction)
+                .where(
+                    Transaction.client_id == client.id,
+                    Transaction.transaction_type == TransactionType.sale,
+                )
+                .order_by(
+                    Transaction.created_at.desc(),
+                    Transaction.transaction_number.desc(),
+                )
+                .limit(limit)
+            )
+        ).scalars().all()
+        refunded = await self._refunded_sale_ids([t.id for t in sales])
+
+        # Cumul « hors annulations » : NOT EXISTS correle plutot que deux
+        # listes chargees en memoire — la somme porte sur toutes les ventes
+        # de la fiche, meme celles que l'ecran n'affiche pas.
+        refund = aliased(Transaction)
+        cancelled = (
+            select(refund.id)
+            .where(
+                refund.transaction_type == TransactionType.refund,
+                refund.original_transaction_id == Transaction.id,
+            )
+            .exists()
+        )
+        total_spent = (
+            await self.db.execute(
+                select(func.coalesce(func.sum(Transaction.total_ttc), 0)).where(
+                    Transaction.client_id == client.id,
+                    Transaction.transaction_type == TransactionType.sale,
+                    ~cancelled,
+                )
+            )
+        ).scalar_one()
+
+        return {
+            "client_id": str(client.id),
+            "visits_count": stats.get("visits_count", 0),
+            "last_visit_at": stats.get("last_visit_at"),
+            "total_spent": format_amount(total_spent),
+            "transactions": [
+                {
+                    "id": str(t.id),
+                    "transaction_number": t.transaction_number,
+                    "created_at": t.created_at.isoformat() if t.created_at else None,
+                    "total_ttc": format_amount(t.total_ttc),
+                    "items_count": len(t.items),
+                    "items": _preview_items(t),
+                    "refunded": t.id in refunded,
+                }
+                for t in sales
+            ],
         }
 
     # ------------------------------------------------------------------
@@ -1005,6 +1119,14 @@ class ClientService:
                 .order_by(Transaction.transaction_number.desc())
             )
         ).scalars().all()
+        # PR10/L4 — la fiche back-office montre desormais CE QUI a ete
+        # achete, pas seulement le total : c'est ce qui permet de reconnaitre
+        # une cliente au telephone. Contrairement a l'historique caisse, le
+        # detail n'est pas tronque a cinq lignes (l'ecran n'est pas une
+        # tablette de comptoir) et les annulations sont signalees.
+        refunded = await self._refunded_sale_ids(
+            [t.id for t in transactions if t.transaction_type == TransactionType.sale]
+        )
         return {
             "client": _serialize_client(client),
             "consents": [_serialize_consent(c) for c in consents],
@@ -1015,6 +1137,8 @@ class ClientService:
                     "transaction_number": t.transaction_number,
                     "created_at": t.created_at.isoformat() if t.created_at else None,
                     "total_ttc": float(t.total_ttc),
+                    "items": [_serialize_item(i) for i in _ordered_items(t)],
+                    "refunded": t.id in refunded,
                 }
                 for t in transactions
             ],
@@ -1289,6 +1413,34 @@ class ClientService:
         )
         await self.db.flush()
         return data
+
+
+def _ordered_items(transaction: Transaction) -> list:
+    """Lignes d'un ticket dans l'ordre d'impression (`position`) — la
+    relation est chargee en `selectin`, il n'y a donc pas de requete
+    supplementaire ici."""
+    return sorted(transaction.items, key=lambda i: (i.position, str(i.id)))
+
+
+def _serialize_item(item) -> dict:
+    return {
+        "label": item.label,
+        "quantity": item.quantity,
+        "unit_price": format_amount(item.unit_price),
+    }
+
+
+def _preview_items(transaction: Transaction) -> list[dict]:
+    """Apercu des lignes pour l'historique CAISSE : les
+    `HISTORY_ITEMS_PREVIEW` premieres lignes du ticket, et rien d'autre.
+
+    Aucune pseudo-ligne « … » n'est ajoutee : la liste ne contient que de
+    vrais articles, tous de la meme forme. C'est `items_count` (le nombre
+    TOTAL de lignes du ticket) qui permet a la caisse d'afficher
+    « … et N autres articles » quand il y en a davantage.
+    """
+    items = _ordered_items(transaction)
+    return [_serialize_item(i) for i in items[:HISTORY_ITEMS_PREVIEW]]
 
 
 def _serialize_client(client: Client) -> dict:
