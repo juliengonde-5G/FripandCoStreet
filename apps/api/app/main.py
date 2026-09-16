@@ -11,6 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.api.admin.failed_payments_router import (
+    router as admin_failed_payments_router,
+)
 from app.api.admin.payments_router import router as admin_payments_router
 from app.api.admin.router import router as admin_router
 from app.api.auth.router import router as auth_router
@@ -230,6 +233,9 @@ app.include_router(admin_router, prefix="/api")
 # PR9/K2 — journal des echanges SumUp et analyse des echecs carte : bloc
 # autonome monte a part du routeur admin historique (meme prefixe `/admin`).
 app.include_router(admin_payments_router, prefix="/api")
+# PR9/K3 — file des paiements carte echoues : bloc autonome monte a part
+# du routeur admin historique (meme prefixe `/admin`).
+app.include_router(admin_failed_payments_router, prefix="/api")
 app.include_router(pos_router, prefix="/api")
 app.include_router(cb_router, prefix="/api")
 # PR8/J5 — facture B2B et avoir : bloc entierement nouveau, monte a part

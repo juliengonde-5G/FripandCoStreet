@@ -15,6 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.payment_attempt import PaymentAttempt, PaymentAttemptStatus
+from app.models.pos import Transaction, TransactionType
+from app.services import failed_payment_service
 from app.services.sumup_service import SumUpService
 
 _CENTS = Decimal("0.01")
@@ -127,6 +129,27 @@ async def verify_card_tender(
     attempt.sumup_card_brand = sumup_card_brand
     attempt.sumup_card_last4 = sumup_card_last4
     await db.flush()
+
+    # PR9/K3 — point de constat n° 2 du `paid`, le seul ou la vente existe :
+    # si ce panier avait un incident en file (terminal muet, puis reessai),
+    # la ligne se referme ICI et porte enfin la vente encaissee. On lit la
+    # vente en cours d'ecriture par son `client_uuid` (deja `flush`ee par
+    # `PosService.create_transaction` avant la boucle des paiements) plutot
+    # que de changer la signature de cette fonction, qui est l'interface
+    # opposable a `pos.py`. Aucune vente n'est creee ici : on ne fait que
+    # rattacher celle que l'appelant est en train d'ecrire.
+    transaction_id = (
+        await db.execute(
+            select(Transaction.id)
+            .where(
+                Transaction.client_uuid == client_uuid,
+                Transaction.transaction_type == TransactionType.sale,
+            )
+            .order_by(Transaction.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    await failed_payment_service.resolve_if_queued(db, client_uuid, transaction_id)
 
     return VerifiedCardTender(
         sumup_checkout_id=tender.checkout_id,
