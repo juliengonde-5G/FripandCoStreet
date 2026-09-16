@@ -11,6 +11,7 @@ import pytest
 
 from app.core.config import settings
 from app.core.database import async_session
+from app.core.logging_config import setup_logging
 from app.services import weather as weather_service
 from app.services.settings_service import SettingsService
 
@@ -248,6 +249,40 @@ async def test_the_api_key_never_reaches_the_logs(monkeypatch, caplog):
     assert data["unavailable"] is True
     assert secret not in caplog.text
     assert "appid" not in caplog.text.lower()
+
+
+async def test_a_successful_call_logs_no_url_at_all(monkeypatch, caplog):
+    """Le chemin NOMINAL est le vrai danger : httpx journalise chaque
+    requete sortante en INFO, URL complete comprise. OpenWeather exige sa
+    cle en query string (contrairement a SumUp/Brevo, qui la mettent dans
+    un en-tete) : cette ligne ecrirait donc la cle en clair dans les logs
+    de production. `setup_logging` coupe la source (`httpx`/`httpcore` a
+    WARNING) — ce test echoue si quelqu'un l'y remet un jour.
+    """
+    setup_logging()
+    secret = "cle-ultra-secrete-a-ne-jamais-journaliser"
+    recorder = _Recorder()
+    _install(monkeypatch, recorder, api_key=secret)
+    await _set_weather_setting("Ville d'essai")
+
+    with caplog.at_level(logging.INFO):
+        data = await _current()
+
+    assert data["unavailable"] is False
+    assert recorder.calls == 1
+    assert secret not in caplog.text
+    assert "appid" not in caplog.text.lower()
+    assert "openweathermap" not in caplog.text.lower()
+
+
+def test_setup_logging_muzzles_the_outgoing_http_loggers():
+    """Le reglage doit etre APPLIQUE, pas seulement ecrit : `setup_logging`
+    est appelee au chargement de `app.main` (donc au demarrage de l'API et,
+    ici, a l'import du client de test)."""
+    import app.main  # noqa: F401 — l'import est justement ce qu'on teste
+
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
 
 
 # ---------------------------------------------------------------------------

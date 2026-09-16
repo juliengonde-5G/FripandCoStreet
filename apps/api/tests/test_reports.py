@@ -368,6 +368,87 @@ async def test_weekly_target_is_the_sum_of_the_open_days(client, auth_headers, d
     assert daily["target"]["amount"] == "100.00"
 
 
+async def test_daily_target_follows_the_cahier_once_frozen(client, auth_headers, dataset):
+    """Le rapport du jour et le cahier doivent afficher le MEME objectif.
+
+    Le cahier fige l'objectif d'une journee a sa premiere lecture : relever
+    l'objectif mensuel a midi ne reecrit pas ce qu'on a demande le matin.
+    Si le rapport, lui, recalculait en direct, le manager verrait deux
+    chiffres sur deux ecrans — et ne saurait plus lequel croire.
+    """
+    today = _today()
+    month_key = f"{today.year:04d}-{today.month:02d}"
+    await _set_targets(client, auth_headers, {"daily": "0.00", "monthly": {month_key: "3000.00"}})
+
+    # Premiere lecture du cahier : l'objectif du jour est fige.
+    r = await client.get(f"/api/cahier/{today.isoformat()}", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    frozen = r.json()["target"]["daily"]
+
+    # Le manager releve son objectif mensuel en cours de journee.
+    await _set_targets(client, auth_headers, {"daily": "0.00", "monthly": {month_key: "9000.00"}})
+
+    report = await _report(DAILY, today)
+    assert report["target"]["amount"] == frozen
+
+    r = await client.get(f"/api/cahier/{today.isoformat()}", headers=auth_headers)
+    assert r.json()["target"]["daily"] == report["target"]["amount"]
+
+    # Le MENSUEL, lui, suit bien le nouvel objectif : c'est le reglage du
+    # mois, il n'est fige nulle part.
+    assert (await _report(MONTHLY, today))["target"]["amount"] == "9000.00"
+
+
+async def test_a_day_never_opened_in_the_cahier_follows_the_current_target(
+    client, auth_headers, dataset
+):
+    """Consulter un rapport ne fige rien : un jour jamais ouvert dans le
+    cahier suit l'objectif courant, et n'apparait pas en base."""
+    today = _today()
+    month_key = f"{today.year:04d}-{today.month:02d}"
+    await _set_targets(client, auth_headers, {"daily": "150.00", "monthly": {}})
+
+    before = await _report(DAILY, today)
+    assert before["target"]["amount"] == "150.00"
+
+    await _set_targets(client, auth_headers, {"daily": "200.00", "monthly": {}})
+    after = await _report(DAILY, today)
+    assert after["target"]["amount"] == "200.00"
+
+    async with async_session() as db:
+        from app.models.cahier_day import CahierDay
+
+        rows = (await db.execute(select(CahierDay))).scalars().all()
+    assert rows == []
+    assert month_key  # le mois n'entre pas en jeu ici : repli sur `daily`
+
+
+async def test_weekly_target_sums_the_frozen_and_the_current_days(
+    client, auth_headers, dataset
+):
+    """La somme hebdomadaire passe par le meme objectif opposable : le jour
+    deja ouvert garde le sien, les six autres suivent l'objectif courant."""
+    today = _today()
+    await _set_targets(client, auth_headers, {"daily": "100.00", "monthly": {}})
+    r = await client.get(f"/api/cahier/{today.isoformat()}", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    frozen = Decimal(r.json()["target"]["daily"])
+
+    await _set_targets(client, auth_headers, {"daily": "10.00", "monthly": {}})
+
+    report = await _report(WEEKLY, today)
+    open_days = sum(
+        1
+        for offset in range(7)
+        if (today - timedelta(days=today.weekday()) + timedelta(days=offset)).weekday() != 6
+    )
+    # Le jour fige compte pour son ancienne valeur, les autres jours ouverts
+    # pour la nouvelle (le dimanche est ferme : 0).
+    others = open_days - (1 if today.weekday() != 6 else 0)
+    expected = (frozen if today.weekday() != 6 else Decimal("0.00")) + Decimal("10.00") * others
+    assert report["target"]["amount"] == f"{expected:.2f}"
+
+
 async def test_no_target_means_null(client, auth_headers, dataset):
     await _set_targets(client, auth_headers, {"daily": "0.00", "monthly": {}})
     assert (await _report(DAILY, _today()))["target"] is None

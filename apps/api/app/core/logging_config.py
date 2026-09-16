@@ -61,6 +61,19 @@ def setup_logging() -> None:
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
+    # httpx journalise CHAQUE requete sortante en INFO, URL complete
+    # comprise : « HTTP Request: GET https://…?appid=… "HTTP/1.1 200 OK" ».
+    # Nos autres appels sortants portent leur secret dans un en-tete
+    # (SumUp, Brevo : `Authorization` / `api-key`), qui n'apparait pas dans
+    # cette ligne — mais OpenWeather (PR11, M3) exige sa cle en QUERY
+    # STRING : la laisser a INFO ecrirait la cle en clair dans les logs de
+    # production, et donc dans le collecteur qui les recoit. On coupe la
+    # source plutot que de filtrer apres coup : un filtre se contourne au
+    # premier logger tiers ajoute, un niveau non. `httpcore` (la couche en
+    # dessous) trace les memes URL en DEBUG — meme traitement.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     fripco = logging.getLogger("fripco")
     fripco.setLevel(level)
     fripco.propagate = True

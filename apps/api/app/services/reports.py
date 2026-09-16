@@ -425,11 +425,17 @@ async def _target_amount(
     """Objectif de la periode, ou None quand aucun objectif n'est fixe.
 
     - mensuel : directement le reglage `targets.monthly` ;
-    - quotidien : l'objectif du jour calcule par le cahier (M2), qui tient
-      compte des jours d'ouverture ;
-    - hebdomadaire : la somme des objectifs des sept jours — une semaine
-      contenant deux jours de fermeture n'attend pas sept fois l'objectif
-      d'un jour ouvre.
+    - quotidien : l'objectif OPPOSABLE du jour selon le cahier (M2) —
+      celui qui y est fige s'il l'est, le calcul courant sinon ;
+    - hebdomadaire : la somme des objectifs opposables des sept jours — une
+      semaine contenant deux jours de fermeture n'attend pas sept fois
+      l'objectif d'un jour ouvre.
+
+    On passe par `effective_daily_target_for` et non par le calcul
+    theorique : le cahier fige l'objectif d'une journee des sa premiere
+    lecture, et un manager qui releve son objectif mensuel a midi doit voir
+    le MEME chiffre sur le rapport du jour et sur son cahier. Deux ecrans
+    qui se contredisent, c'est un objectif auquel plus personne ne croit.
 
     Le module du cahier est importe PARESSEUSEMENT : les rapports doivent
     tourner meme si le cahier n'est pas encore livre (l'objectif est alors
@@ -441,18 +447,18 @@ async def _target_amount(
         return amount if amount > 0 else None
 
     try:
-        from app.services.cahier import daily_target_for
+        from app.services.cahier import effective_daily_target_for
     except ImportError:
         return None
 
     if kind == DAILY:
-        return await daily_target_for(db, first)
+        return await effective_daily_target_for(db, first)
 
     total = ZERO
     found = False
     day = first
     while day <= last:
-        value = await daily_target_for(db, day)
+        value = await effective_daily_target_for(db, day)
         if value is not None:
             total += value
             found = True

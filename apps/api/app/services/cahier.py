@@ -8,10 +8,12 @@
 # `cahier_days`, table d'exploitation (§M2 : « rapports et cahier sont des
 # lectures/exploitation, hors perimetre »).
 #
-# Deux fonctions sont publiques pour les rapports (M1) : `daily_target_for`
-# (objectif du jour, que le rapport quotidien et le rapport hebdomadaire
-# somment) et `weather_snapshot_for` (instantane meteo fige, repris tel quel
-# par le rapport quotidien).
+# Trois fonctions sont publiques pour les rapports (M1) :
+# `effective_daily_target_for` (objectif opposable du jour — fige s'il l'est,
+# que le rapport quotidien affiche et que l'hebdomadaire somme),
+# `daily_target_for` (le calcul theorique, dont elle derive) et
+# `weather_snapshot_for` (instantane meteo fige, repris tel quel par le
+# rapport quotidien).
 from __future__ import annotations
 
 import calendar
@@ -130,6 +132,30 @@ async def daily_target_for(db: AsyncSession, day: date_cls) -> Decimal | None:
     return compute_daily_target(
         day, targets, normalize_weekday_open(cahier.get("weekday_open"))
     )
+
+
+async def effective_daily_target_for(db: AsyncSession, day: date_cls) -> Decimal | None:
+    """Objectif du jour REELLEMENT opposable : celui qu'affiche le cahier.
+
+    `daily_target_for` donne le calcul theorique du jour ; mais des qu'une
+    journee a ete ouverte dans le cahier, son objectif est FIGE
+    (`cahier_days.frozen_daily_target`) — changer l'objectif mensuel a midi
+    ne doit pas reecrire ce qu'on a demande le matin. Le rapport quotidien
+    (M1) doit donc lire la MEME valeur que le cahier (M2) : sans cela, un
+    manager qui releve son objectif en cours de journee voit deux chiffres
+    differents sur deux ecrans, et ne sait plus lequel croire.
+
+    N'ECRIT RIEN : un jour jamais ouvert dans le cahier n'est pas cree ici
+    (ce serait figer un objectif par le simple fait de consulter un
+    rapport). Il suit alors l'objectif courant, et se figera a sa premiere
+    lecture dans le cahier.
+    """
+    row = (
+        await db.execute(select(CahierDay).where(CahierDay.day == day))
+    ).scalar_one_or_none()
+    if row is not None and row.frozen_daily_target is not None:
+        return _money(row.frozen_daily_target)
+    return await daily_target_for(db, day)
 
 
 async def weather_snapshot_for(db: AsyncSession, day: date_cls) -> dict | None:
