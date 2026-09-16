@@ -51,10 +51,18 @@ export interface CahierWeather {
   fetched_at?: string | null;
 }
 
-/** URL de l'icône OpenWeather correspondant au code reçu. */
-export function weatherIconUrl(icon: string | null | undefined): string | null {
-  if (!icon) return null;
-  return `https://openweathermap.org/img/wn/${icon}@2x.png`;
+/**
+ * Famille d'un code d'icône OpenWeather : les deux premiers caractères
+ * (« 01 » ciel clair, « 10 » pluie…) et la marque du jour ou de la nuit.
+ *
+ * L'image distante `openweathermap.org/img/wn/…` n'est jamais chargée : la
+ * boutique tourne sur une tablette qui n'a pas toujours d'accès sortant
+ * vers ce domaine, et une icône manquante laisserait un carré vide. Chaque
+ * écran dessine donc son glyphe à partir de cette famille.
+ */
+export function weatherFamily(icon: string | null | undefined): { family: string; night: boolean } {
+  const code = (icon ?? "").trim();
+  return { family: code.slice(0, 2), night: code.endsWith("n") };
 }
 
 // ---------------------------------------------------------------------------

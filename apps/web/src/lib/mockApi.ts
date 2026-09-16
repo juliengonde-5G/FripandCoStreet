@@ -2144,6 +2144,12 @@ function cahierByHour(dayKey: string): { hour: number; net: string }[] {
  * jamais sur les sessions de caisse. */
 function buildCahierPayload(dayKey: string): Record<string, unknown> {
   const row = ensureCahierDay(dayKey);
+  // L'objectif se fige à la PREMIÈRE LECTURE de la journée (M2) : une ligne
+  // semée pour la démo n'a donc pas encore d'objectif, elle le prend ici,
+  // avec les réglages du moment.
+  if (row.frozen_daily_target === null) {
+    row.frozen_daily_target = money(cahierDailyTarget(dayKey));
+  }
   const date = parseDayKey(dayKey);
   const todayKey = dayKeyOf(new Date());
 
@@ -2220,6 +2226,8 @@ function currentUsername(): string {
 function seedPr11Cahier(): void {
   const today = new Date();
   const todayRow = ensureCahierDay(dayKeyOf(today));
+  // Semée mais pas encore lue : l'objectif se figera au premier affichage.
+  todayRow.frozen_daily_target = null;
   todayRow.message = "Vitrine refaite ce matin : total look velours côté rue.";
   todayRow.operation = "Braderie d'automne — 20 % sur les manteaux jusqu'à samedi.";
 
@@ -2229,6 +2237,7 @@ function seedPr11Cahier(): void {
     if (!cahierConfig.weekday_open[weekdayIndexOf(day)]) continue;
     const key = dayKeyOf(day);
     const row = ensureCahierDay(key);
+    row.frozen_daily_target = null;
     row.weather = cahierWeatherSnapshot(key);
     row.message = "Belle journée, beaucoup de passage l'après-midi.";
     row.operation = "Braderie d'automne — 20 % sur les manteaux.";

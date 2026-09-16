@@ -34,7 +34,7 @@ import {
   signCahier,
   todayCahierDay,
   updateCahierText,
-  weatherIconUrl,
+  weatherFamily,
   type CahierDay,
   type CahierHour,
   type CahierWeather,
@@ -69,6 +69,9 @@ const PRINT_CSS = `
   [data-cahier-text] {
     min-height: 22mm;
     white-space: pre-wrap;
+    background: #fff !important;
+    color: #000 !important;
+    resize: none;
   }
 }
 `;
@@ -259,6 +262,71 @@ function HourChart({ byHour }: { byHour: CahierHour[] }) {
 // Météo du jour (M3) — instantané figé au premier affichage de la journée
 // ---------------------------------------------------------------------------
 
+/**
+ * Glyphe météo dessiné sur place d'après le code d'icône OpenWeather
+ * (« 01d », « 10n »…) — jamais l'image distante : la page doit s'afficher
+ * entière sans accès sortant, à l'impression comprise. Même dessin que le
+ * widget de l'accueil ; chaque écran porte sa copie plutôt qu'une
+ * dépendance croisée, comme les autres petites aides d'affichage.
+ */
+function WeatherGlyph({ code }: { code: string | null | undefined }) {
+  const { family, night } = weatherFamily(code);
+  const sun = (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </>
+  );
+  const moon = <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />;
+  const cloud = <path d="M7 19h10a4 4 0 0 0 .3-8A6 6 0 0 0 5.7 12 3.5 3.5 0 0 0 7 19z" />;
+  const drops = <path d="M9 20.5 8 22.5M13 20.5 12 22.5M17 20.5 16 22.5" />;
+
+  let shape: React.ReactNode;
+  if (family === "01") shape = night ? moon : sun;
+  else if (family === "02" || family === "03" || family === "04") shape = cloud;
+  else if (family === "09" || family === "10")
+    shape = (
+      <>
+        {cloud}
+        {drops}
+      </>
+    );
+  else if (family === "11")
+    shape = (
+      <>
+        {cloud}
+        <path d="M13 13l-3 4h4l-3 4" />
+      </>
+    );
+  else if (family === "13")
+    shape = (
+      <>
+        {cloud}
+        <path d="M9 21h.01M13 21h.01M17 21h.01" />
+      </>
+    );
+  else if (family === "50") shape = <path d="M3 8h18M3 12h18M6 16h12M8 20h8" />;
+  else shape = cloud;
+
+  return (
+    <svg
+      width={44}
+      height={44}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+      className="shrink-0 text-fc-primary"
+    >
+      {shape}
+    </svg>
+  );
+}
+
 function WeatherLine({ weather }: { weather: CahierWeather | null }) {
   if (!weather || weather.unavailable) {
     return (
@@ -268,17 +336,10 @@ function WeatherLine({ weather }: { weather: CahierWeather | null }) {
       </p>
     );
   }
-  const iconUrl = weatherIconUrl(weather.icon);
   const temp = typeof weather.temp === "number" ? `${Math.round(weather.temp)} °C` : "—";
   return (
     <div className="flex items-center gap-3">
-      {iconUrl && (
-        // Icône servie par OpenWeather : pas de `next/image` (aucun domaine
-        // distant déclaré, et l'icône doit pouvoir manquer sans casser la
-        // page — `alt` porte déjà la description).
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={iconUrl} alt="" aria-hidden width={56} height={56} className="h-14 w-14 shrink-0" />
-      )}
+      <WeatherGlyph code={weather.icon} />
       <div className="min-w-0">
         <div className="font-mono text-2xl tabular-nums leading-none text-fc-ink">{temp}</div>
         <div className="mt-1 truncate text-sm text-fc-ink-soft first-letter:uppercase">
@@ -497,7 +558,7 @@ export default function CahierDuJour() {
 
                 <Progress pct={target.month_progress_pct} label="Avancement du mois" />
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                   <Stat label="Réalisé du mois" value={euros(target.month_realized)} />
                   <Stat label="Reste à faire" value={euros(target.month_remaining)} />
                   <Stat
