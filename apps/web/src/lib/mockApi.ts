@@ -668,6 +668,7 @@ function reset(): void {
   seedDemoClients();
   seedPr10CaisseDemo();
   seedDemoInvoice();
+  seedPr10AdminDemo();
   // `backupConfig` n'est pas remis à zéro, comme `settings` — un réglage
   // édité par la personne reste après un reset (état applicatif, pas une
   // donnée transactionnelle du jeu de démo).
@@ -941,6 +942,13 @@ function clientFullPayload(client: Client): ClientFull {
           transaction_number: t.transaction_number,
           created_at: t.created_at,
           total_ttc: t.total_ttc,
+          // PR10 (L4) : les articles du ticket et la mention « annulé ».
+          items: t.items.slice(0, 5).map((item) => ({
+            label: item.label,
+            quantity: item.quantity,
+            unit_price: money(item.unit_price),
+          })),
+          refunded: cancelledToRefund.has(t.id),
         }),
       ),
   };
@@ -1689,6 +1697,182 @@ function pr10ClientHistory(clientId: string, limit: number): Record<string, unkn
       refunded: cancelledToRefund.has(tx.id),
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// PR10 — administration : doublons, fusion et suppression différée
+// (docs/ARCHITECTURE_PR10.md §1, L2 / L3 / L5 / L6)
+//
+// Ce bloc simule ce que l'ONGLET CLIENTS consomme : les groupes de fiches
+// qui se ressemblent, la fusion de deux fiches et les deux gestes de la
+// suppression programmée. Les doublons proposés pendant la saisie en
+// caisse et l'historique d'achats vivent dans le bloc « PR10 — caisse ».
+// ---------------------------------------------------------------------------
+
+/** Deux groupes de doublons posés d'avance sur le jeu de démo — un même
+ * e-mail, un même nom — et une fiche dont la suppression est déjà
+ * programmée : la carte « Doublons possibles » et le badge de la fiche se
+ * voient dès le premier écran, sans préparation. */
+function seedPr10AdminDemo(): void {
+  const olderIso = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  // Groupe « même e-mail » : la même adresse saisie deux fois, une fois
+  // avec le nom complet, une fois sans.
+  const emailTwin: Client = {
+    id: uuid(),
+    email: "camille.perrot@exemple.fr",
+    phone: null,
+    first_name: "Camille",
+    last_name: "Perrot",
+    newsletter_optin: true,
+    created_at: olderIso(40),
+    anonymized_at: null,
+  };
+  const emailTwinBis: Client = {
+    id: uuid(),
+    email: "camille.perrot@exemple.fr",
+    phone: "+33612345678",
+    first_name: "Camille",
+    last_name: null,
+    newsletter_optin: false,
+    created_at: olderIso(6),
+    anonymized_at: null,
+  };
+
+  // Groupe « même nom » : deux fiches ouvertes à deux passages, avec des
+  // coordonnées différentes.
+  const nameTwin: Client = {
+    id: uuid(),
+    email: "n.lefevre@exemple.fr",
+    phone: null,
+    first_name: "Noémie",
+    last_name: "Lefèvre",
+    newsletter_optin: false,
+    created_at: olderIso(52),
+    anonymized_at: null,
+  };
+  const nameTwinBis: Client = {
+    id: uuid(),
+    email: null,
+    phone: "+33755443322",
+    first_name: "Noemie",
+    last_name: "Lefevre",
+    newsletter_optin: false,
+    created_at: olderIso(3),
+    anonymized_at: null,
+  };
+
+  [emailTwin, emailTwinBis, nameTwin, nameTwinBis].forEach((client) => clients.push(client));
+
+  // Quelques ventes rattachées à la fiche la plus ancienne de chaque
+  // groupe : la fusion a alors quelque chose à déplacer, et la
+  // présélection « celle qui a le plus de visites » se voit.
+  const free = transactions.filter((t) => t.transaction_type === "sale" && !t.client);
+  [emailTwin, emailTwin, nameTwin].forEach((client, index) => {
+    const tx = free[index];
+    if (!tx) return;
+    tx.client = clientRefOf(client);
+    tx.receipt_text = buildReceiptText(tx);
+  });
+
+  // Une fiche avec suppression programmée : le badge et le bouton
+  // « Annuler la suppression programmée » sont visibles d'emblée.
+  const pending = clients.find((c) => c.email === "karim.benali@exemple.fr") ?? emailTwin;
+  pending.deletion_requested_at = olderIso(4);
+  pending.deletion_scheduled_for = new Date(Date.now() + 26 * 24 * 60 * 60 * 1000).toISOString();
+}
+
+/** Groupes de fiches qui se ressemblent (L2) : e-mail, puis téléphone,
+ * puis nom ; un groupe compte au moins deux fiches, une fiche n'apparaît
+ * que dans son premier groupe. */
+function pr10DuplicateGroups(): Array<Record<string, unknown>> {
+  const active = clients.filter(isActiveClientMock);
+  const taken = new Set<string>();
+  const groups: Array<Record<string, unknown>> = [];
+
+  const collect = (reason: "email" | "phone" | "name", keyOf: (c: Client) => string | null) => {
+    const buckets = new Map<string, Client[]>();
+    active.forEach((client) => {
+      if (taken.has(client.id)) return;
+      const key = keyOf(client);
+      if (!key) return;
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(client);
+      else buckets.set(key, [client]);
+    });
+    buckets.forEach((bucket) => {
+      if (bucket.length < 2) return;
+      bucket.forEach((c) => taken.add(c.id));
+      groups.push({
+        reason,
+        clients: bucket.map((client) => ({ ...client, ...visitStats(client.id) })),
+      });
+    });
+  };
+
+  collect("email", (c) => normalizeEmail(c.email) || null);
+  collect("phone", (c) => c.phone ?? null);
+  collect("name", (c) => nameKeyMock(c.first_name, c.last_name));
+  return groups.slice(0, 50);
+}
+
+/** Fusion de deux fiches (L3) : les ventes, les consentements et les
+ * messages passent à la fiche conservée, ses champs vides sont complétés,
+ * la fiche absorbée est vidée puis marquée. Aucun ticket n'est modifié
+ * autrement que par son rattachement. */
+function pr10MergeClients(winner: Client, source: Client): Record<string, unknown> {
+  const moved = { transactions: 0, consents: 0, communications: 0 };
+
+  transactions
+    .filter((t) => t.client?.id === source.id)
+    .forEach((tx) => {
+      tx.client = clientRefOf(winner);
+      if (tx.transaction_type === "sale") tx.receipt_text = buildReceiptText(tx);
+      moved.transactions += 1;
+    });
+
+  consents
+    .filter((c) => c.client_id === source.id)
+    .forEach((c) => {
+      c.client_id = winner.id;
+      moved.consents += 1;
+    });
+
+  communications
+    .filter((c) => c.client_id === source.id)
+    .forEach((c) => {
+      c.client_id = winner.id;
+      moved.communications += 1;
+    });
+
+  // Champs vides complétés depuis la fiche absorbée, jamais écrasés.
+  if (!winner.email) winner.email = source.email;
+  if (!winner.phone) winner.phone = source.phone;
+  if (!winner.first_name) winner.first_name = source.first_name;
+  if (!winner.last_name) winner.last_name = source.last_name;
+  winner.newsletter_optin = winner.newsletter_optin || source.newsletter_optin;
+
+  // La fiche absorbée est vidée (même mécanique que l'anonymisation) et
+  // une suppression programmée sur elle n'a plus lieu d'être.
+  source.email = `fusionne-${source.id}@anonyme.invalid`;
+  source.phone = null;
+  source.first_name = null;
+  source.last_name = null;
+  source.anonymized_at = nowIso();
+  source.deletion_requested_at = null;
+  source.deletion_scheduled_for = null;
+  source.merged_into_client_id = winner.id;
+  source.merged_at = nowIso();
+
+  logJet("client.merged", {
+    winner_id: winner.id,
+    source_id: source.id,
+    transactions_moved: moved.transactions,
+    consents_moved: moved.consents,
+    communications_moved: moved.communications,
+  });
+
+  return { client: winner, moved };
 }
 
 /** Une facture pro de démonstration (PR8, J6), posée sur une vente
@@ -3130,6 +3314,53 @@ export async function mockFetchAPI<T = unknown>(
     return { status, provider } as unknown as T;
   }
 
+  // --- PR10 — administration (L2/L3/L5) : doublons, fusion, suppression ---
+
+  if (path === "/api/admin/clients/duplicates" && method === "GET") {
+    const groups = pr10DuplicateGroups();
+    return { groups, total: groups.length } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/merge$/)) && method === "POST") {
+    const winner = clients.find((c) => c.id === m![1]);
+    const body = parseBody<{ source_id?: string }>(options);
+    const source = clients.find((c) => c.id === body.source_id);
+    if (!winner || !source) fail(404, "Fiche introuvable.", "not_found");
+    if (winner!.id === source!.id) fail(409, "Il s'agit de la même fiche.", "same_client");
+    if (!isActiveClientMock(winner!) || !isActiveClientMock(source!)) {
+      fail(409, "Une de ces fiches n'est plus utilisable.", "client_inactive");
+    }
+    if (winner!.deletion_scheduled_for) {
+      fail(409, "La fiche à conserver a une suppression programmée : annulez-la d'abord.", "deletion_pending");
+    }
+    return pr10MergeClients(winner!, source!) as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/deletion-request$/)) && method === "POST") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client) fail(404, "Fiche introuvable.", "not_found");
+    if (!isActiveClientMock(client!)) fail(409, "Cette fiche n'est plus utilisable.", "client_inactive");
+    if (client!.deletion_scheduled_for) fail(409, "Une suppression est déjà programmée.", "already_requested");
+    const delayDays = 30;
+    client!.deletion_requested_at = nowIso();
+    client!.deletion_scheduled_for = new Date(Date.now() + delayDays * 24 * 60 * 60 * 1000).toISOString();
+    logJet("client.deletion_requested", {
+      client_id: client!.id,
+      scheduled_for: client!.deletion_scheduled_for,
+    });
+    return { client: client! } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/deletion-cancel$/)) && method === "POST") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client) fail(404, "Fiche introuvable.", "not_found");
+    if (!client!.deletion_scheduled_for) fail(409, "Aucune suppression programmée.", "not_requested");
+    client!.deletion_requested_at = null;
+    client!.deletion_scheduled_for = null;
+    logJet("client.deletion_cancelled", { client_id: client!.id });
+    return { client: client! } as unknown as T;
+  }
+
   if (path === "/api/admin/clients" && method === "GET") {
     const raw = (query.get("q") ?? "").trim();
     const q = raw.toLowerCase();
@@ -3137,7 +3368,8 @@ export async function mockFetchAPI<T = unknown>(
     // chiffres — même règle qu'en caisse.
     const digits = raw.replace(/\D/g, "");
     const limit = query.get("limit") ? parseInt(query.get("limit")!, 10) : 50;
-    let list = clients;
+    // PR10 (L3) : une fiche absorbée par une fusion ne s'affiche plus.
+    let list = clients.filter((c) => !c.merged_into_client_id);
     if (q) {
       list = list.filter(
         (c) =>
@@ -3174,6 +3406,9 @@ export async function mockFetchAPI<T = unknown>(
     client!.last_name = null;
     recordConsent(client!, false, "rgpd", body.reason.trim());
     client!.anonymized_at = nowIso();
+    // PR10 (L5) : la suppression immédiate efface une demande en cours.
+    client!.deletion_requested_at = null;
+    client!.deletion_scheduled_for = null;
     logJet("client.anonymized", { client_id: client!.id, reason: body.reason.trim() });
     return clientFullPayload(client!) as unknown as T;
   }
@@ -3704,6 +3939,7 @@ seedDemoSales();
 seedDemoClients();
 seedPr10CaisseDemo();
 seedDemoInvoice();
+seedPr10AdminDemo();
 
 // Expose un reset pour d'éventuels tests / Playwright (état frais par page load
 // de toute façon, car le module vit en mémoire côté navigateur).
