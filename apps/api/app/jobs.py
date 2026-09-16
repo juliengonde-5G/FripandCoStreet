@@ -245,6 +245,78 @@ async def _purge_sumup_exchanges() -> None:
         logger.exception("Purge du journal des échanges SumUp échouée")
 
 
+JOB_DAILY_CLIENT_DELETIONS = "daily_client_deletions"
+
+
+async def run_daily_client_deletions() -> None:
+    """Execute les suppressions RGPD arrivees a echeance — 04:00
+    Europe/Paris (PR10, docs/ARCHITECTURE_PR10.md, L5).
+
+    Une demande de suppression n'efface rien le jour meme : elle pose une
+    date d'effet (30 jours par defaut, reglage `rgpd.deletion_delay_days`)
+    pendant laquelle la cliente peut se raviser. C'est ce cron qui solde
+    les demandes echues, en appelant l'anonymisation ordinaire : jamais de
+    suppression de ligne, aucune vente touchee, `client.anonymized`
+    journalise fiche par fiche (E4/PR3).
+
+    04:00 : apres la sauvegarde nocturne (03:00), de sorte que le dump de
+    la nuit contient ENCORE les fiches qui vont etre videes — une erreur de
+    manipulation reste rattrapable pendant toute la duree de retention.
+
+    Un echec n'est jamais avale (S-5) : JET `system.job_failed` + alerte
+    e-mail best-effort via `_alert_job_failure`.
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.models.client import Client
+        from app.services.client_service import ClientService
+
+        async with async_session() as db:
+            now = datetime.now(timezone.utc)
+            due = (
+                await db.execute(
+                    select(Client).where(
+                        Client.deletion_scheduled_for.is_not(None),
+                        Client.deletion_scheduled_for <= now,
+                        Client.anonymized_at.is_(None),
+                    )
+                )
+            ).scalars().all()
+            service = ClientService(db)
+            for fiche in due:
+                # Capture AVANT l'anonymisation : celle-ci remplace
+                # l'adresse par un `@anonyme.invalid`, ce n'est donc plus
+                # celle a retirer de la liste Brevo dediee.
+                original_email = fiche.email
+                await service.anonymize(
+                    client=fiche, user_id=None, reason="deletion_request_expired"
+                )
+                if original_email:
+                    # Best-effort, et JAMAIS `DELETE /v3/contacts` ni la
+                    # blocklist globale : le compte Brevo est partage (E1).
+                    await _remove_from_brevo_list(original_email)
+            await db.commit()
+            if due:
+                logger.info(
+                    "Suppressions RGPD à échéance : %d fiche(s) anonymisée(s)", len(due)
+                )
+    except Exception as exc:  # noqa: BLE001 — cf. docstring
+        await _alert_job_failure(JOB_DAILY_CLIENT_DELETIONS, exc)
+
+
+async def _remove_from_brevo_list(email: str) -> None:
+    """Retrait de la liste Brevo dediee — best-effort : une panne du
+    fournisseur ne doit pas empecher l'effacement local, qui est ce que la
+    cliente a demande."""
+    try:
+        from app.services import brevo_contacts
+
+        await brevo_contacts.remove_from_list(email)
+    except Exception:  # noqa: BLE001 — cf. docstring
+        logger.exception("Retrait Brevo impossible après une suppression RGPD")
+
+
 def register_all_jobs(scheduler) -> None:
     """Enregistre les jobs planifies (fuseau Europe/Paris, cf. `app/main.py`)."""
     from apscheduler.triggers.cron import CronTrigger
@@ -271,5 +343,11 @@ def register_all_jobs(scheduler) -> None:
         run_nightly_database_backup,
         CronTrigger(hour=3, minute=0),
         id=JOB_NIGHTLY_DATABASE_BACKUP,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_daily_client_deletions,
+        CronTrigger(hour=4, minute=0),
+        id=JOB_DAILY_CLIENT_DELETIONS,
         replace_existing=True,
     )

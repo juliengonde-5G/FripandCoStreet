@@ -33,7 +33,7 @@ from app.models.database_backup import BackupStatus, DatabaseBackup
 from app.services import database_backup as database_backup_service
 from app.services.accounting_service import AccountingService
 from app.services.cashier_service import CashierService, serialize_cashier
-from app.services.client_service import ClientService
+from app.services.client_service import ClientService, _serialize_client
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.fiscal_closure import FiscalClosureService
 from app.services.fiscal_export import FiscalExportService
@@ -314,6 +314,18 @@ class PaymentsSettingsIn(BaseModel):
     exchange_retention_days: int = Field(default=90, ge=7, le=730)
 
 
+class RgpdSettingsIn(BaseModel):
+    """Reglages RGPD (PR10, L5) — fenetre de reflexion avant l'effacement
+    d'une fiche cliente.
+
+    Bornes 1-90 jours : en dessous d'un jour la demande ne serait plus
+    annulable (c'est tout l'interet du differe), au-dela de trois mois on
+    ne differe plus, on enterre.
+    """
+
+    deletion_delay_days: int = Field(default=30, ge=1, le=90)
+
+
 _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "shop": ShopSettingsIn,
     "fiscal": FiscalSettingsIn,
@@ -324,6 +336,7 @@ _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "targets": TargetsSettingsIn,
     "pos": PosSettingsIn,
     "payments": PaymentsSettingsIn,
+    "rgpd": RgpdSettingsIn,
 }
 
 
@@ -1157,6 +1170,46 @@ async def merge_clients(
     result = await service.merge(winner=winner, source=source, user_id=user.id)
     await db.commit()
     return result
+
+
+@router.post("/clients/{client_id}/deletion-request")
+async def request_client_deletion(
+    client_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Programme la suppression de la fiche (PR10/L5).
+
+    Rien n'est efface aujourd'hui : la fiche reste utilisable en caisse
+    jusqu'a la date d'effet (30 jours par defaut, reglage
+    `rgpd.deletion_delay_days`), la cliente recoit un accuse de reception,
+    et le cron de 04:00 solde la demande a echeance. `POST
+    …/anonymize` reste disponible pour l'effacement immediat.
+    """
+    service = ClientService(db)
+    client = await service.get_by_id(client_id)
+    if client is None:
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    await service.request_deletion(client=client, user_id=user.id)
+    await db.commit()
+    return {"client": _serialize_client(client)}
+
+
+@router.post("/clients/{client_id}/deletion-cancel")
+async def cancel_client_deletion(
+    client_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Annule une suppression programmee (PR10/L5) — 409 `not_requested`
+    s'il n'y en avait pas."""
+    service = ClientService(db)
+    client = await service.get_by_id(client_id)
+    if client is None:
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    await service.cancel_deletion(client=client, user_id=user.id)
+    await db.commit()
+    return {"client": _serialize_client(client)}
 
 
 @router.get("/clients/{client_id}/export")

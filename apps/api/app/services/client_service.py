@@ -23,7 +23,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from email_validator import EmailNotValidError, validate_email
@@ -42,6 +42,8 @@ from app.services.jet import (
     EVENT_BREVO_SYNCED,
     EVENT_CLIENT_ANONYMIZED,
     EVENT_CLIENT_CREATED,
+    EVENT_CLIENT_DELETION_CANCELLED,
+    EVENT_CLIENT_DELETION_REQUESTED,
     EVENT_CLIENT_EXPORTED,
     EVENT_CLIENT_LINKED,
     EVENT_CLIENT_MERGED,
@@ -52,6 +54,7 @@ from app.services.jet import (
     JournalService,
 )
 from app.services.receipt import apply_client_line, format_client_label
+from app.services.rgpd_email import build_deletion_request_email
 from app.version import CONSENT_POLICY_VERSION
 
 logger = logging.getLogger("fripco")
@@ -1184,6 +1187,14 @@ class ClientService:
         client.brevo_synced_at = None
         client.brevo_last_error = None
         client.anonymized_at = datetime.now(timezone.utc)
+        # PR10/L5 — une suppression immediate SOLDE une demande differee en
+        # cours : la fiche vient d'etre videe, il n'y a plus rien a
+        # supprimer a echeance. Sans cet effacement, le cron quotidien
+        # reverrait la fiche chaque nuit (il filtre certes sur
+        # `anonymized_at IS NULL`, mais le front afficherait encore un
+        # badge « Suppression programmee » sur une fiche deja anonyme).
+        # Vaut aussi pour l'anonymisation faite PAR le cron a echeance.
+        self._clear_deletion_request(client)
         self.db.add(
             Consent(
                 client_id=client.id,
@@ -1203,6 +1214,170 @@ class ClientService:
         )
         await self.db.flush()
         return client
+
+    # ------------------------------------------------------------------
+    # Suppression RGPD differee (PR10/L5)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _clear_deletion_request(client: Client) -> None:
+        """Remet la fiche a l'etat « aucune suppression en cours ».
+
+        Les trois champs bougent ensemble : une date d'effet sans
+        demandeur, ou l'inverse, serait un etat qu'aucun ecran ne sait
+        afficher — et que le cron interpreterait de travers.
+        """
+        client.deletion_requested_at = None
+        client.deletion_scheduled_for = None
+        client.deletion_requested_by_user_id = None
+
+    async def request_deletion(
+        self, *, client: Client, user_id: uuid.UUID | None
+    ) -> Client:
+        """Programme l'effacement de la fiche (PR10/L5).
+
+        Le RGPD donne un droit a l'effacement, pas un droit a l'effacement
+        INSTANTANE : un differe de 30 jours (reglage
+        `rgpd.deletion_delay_days`) laisse a la cliente le temps de se
+        raviser — « finalement je garde ma fiche » — et a la boutique celui
+        de constater qu'elle n'efface pas une fiche par erreur de clic. La
+        fiche reste PLEINEMENT utilisable en caisse jusqu'a la date
+        d'effet : la personne est toujours cliente.
+
+        Refus 409 : `already_requested` (une demande court deja — il faut
+        l'annuler pour en poser une autre) et `client_inactive` (fiche deja
+        anonymisee, ou absorbee par une fusion : il n'y a plus rien a
+        supprimer ici).
+        """
+        if client.anonymized_at is not None or client.merged_into_client_id is not None:
+            raise PosServiceError(
+                "Cette fiche n'est plus active : rien à supprimer.",
+                code="client_inactive",
+                status_code=409,
+            )
+        if client.deletion_requested_at is not None:
+            raise PosServiceError(
+                "Une suppression est déjà programmée pour cette fiche.",
+                code="already_requested",
+                status_code=409,
+            )
+
+        from app.services.settings_service import SettingsService
+
+        delay_days = await SettingsService(self.db).get_deletion_delay_days()
+        now = datetime.now(timezone.utc)
+        scheduled_for = now + timedelta(days=delay_days)
+        client.deletion_requested_at = now
+        client.deletion_scheduled_for = scheduled_for
+        client.deletion_requested_by_user_id = user_id
+        await self.db.flush()
+
+        # JET : jamais avale (CLAUDE.md). La date d'effet n'est pas une
+        # donnee personnelle ; le nom et l'adresse, eux, n'y figurent pas.
+        await JournalService(self.db).record(
+            EVENT_CLIENT_DELETION_REQUESTED,
+            user_id=user_id,
+            payload={
+                "client_id": str(client.id),
+                "scheduled_for": scheduled_for.isoformat(),
+            },
+        )
+        await self.db.flush()
+
+        # Information de la cliente — best-effort : une panne de la
+        # passerelle e-mail ne doit pas empecher d'enregistrer la demande
+        # (ce serait lui refuser son droit pour une raison technique).
+        await self._notify_deletion_requested(client, scheduled_for)
+        return client
+
+    async def cancel_deletion(
+        self, *, client: Client, user_id: uuid.UUID | None
+    ) -> Client:
+        """Annule une suppression programmee (PR10/L5) — 409 `not_requested`
+        s'il n'y en avait pas. C'est le geste qui donne son sens au differe :
+        tant que la date d'effet n'est pas atteinte, tout est reversible."""
+        if client.deletion_requested_at is None:
+            raise PosServiceError(
+                "Aucune suppression n'est programmée pour cette fiche.",
+                code="not_requested",
+                status_code=409,
+            )
+        self._clear_deletion_request(client)
+        await self.db.flush()
+        await JournalService(self.db).record(
+            EVENT_CLIENT_DELETION_CANCELLED,
+            user_id=user_id,
+            payload={"client_id": str(client.id)},
+        )
+        await self.db.flush()
+        return client
+
+    async def _notify_deletion_requested(
+        self, client: Client, scheduled_for: datetime
+    ) -> None:
+        """« Votre demande de suppression est enregistrée » — accuse de
+        reception envoye a la cliente, trace dans `communications`.
+
+        Sans e-mail sur la fiche (PR7/I3 : une cliente peut n'avoir qu'un
+        numero), il n'y a rien a envoyer : la vendeuse l'a informee au
+        comptoir, la demande est enregistree, on s'arrete la — pas de SMS
+        (CLAUDE.md).
+
+        L'envoi ET l'ecriture de la ligne `Communication` sont
+        best-effort et enveloppes ensemble : la demande, elle, est deja
+        enregistree et journalisee au JET.
+        """
+        if not client.email:
+            return
+        try:
+            from app.models.communication import (
+                Communication,
+                CommunicationChannel,
+                CommunicationKind,
+                CommunicationProvider,
+                CommunicationStatus,
+            )
+            from app.services.email_gateway import send_email
+            from app.services.settings_service import SettingsService
+
+            shop = await SettingsService(self.db).get("shop")
+            message = build_deletion_request_email(
+                to=client.email,
+                scheduled_for=scheduled_for,
+                shop=shop,
+            )
+            result = await send_email(message)
+            provider_map = {
+                "brevo": CommunicationProvider.brevo,
+                "smtp": CommunicationProvider.smtp,
+                "simulated": CommunicationProvider.simulated,
+            }
+            status_map = {
+                "sent": CommunicationStatus.sent,
+                "failed": CommunicationStatus.failed,
+                "simulated": CommunicationStatus.simulated,
+            }
+            self.db.add(
+                Communication(
+                    client_id=client.id,
+                    transaction_id=None,
+                    kind=CommunicationKind.rgpd,
+                    channel=CommunicationChannel.email,
+                    recipient=client.email,
+                    subject=message.subject,
+                    provider=provider_map.get(
+                        result.provider, CommunicationProvider.simulated
+                    ),
+                    status=status_map.get(result.status, CommunicationStatus.failed),
+                    provider_message_id=result.message_id,
+                    error=result.error,
+                )
+            )
+            await self.db.flush()
+        except Exception:  # noqa: BLE001 — cf. docstring
+            logger.exception(
+                "Accusé de réception de suppression non envoyé (client_id=%s)", client.id
+            )
 
     # ------------------------------------------------------------------
     # Fusion de deux fiches en double (PR10/L3)
@@ -1456,6 +1631,21 @@ def _serialize_client(client: Client) -> dict:
         "newsletter_optin": client.newsletter_optin,
         "created_at": client.created_at.isoformat() if client.created_at else None,
         "anonymized_at": client.anonymized_at.isoformat() if client.anonymized_at else None,
+        # PR10/L5 — suppression RGPD programmee. Les deux dates sont nulles
+        # tant qu'aucune demande n'est en cours ; `deletion_scheduled_for`
+        # est la date d'effet affichee au manager (« Suppression programmee
+        # le JJ/MM/AAAA ») et celle que le cron quotidien compare a l'heure
+        # courante. La fiche reste pleinement utilisable jusque-la.
+        "deletion_requested_at": (
+            client.deletion_requested_at.isoformat()
+            if client.deletion_requested_at
+            else None
+        ),
+        "deletion_scheduled_for": (
+            client.deletion_scheduled_for.isoformat()
+            if client.deletion_scheduled_for
+            else None
+        ),
         # PR10/L3 — renseigne quand cette fiche a ete ABSORBEE par une
         # autre : le front ouvre alors la fiche conservee, avec un bandeau.
         # L'URL de l'ancienne fiche continue donc de mener quelque part.

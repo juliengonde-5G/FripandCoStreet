@@ -162,8 +162,35 @@ def upgrade() -> None:
         """
     )
 
+    # ------------------------------------------------------------------
+    # `communications.kind` : nouvelle valeur `rgpd` (L5).
+    #
+    # La suppression differee envoie a la cliente un accuse de reception
+    # (« Votre demande de suppression est enregistree ») et en garde la
+    # preuve dans `communications`, comme tout envoi (E7/PR3). Cette table
+    # ne connaissait qu'un seul type de message, le ticket : il faut donc
+    # etendre l'enumeration, sinon l'accuse de reception ne peut tout
+    # simplement pas etre trace. Aucune colonne, aucune donnee, aucun
+    # trigger d'inaltérabilité n'est touche ici — `communications` est une
+    # table d'exploitation.
+    # ------------------------------------------------------------------
+    op.execute("ALTER TYPE communication_kind ADD VALUE IF NOT EXISTS 'rgpd'")
+
 
 def downgrade() -> None:
+    # Retrait de la valeur `rgpd` : PostgreSQL ne sait pas retirer une
+    # valeur d'une enumeration, il faut donc recreer le type. L'operation
+    # ECHOUE VOLONTAIREMENT s'il reste des accuses de reception traces
+    # (`kind = 'rgpd'`) : on ne supprime pas une preuve d'envoi pour faire
+    # passer un downgrade.
+    op.execute("ALTER TYPE communication_kind RENAME TO communication_kind_old")
+    op.execute("CREATE TYPE communication_kind AS ENUM ('receipt')")
+    op.execute(
+        "ALTER TABLE communications ALTER COLUMN kind TYPE communication_kind "
+        "USING kind::text::communication_kind"
+    )
+    op.execute("DROP TYPE communication_kind_old")
+
     # Retour a la fonction de 0003 : aucun UPDATE, aucun DELETE.
     op.execute(
         """
