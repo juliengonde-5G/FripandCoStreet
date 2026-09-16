@@ -140,7 +140,11 @@ async def _truncate() -> None:
                 "cash_movements, payment_attempts, receipts, "
                 "clients, consents, communications, "
                 "accounting_exports, accounting_export_lines, fiscal_closures, "
-                "database_backups, cashiers, invoices "
+                "database_backups, cashiers, invoices, "
+                # PR9 — `failed_payments` tomberait deja par CASCADE (FK sur
+                # `payment_attempts`), `sumup_exchanges` non : elle n'a
+                # aucune cle etrangere, il faut la nommer.
+                "failed_payments, sumup_exchanges "
                 "RESTART IDENTITY CASCADE"
             )
         )

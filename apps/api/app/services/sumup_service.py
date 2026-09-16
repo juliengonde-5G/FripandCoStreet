@@ -215,6 +215,20 @@ class ExchangeRecord:
     extra: dict = field(default_factory=dict)
 
 
+# Une adresse e-mail n'a rien a faire dans `sumup_exchanges` (contrat K1 :
+# aucune donnee personnelle). `redact_sumup_error` ne la traite pas — c'est
+# un nettoyeur de secrets de paiement, partage avec les logs PR2 — donc on
+# ajoute cette passe ici, au seul endroit qui persiste du texte SumUp.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def redact_exchange_text(text: str | None, *, max_len: int = 500) -> str | None:
+    """Redige un texte avant journalisation : secrets puis adresses e-mail."""
+    if not text:
+        return None
+    return _EMAIL_RE.sub("<EMAIL_REDACTED>", redact_sumup_error(text, max_len=max_len))
+
+
 def _exchange_url_path(url: str) -> str:
     """Chemin seul d'une URL — jamais la query (elle pourrait porter un secret)."""
     return urlsplit(url).path or "/"
@@ -241,10 +255,10 @@ def _redact_payload(value, *, depth: int = 0):
     if isinstance(value, (list, tuple)):
         return [_redact_payload(v, depth=depth + 1) for v in value]
     if isinstance(value, str):
-        return redact_sumup_error(value, max_len=1000)
+        return redact_exchange_text(value, max_len=1000) or ""
     if isinstance(value, (int, float, bool)) or value is None:
         return value
-    return redact_sumup_error(str(value), max_len=1000)
+    return redact_exchange_text(str(value), max_len=1000) or ""
 
 
 def _truncate_payload(payload):
@@ -277,7 +291,7 @@ def _response_payload(resp: httpx.Response) -> tuple[dict | None, bool]:
     try:
         parsed = resp.json()
     except Exception:  # noqa: BLE001 — corps non-JSON : on garde le texte brut redige
-        return {"_text": redact_sumup_error(resp.text, max_len=1000)}, True
+        return {"_text": redact_exchange_text(resp.text, max_len=1000)}, True
     if not isinstance(parsed, (dict, list)):
         parsed = {"_value": parsed}
     redacted = _redact_payload(parsed)
@@ -483,7 +497,7 @@ class SumUpService:
             record.retry_count = max(counter["n"], 1)
             record.is_error = True
             record.error_type = _exception_error_type(exc)
-            record.error_message = redact_sumup_error(
+            record.error_message = redact_exchange_text(
                 f"{type(exc).__name__}: {exc}", max_len=500
             )
             _log.error(
@@ -504,7 +518,7 @@ class SumUpService:
             body = resp.text if resp.content else ""
             record.is_error = True
             record.error_type = "http_5xx" if resp.status_code >= 500 else "http_4xx"
-            record.error_message = redact_sumup_error(body, max_len=500)
+            record.error_message = redact_exchange_text(body, max_len=500)
             _log.warning(
                 "SumUp %s %s -> HTTP %d : %s",
                 operation,
