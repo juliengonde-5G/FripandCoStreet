@@ -78,6 +78,12 @@ import type {
 } from "./types";
 import type { BytesWithHeaders, FetchAPIOptions } from "./api";
 import type { FailedPayment, PaymentFailuresReport, SumupExchange, SumupOperation } from "./payments";
+import type {
+  HardwareCompatibilityItem,
+  Monitoring,
+  MonitoringIntegrity,
+  MonitoringRecentError,
+} from "./monitoring";
 
 /** Version de la politique de consentement (E8) — même constante que le
  * backend (`CONSENT_POLICY_VERSION`), horodate chaque ligne du journal. */
@@ -2819,6 +2825,204 @@ function decorateSettings(key: string, value: unknown): unknown {
   return value;
 }
 
+// ---------------------------------------------------------------------------
+// PR12 — supervision/matériel (docs/ARCHITECTURE_PR12.md §1, N2/N4/N5)
+//
+// Trois routes de lecture simulées : la photographie technique, son
+// recalcul d'intégrité, et la liste du matériel compatible. Plus un
+// interrupteur de panne, qui existe pour montrer la « Référence : … »
+// d'une erreur serveur sans casser quoi que ce soit de réel : on pose
+// `localStorage.fripco_demo_500` sur un préfixe de chemin (par exemple
+// `/api/pos/transactions`) et toute requête qui commence par ce préfixe
+// répond 500, avec une référence qui atterrit aussitôt dans la liste des
+// dernières erreurs de la supervision.
+// ---------------------------------------------------------------------------
+
+const DEMO_FAILURE_KEY = "fripco_demo_500";
+
+/** Erreurs récentes du mode démo : une panne d'hier + celles que
+ * l'interrupteur ci-dessus provoque pendant la démonstration. */
+const monitoringRecentErrors: MonitoringRecentError[] = [
+  {
+    at: new Date(Date.now() - 38 * 60_000).toISOString(),
+    request_id: "3f9c21ab7d0e4b16",
+    method: "POST",
+    path: "/api/pos/payments/cb/initiate",
+    status: 500,
+    error_type: "TimeoutError",
+  },
+];
+
+/** Intégrités : `null` tant que personne n'a cliqué « Vérifier
+ * maintenant » — comme le vrai serveur, qui ne relit pas les chaînes à
+ * l'ouverture de la page. */
+let monitoringIntegrity: MonitoringIntegrity | null = null;
+
+function demoFailurePrefix(): string | null {
+  try {
+    const value = typeof localStorage !== "undefined" ? localStorage.getItem(DEMO_FAILURE_KEY) : null;
+    return value && value.trim() ? value.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Panne simulée : 500 avec une référence, poussée dans le tampon des
+ * dernières erreurs (au plus cinquante, comme le vrai tampon). */
+function failDemoServerError(method: string, path: string): never {
+  const requestId = Math.random().toString(16).slice(2).padEnd(16, "0").slice(0, 16);
+  monitoringRecentErrors.unshift({
+    at: new Date().toISOString(),
+    request_id: requestId,
+    method,
+    path,
+    status: 500,
+    error_type: "DemoError",
+  });
+  monitoringRecentErrors.splice(50);
+  const error = new ApiError(500, "Erreur interne du serveur.", "internal_error");
+  error.requestId = requestId;
+  error.body = { detail: "Erreur interne du serveur.", request_id: requestId, error_type: "DemoError" };
+  throw error;
+}
+
+function buildMonitoringSnapshot(): Monitoring {
+  const lastBackupAt = new Date(Date.now() - 51 * 3600_000).toISOString();
+  return {
+    generated_at: nowIso(),
+    app: {
+      version: "0.13.0",
+      build_sha: "a1b2c3d",
+      build_date: new Date(Date.now() - 6 * 86_400_000).toISOString(),
+      environment: "demo",
+      expected_db_revision: "0011",
+      current_db_revision: "0011",
+      db_revision_ok: true,
+      uptime_seconds: 3 * 86_400 + 5 * 3600,
+    },
+    database: { ok: true, latency_ms: 4, size_bytes: 78_643_200, tables_count: 27 },
+    backups: {
+      // Plus de 36 h depuis la dernière sauvegarde réussie : c'est ce qui
+      // met la démonstration en « À surveiller ».
+      last: { created_at: lastBackupAt, status: "success", size_bytes: 12_582_912 },
+      nightly_enabled: true,
+      dir_free_bytes: 42_949_672_960,
+      stale: true,
+    },
+    jobs: [
+      {
+        name: "daily_fiscal_close_guard",
+        cron: "59 23 * * *",
+        next_run_at: new Date(Date.now() + 9 * 3600_000).toISOString(),
+        last_run: { at: new Date(Date.now() - 15 * 3600_000).toISOString(), status: "ok", detail: null },
+      },
+      {
+        name: "monthly_fiscal_closure",
+        cron: "15 0 1 * *",
+        next_run_at: new Date(Date.now() + 11 * 86_400_000).toISOString(),
+        last_run: { at: new Date(Date.now() - 19 * 86_400_000).toISOString(), status: "ok", detail: null },
+      },
+      { name: "annual_fiscal_closure", cron: "30 0 1 1 *", next_run_at: null, last_run: null },
+      {
+        name: "nightly_database_backup",
+        cron: "0 3 * * *",
+        next_run_at: new Date(Date.now() + 5 * 3600_000).toISOString(),
+        last_run: {
+          at: new Date(Date.now() - 20 * 3600_000).toISOString(),
+          status: "failed",
+          detail: "Espace disque insuffisant sur le volume de sauvegarde.",
+        },
+      },
+      {
+        name: "daily_client_deletions",
+        cron: "0 4 * * *",
+        next_run_at: new Date(Date.now() + 6 * 3600_000).toISOString(),
+        last_run: { at: new Date(Date.now() - 19 * 3600_000).toISOString(), status: "ok", detail: null },
+      },
+    ],
+    integrity: monitoringIntegrity,
+    external: {
+      sumup: {
+        configured: true,
+        reader_configured: true,
+        last_ping: { ready: true, at: new Date(Date.now() - 4 * 60_000).toISOString() },
+      },
+      brevo: { configured: true },
+      openweather: { configured: true, cache_age_seconds: 420 },
+    },
+    printer: { mode: settings.hardware.printer_mode, online: true, latency_ms: 18 },
+    queues: { failed_payments_pending: failedPayments.filter((p) => p.status === "pending").length, sumup_exchange_errors_24h: 2, clients_deletion_due: 0 },
+    recent_errors: monitoringRecentErrors.slice(0, 50),
+    // Sauvegarde périmée + erreurs récentes : « À surveiller », l'état le
+    // plus instructif à montrer.
+    status: "warning",
+  };
+}
+
+function computeMonitoringIntegrity(): MonitoringIntegrity {
+  const checkedAt = nowIso();
+  monitoringIntegrity = {
+    jet: { valid: true, count: jetEvents.length, checked_at: checkedAt },
+    fiscal: { valid: true, checked: transactions.length, checked_at: checkedAt },
+    closures: { valid: true, checked: fiscalClosures.length, checked_at: checkedAt },
+  };
+  logJet("fiscal.integrity_checked", { source: "monitoring" });
+  return monitoringIntegrity;
+}
+
+/** Matériel compatible (N4) — même liste que côté serveur. */
+const hardwareCompatibility: HardwareCompatibilityItem[] = [
+  {
+    category: "Tablette de caisse",
+    model: "Tablette Android + Chrome",
+    connection: "—",
+    status: "tested",
+    notes: "Configuration de référence de la boutique.",
+  },
+  {
+    category: "Imprimante ticket",
+    model: "MUNBYN 047P (ESC/POS 80 mm)",
+    connection: "Réseau (port 9100)",
+    status: "tested",
+    notes: "Raccordement recommandé : l'impression part du serveur.",
+  },
+  {
+    category: "Imprimante ticket",
+    model: "MUNBYN 047P (ESC/POS 80 mm)",
+    connection: "USB sur la tablette",
+    status: "tested",
+    notes: "À associer une fois depuis l'onglet Matériel.",
+  },
+  {
+    category: "Tiroir-caisse",
+    model: "Safescan SD-4141",
+    connection: "Câble RJ-12 sur l'imprimante",
+    status: "tested",
+    notes: "Ouvert par l'imprimante à chaque encaissement en espèces.",
+  },
+  {
+    category: "Terminal de paiement",
+    model: "SumUp Solo",
+    connection: "Wi-Fi (compte SumUp)",
+    status: "tested",
+    notes: "Envoi direct sur le terminal si son identifiant est renseigné.",
+  },
+  {
+    category: "Tablette de caisse",
+    model: "iPad / Safari",
+    connection: "—",
+    status: "not_supported",
+    notes: "Ni impression USB, ni installation de Chrome : à ne pas prévoir.",
+  },
+  {
+    category: "Douchette",
+    model: "Douchette USB (clavier)",
+    connection: "USB",
+    status: "recommended",
+    notes: "Sans catalogue d'articles, elle n'apporte rien pour l'instant.",
+  },
+];
+
 export async function mockFetchAPI<T = unknown>(
   endpoint: string,
   options?: FetchAPIOptions,
@@ -2831,6 +3035,10 @@ export async function mockFetchAPI<T = unknown>(
   await new Promise((r) => setTimeout(r, 120));
 
   let m: RegExpMatchArray | null;
+
+  // PR12 (N5) — panne simulée : voir le bloc « supervision/matériel ».
+  const failurePrefix = demoFailurePrefix();
+  if (failurePrefix && path.startsWith(failurePrefix)) failDemoServerError(method, path);
 
   // --- Caisse espèces -------------------------------------------------
   if (path === "/api/pos/drawer/current" && method === "GET") {
@@ -4382,6 +4590,21 @@ export async function mockFetchAPI<T = unknown>(
     const page = pool.slice(0, limit);
     const next = page.length === limit ? page[page.length - 1]?.seq : null;
     return { events: page, next_before_seq: next } as unknown as T;
+  }
+
+  // --- PR12 — supervision technique et matériel compatible (N2/N4) --------
+  if (path === "/api/admin/monitoring" && method === "GET") {
+    if (query.get("check") === "1") computeMonitoringIntegrity();
+    return buildMonitoringSnapshot() as unknown as T;
+  }
+
+  if (path === "/api/admin/monitoring/check" && method === "POST") {
+    computeMonitoringIntegrity();
+    return buildMonitoringSnapshot() as unknown as T;
+  }
+
+  if (path === "/api/hardware/compatibility" && method === "GET") {
+    return { items: hardwareCompatibility } as unknown as T;
   }
 
   fail(501, `Route non simulée en mode démo : ${method} ${path}`, "mock_not_implemented");

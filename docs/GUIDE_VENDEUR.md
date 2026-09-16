@@ -167,6 +167,12 @@ disponible à l'écran et peut toujours partir par e-mail.
 Touche **Réessayer** à côté du message d'erreur. Si ça persiste, imprime le
 ticket, ou réessaie plus tard depuis **Tickets du jour**.
 
+## En cas d'erreur, note la référence
+Quand un message d'erreur affiche **Référence : …**, c'est que la panne
+vient du serveur ou du réseau : recopie cette suite de lettres et de
+chiffres (ou touche **Copier**) et transmets-la — elle permet de retrouver
+exactement ce qui s'est passé. Sans référence, le message suffit.
+
 ## Se déconnecter
 Touche **Administration** en haut de l'écran, puis **Se déconnecter**.
 
