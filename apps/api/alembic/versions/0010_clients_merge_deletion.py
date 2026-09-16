@@ -6,14 +6,16 @@
 #     `deletion_scheduled_for` et `deletion_requested_by_user_id`.
 #
 # Rien ici n'est fiscal. `clients` est une table d'EXPLOITATION (donnees
-# personnelles) : aucun trigger d'immuabilite n'est pose ni touche, et les
-# protections existantes restent entieres :
-#   - `trg_protect_consent` sur `consents` (registre append-only, 0003) ;
-#   - `trg_protect_signed_transaction` sur `transactions` (0002/0003) — la
-#     fusion se contente de repointer `transactions.client_id`, seule
-#     colonne exemptee du trigger et absente du payload signe
-#     (`services/fiscal.py::_transaction_payload`). Aucune vente n'est donc
-#     modifiee au sens fiscal, et aucune n'est jamais supprimee.
+# personnelles) :
+#   - `trg_protect_signed_transaction` sur `transactions` (0002/0003) n'est
+#     PAS touche — la fusion se contente de repointer
+#     `transactions.client_id`, seule colonne exemptee du trigger et absente
+#     du payload signe (`services/fiscal.py::_transaction_payload`). Aucune
+#     vente n'est donc modifiee au sens fiscal, et aucune n'est jamais
+#     supprimee ;
+#   - `trg_protect_consent` sur `consents` (registre append-only, 0003) voit
+#     sa fonction reecrite pour la meme raison et sous les memes garanties :
+#     voir le bloc dedie dans `upgrade()`.
 #
 # La cle etrangere `merged_into_client_id -> clients.id` est auto-referente
 # et volontairement SANS `ON DELETE` : on ne supprime jamais une ligne
@@ -23,6 +25,11 @@
 # (`WHERE deletion_scheduled_for IS NOT NULL`) : le cron quotidien ne
 # cherche que les rares fiches en attente, il n'a aucune raison de faire
 # grossir l'index avec l'immense majorite des fiches a NULL.
+#
+# Une exemption cible est posee sur le trigger append-only `consents` : la
+# fusion doit repointer `consents.client_id` (le RATTACHEMENT) sans jamais
+# toucher au contenu du consentement — meme raisonnement, et meme forme,
+# que l'exemption obtenue par PR3 sur `transactions.client_id`.
 #
 # Migration REVERSIBLE (comme 0006-0009) : le downgrade retire les index
 # puis les colonnes. Chaque commande SQL est executee separement
@@ -109,8 +116,66 @@ def upgrade() -> None:
         postgresql_where=sa.text("deletion_scheduled_for IS NOT NULL"),
     )
 
+    # ------------------------------------------------------------------
+    # `consents` : exemption de `client_id`, strictement calquee sur celle
+    # obtenue par PR3 sur `transactions`.
+    #
+    # Le registre est append-only (0003) : le trigger refuse AUJOURD'HUI
+    # tout UPDATE, quelle que soit la colonne. Or la fusion doit repointer
+    # les consentements de la fiche absorbee vers la fiche conservee, sans
+    # quoi l'historique serait perdu ou duplique. Le rattachement n'est pas
+    # le CONTENU du consentement : la finalite, le sens (accorde/retire),
+    # la source, la version de politique, l'auteur, la note et la date
+    # restent rigoureusement immuables — c'est ce que verifie la nouvelle
+    # fonction, colonne par colonne. Seuls `client_id` (le rattachement) et
+    # `updated_at` (horodatage technique, deja hors perimetre sur
+    # `transactions`) peuvent bouger. La SUPPRESSION reste interdite sans
+    # condition.
+    #
+    # Autrement dit : on ne reecrit jamais un consentement, on constate que
+    # les deux fiches n'en faisaient qu'une.
+    # ------------------------------------------------------------------
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION fripco_protect_consent()
+        RETURNS trigger AS $$
+        BEGIN
+          IF TG_OP = 'DELETE' THEN
+            RAISE EXCEPTION 'NF525: registre des consentements append-only (suppression interdite)';
+          END IF;
+          IF OLD.id IS DISTINCT FROM NEW.id OR
+             OLD.purpose IS DISTINCT FROM NEW.purpose OR
+             OLD.granted IS DISTINCT FROM NEW.granted OR
+             OLD.source IS DISTINCT FROM NEW.source OR
+             OLD.policy_version IS DISTINCT FROM NEW.policy_version OR
+             OLD.recorded_by_user_id IS DISTINCT FROM NEW.recorded_by_user_id OR
+             OLD.note IS DISTINCT FROM NEW.note OR
+             OLD.created_at IS DISTINCT FROM NEW.created_at
+          THEN
+            RAISE EXCEPTION 'NF525: registre des consentements append-only (modification interdite)';
+          END IF;
+          -- Seul le rattachement (`client_id`) a pu changer : fusion de
+          -- deux fiches en double (PR10/L3).
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+
 
 def downgrade() -> None:
+    # Retour a la fonction de 0003 : aucun UPDATE, aucun DELETE.
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION fripco_protect_consent()
+        RETURNS trigger AS $$
+        BEGIN
+          RAISE EXCEPTION 'NF525: registre des consentements append-only (modification/suppression interdite)';
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+
     # Reversible sans perte fiscale : ces colonnes ne portent que des
     # metadonnees d'exploitation. Les fiches absorbees redeviennent
     # simplement des fiches ordinaires (leurs ventes restent rattachees a
