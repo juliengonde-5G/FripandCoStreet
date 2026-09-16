@@ -19,6 +19,7 @@ import Link from "next/link";
 
 import { api, ApiError } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { fetchWeather, isWeatherAvailable, type Weather } from "@/lib/reports";
 import type { DashboardDay, DashboardResponse } from "@/lib/types";
 
 /** Intervalle de rafraîchissement automatique (H4). */
@@ -154,6 +155,115 @@ function TargetProgress({ pct, target, label }: { pct: number; target: string; l
   );
 }
 
+// ---------------------------------------------------------------------------
+// Météo du jour (PR11, M3) — à côté du chiffre du jour
+// ---------------------------------------------------------------------------
+
+/**
+ * Glyphe météo dessiné sur place, choisi d'après le code d'icône
+ * OpenWeather (« 01d », « 10n »…).
+ *
+ * Volontairement pas l'image distante `openweathermap.org/img/wn/…` : le
+ * back-office tourne sur la tablette du comptoir, parfois sans accès
+ * sortant vers ce domaine, et une icône manquante vaudrait un carré vide
+ * au milieu du chiffre du jour. Le dessin local s'affiche toujours, à
+ * l'impression comprise, et ne demande aucune configuration de domaine.
+ */
+function WeatherGlyph({ code }: { code: string }) {
+  const family = (code || "").slice(0, 2);
+  const night = code.endsWith("n");
+  const sun = (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </>
+  );
+  const moon = <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />;
+  const cloud = <path d="M7 19h10a4 4 0 0 0 .3-8A6 6 0 0 0 5.7 12 3.5 3.5 0 0 0 7 19z" />;
+  const drops = <path d="M9 20.5 8 22.5M13 20.5 12 22.5M17 20.5 16 22.5" />;
+
+  let shape: React.ReactNode;
+  if (family === "01") shape = night ? moon : sun;
+  else if (family === "02" || family === "03" || family === "04") shape = cloud;
+  else if (family === "09" || family === "10")
+    shape = (
+      <>
+        {cloud}
+        {drops}
+      </>
+    );
+  else if (family === "11")
+    shape = (
+      <>
+        {cloud}
+        <path d="M13 13l-3 4h4l-3 4" />
+      </>
+    );
+  else if (family === "13")
+    shape = (
+      <>
+        {cloud}
+        <path d="M9 21h.01M13 21h.01M17 21h.01" />
+      </>
+    );
+  else if (family === "50") shape = <path d="M3 8h18M3 12h18M6 16h12M8 20h8" />;
+  else shape = cloud;
+
+  return (
+    <svg
+      width={36}
+      height={36}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+      className="flex-shrink-0 text-fc-primary"
+    >
+      {shape}
+    </svg>
+  );
+}
+
+function temperatureLabel(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return `${Math.round(value)} °C`;
+}
+
+/**
+ * Météo locale du jour (M3). Un agrément, jamais une donnée métier :
+ * indisponible, elle se replie sur une ligne discrète avec la raison
+ * courte renvoyée par le serveur, et n'empêche rien d'autre de s'afficher.
+ */
+function WeatherWidget({ weather }: { weather: Weather | null }) {
+  if (!weather) return null;
+  if (!isWeatherAvailable(weather)) {
+    return (
+      <p className="text-xs text-fc-ink-mute">
+        Météo indisponible
+        {weather.reason ? ` — ${weather.reason}` : ""}
+      </p>
+    );
+  }
+  return (
+    <div className="flex items-center gap-3 rounded-fc border border-fc-line px-3 py-2">
+      <WeatherGlyph code={weather.icon} />
+      <div className="min-w-0">
+        <div className="font-mono text-lg tabular-nums leading-none text-fc-ink">
+          {temperatureLabel(weather.temp)}
+        </div>
+        <div className="mt-1 truncate text-xs text-fc-ink-soft first-letter:uppercase">{weather.description}</div>
+        <div className="mt-0.5 truncate text-[11px] text-fc-ink-mute">
+          {weather.city} · {temperatureLabel(weather.temp_min)} / {temperatureLabel(weather.temp_max)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="rounded-fc border border-fc-line p-3">
@@ -240,6 +350,9 @@ function SevenDayChart({ days }: { days: DashboardDay[] }) {
 
 export default function DashboardHome() {
   const [data, setData] = useState<DashboardResponse | null>(null);
+  // PR11 (M3) — météo locale, chargée à part : une panne météo ne doit
+  // jamais empêcher le tableau de bord de s'afficher.
+  const [weather, setWeather] = useState<Weather | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Évite de repasser l'écran en « Chargement… » à chaque rafraîchissement
@@ -251,6 +364,12 @@ export default function DashboardHome() {
       const result = await api.get<DashboardResponse>("/api/reports/dashboard");
       setData(result);
       setError(null);
+      // Jamais dans le `try` du tableau de bord : une météo en échec
+      // (route absente d'un backend plus ancien, réseau coupé) se solde par
+      // l'absence de widget, pas par un bandeau d'erreur sur la page.
+      void fetchWeather()
+        .then(setWeather)
+        .catch(() => setWeather(null));
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "Impossible de charger le tableau de bord.");
     } finally {
@@ -312,19 +431,24 @@ export default function DashboardHome() {
             {/* ----------------------------------------------- Aujourd'hui */}
             <Panel title="Aujourd'hui" subtitle={formatDate(parseDay(today.date))}>
               <div className="space-y-4">
-                <div>
-                  <div className="font-mono text-4xl font-semibold tabular-nums leading-none text-fc-ink sm:text-5xl">
-                    {euros(today.net)}
+                {/* PR11 (M3) : la météo se pose à côté du chiffre du jour,
+                    et passe dessous sur un écran étroit. */}
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="font-mono text-4xl font-semibold tabular-nums leading-none text-fc-ink sm:text-5xl">
+                      {euros(today.net)}
+                    </div>
+                    <div className="mt-1.5 text-sm text-fc-ink-soft">
+                      {today.sales_count} {plural(today.sales_count, "vente")}
+                      {today.refunds_count > 0 && (
+                        <>
+                          {" · "}
+                          {today.refunds_count} {plural(today.refunds_count, "annulation")}
+                        </>
+                      )}
+                    </div>
                   </div>
-                  <div className="mt-1.5 text-sm text-fc-ink-soft">
-                    {today.sales_count} {plural(today.sales_count, "vente")}
-                    {today.refunds_count > 0 && (
-                      <>
-                        {" · "}
-                        {today.refunds_count} {plural(today.refunds_count, "annulation")}
-                      </>
-                    )}
-                  </div>
+                  <WeatherWidget weather={weather} />
                 </div>
 
                 {dailyTarget > 0 ? (

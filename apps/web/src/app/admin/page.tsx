@@ -21,9 +21,22 @@ import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/api";
+import {
+  DEFAULT_WEEKDAY_OPEN,
+  WEEKDAY_LABELS,
+  fetchCahierConfig,
+  updateCahierConfig,
+} from "@/lib/cahier";
 import { downloadFile } from "@/lib/download";
 import { formatCurrency, formatDateTime } from "@/lib/format";
 import { kickDrawer } from "@/lib/printing";
+import {
+  fetchWeather,
+  fetchWeatherSettings,
+  isWeatherAvailable,
+  saveWeatherSettings,
+  type WeatherSettings,
+} from "@/lib/reports";
 import {
   TVA_RATES,
   type CbStatusConfig,
@@ -111,6 +124,10 @@ function AdminTabs() {
           <ShopSettingsCard />
           <FiscalSettingsCard />
           <TargetsCard />
+          {/* PR11 (M5) — jours d'ouverture (répartition de l'objectif du
+              mois) et localisation de la météo. */}
+          <OpeningDaysCard />
+          <WeatherCard />
           <ReceiptSettingsCard />
           {/* PR9 (K6) — installation de l'application sur la tablette. */}
           <AppInstallCard />
@@ -497,6 +514,234 @@ function TargetsCard() {
 // ---------------------------------------------------------------------------
 // Pied de ticket
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Jours d'ouverture (PR11, M2/M5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sept cases, lundi → dimanche. C'est sur ces jours-là que l'objectif du
+ * mois est réparti à plat : un jour décoché porte un objectif nul et n'est
+ * pas compté dans le diviseur. Modifier ce réglage ne réécrit jamais un
+ * jour déjà lu dans le cahier (son objectif y est figé).
+ */
+function OpeningDaysCard() {
+  const [days, setDays] = useState<boolean[]>(DEFAULT_WEEKDAY_OPEN);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchCahierConfig()
+      .then((config) => setDays(config.weekday_open))
+      .catch((err) =>
+        setError(err instanceof ApiError ? err.detail : "Impossible de charger les jours d'ouverture."),
+      )
+      .finally(() => setLoading(false));
+  }, []);
+
+  const toggle = (index: number): void => {
+    setDays((current) => current.map((open, i) => (i === index ? !open : open)));
+    setSaved(false);
+  };
+
+  const handleSave = async (): Promise<void> => {
+    setSaving(true);
+    setError(null);
+    try {
+      const config = await updateCahierConfig(days);
+      setDays(config.weekday_open);
+      setSaved(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openCount = days.filter(Boolean).length;
+
+  return (
+    <Card
+      title="Jours d'ouverture"
+      subtitle="L'objectif du mois est réparti à plat sur ces jours ; un jour fermé porte un objectif nul."
+    >
+      {loading ? (
+        <p className="text-sm text-fc-ink-soft">Chargement…</p>
+      ) : (
+        <div className="space-y-4">
+          <ErrorNotice message={error} />
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+            {WEEKDAY_LABELS.map((label, index) => (
+              <label
+                key={label}
+                className={`flex min-h-touch cursor-pointer items-center gap-2 rounded-fc border px-3 py-2 text-sm transition-colors ${
+                  days[index]
+                    ? "border-fc-primary/40 bg-fc-primary-soft text-fc-ink"
+                    : "border-fc-line text-fc-ink-soft"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={days[index]}
+                  onChange={() => toggle(index)}
+                  className="h-4 w-4 min-h-0 min-w-0 accent-fc-primary"
+                />
+                <span className="truncate">{label}</span>
+              </label>
+            ))}
+          </div>
+          <p className="text-sm text-fc-ink-soft">
+            {openCount} {openCount > 1 ? "jours ouverts" : "jour ouvert"} par semaine.
+          </p>
+          <div className="flex items-center gap-3">
+            <Button onClick={() => void handleSave()} disabled={saving}>
+              {saving ? "Enregistrement…" : "Enregistrer"}
+            </Button>
+            <SavedNotice show={saved} />
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Météo (PR11, M3)
+// ---------------------------------------------------------------------------
+
+const EMPTY_WEATHER_SETTINGS: WeatherSettings = { city: "", lat: null, lon: null };
+
+/** Champ de coordonnée : vide = « non renseignée », jamais zéro par défaut. */
+function coordinateValue(value: number | null): string {
+  return value === null || value === undefined || Number.isNaN(value) ? "" : String(value);
+}
+
+function parseCoordinate(raw: string): number | null {
+  const trimmed = raw.trim().replace(",", ".");
+  if (!trimmed) return null;
+  const parsed = Number.parseFloat(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Localisation de la météo affichée sur l'accueil et dans le cahier.
+ *
+ * La clé OpenWeather n'est PAS un réglage : c'est un secret, donc une
+ * variable d'environnement (`OPENWEATHER_API_KEY`). L'écran en affiche
+ * l'état — « configurée » ou « absente » — jamais la valeur.
+ */
+function WeatherCard() {
+  const [form, setForm] = useState<WeatherSettings>(EMPTY_WEATHER_SETTINGS);
+  const [keyConfigured, setKeyConfigured] = useState<boolean | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchWeatherSettings()
+      .then((data) => {
+        setForm({ ...EMPTY_WEATHER_SETTINGS, ...data });
+        if (typeof data.api_key_configured === "boolean") setKeyConfigured(data.api_key_configured);
+      })
+      .catch((err) =>
+        setError(err instanceof ApiError ? err.detail : "Impossible de charger les réglages météo."),
+      )
+      .finally(() => setLoading(false));
+    // Relevé courant : confirme d'un coup d'œil que la ville saisie répond,
+    // et sert de repli pour l'état de la clé sur un backend qui ne le dit pas.
+    fetchWeather()
+      .then((weather) => {
+        if (isWeatherAvailable(weather)) {
+          setPreview(`${weather.city} — ${weather.description}, ${Math.round(weather.temp)} °C`);
+          setKeyConfigured((current) => current ?? true);
+        } else {
+          setPreview(weather.reason ? `Météo indisponible — ${weather.reason}` : "Météo indisponible");
+        }
+      })
+      .catch(() => setPreview(null));
+  }, []);
+
+  const handleSave = async (): Promise<void> => {
+    setSaving(true);
+    setError(null);
+    try {
+      const data = await saveWeatherSettings(form);
+      setForm({ ...EMPTY_WEATHER_SETTINGS, ...data });
+      if (typeof data.api_key_configured === "boolean") setKeyConfigured(data.api_key_configured);
+      setSaved(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card
+      title="Météo"
+      subtitle="Ville relevée à côté du chiffre du jour et figée chaque matin dans le cahier."
+    >
+      {loading ? (
+        <p className="text-sm text-fc-ink-soft">Chargement…</p>
+      ) : (
+        <div className="space-y-4">
+          <ErrorNotice message={error} />
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Input
+              label="Ville"
+              value={form.city}
+              placeholder="Ville de la boutique"
+              onChange={(e) => {
+                setForm((f) => ({ ...f, city: e.target.value }));
+                setSaved(false);
+              }}
+            />
+            <Input
+              label="Latitude (facultatif)"
+              inputMode="decimal"
+              value={coordinateValue(form.lat)}
+              onChange={(e) => {
+                setForm((f) => ({ ...f, lat: parseCoordinate(e.target.value) }));
+                setSaved(false);
+              }}
+            />
+            <Input
+              label="Longitude (facultatif)"
+              inputMode="decimal"
+              value={coordinateValue(form.lon)}
+              onChange={(e) => {
+                setForm((f) => ({ ...f, lon: parseCoordinate(e.target.value) }));
+                setSaved(false);
+              }}
+            />
+          </div>
+          <p className="text-sm text-fc-ink-soft">
+            Sans coordonnées, la ville est interrogée telle quelle. Clé d&apos;API :{" "}
+            <span
+              className={`font-medium ${
+                keyConfigured === false ? "text-fc-danger" : keyConfigured ? "text-fc-success" : "text-fc-ink-soft"
+              }`}
+            >
+              {keyConfigured === null ? "état inconnu" : keyConfigured ? "configurée" : "absente"}
+            </span>
+            {keyConfigured === false && " — à poser dans les variables d'environnement du serveur."}
+          </p>
+          {preview && <p className="text-sm text-fc-ink-mute">Relevé actuel : {preview}</p>}
+          <div className="flex items-center gap-3">
+            <Button onClick={() => void handleSave()} disabled={saving}>
+              {saving ? "Enregistrement…" : "Enregistrer"}
+            </Button>
+            <SavedNotice show={saved} />
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
 
 const EMPTY_RECEIPT: ReceiptSettings = { header_note: "", footer_note: "", return_policy: "" };
 
