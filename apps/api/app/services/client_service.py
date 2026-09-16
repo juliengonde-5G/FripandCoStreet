@@ -921,12 +921,22 @@ class ClientService:
         (0007) au flush, donc un 500 en pleine caisse. La saisie est
         ignoree en silence, les deux fiches restent distinctes, et le
         back-office tranche a froid.
+
+        Le NOM suit exactement la meme regle que les coordonnees : il n'est
+        ecrit que s'il manque. Une fiche est retrouvee par son e-mail ou son
+        telephone ; si la vendeuse tape un autre nom sur ce meme numero,
+        c'est presque toujours une confusion — un conjoint, un proche a qui
+        on a redonne le numero de la maison, une ligne de la boutique. La
+        version precedente renommait silencieusement « Marie DUPONT » en
+        « Sophie Martin » et la cliente d'origine devenait introuvable par
+        son nom, sans que personne ne l'ait demande. Corriger un nom reste
+        possible la ou c'est un acte deliberé : la fiche du back-office.
         """
         changed = False
-        if first_name and first_name.strip() and client.first_name != first_name.strip():
+        if first_name and first_name.strip() and not client.first_name:
             client.first_name = first_name.strip()
             changed = True
-        if last_name and last_name.strip() and client.last_name != last_name.strip():
+        if last_name and last_name.strip() and not client.last_name:
             client.last_name = last_name.strip()
             changed = True
         if email and not client.email and not await self._contact_taken(email=email):
