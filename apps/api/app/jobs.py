@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from app.core.database import async_session
@@ -317,37 +319,108 @@ async def _remove_from_brevo_list(email: str) -> None:
         logger.exception("Retrait Brevo impossible après une suppression RGPD")
 
 
+# ---------------------------------------------------------------------------
+# Declaration unique des taches planifiees (PR12, N2) — `register_all_jobs`
+# et la supervision lisent la MEME liste. Sans ca, l'ecran de supervision
+# afficherait une liste ecrite a la main, qui divergerait au premier job
+# ajoute : on prefere qu'il soit impossible d'enregistrer un job invisible.
+#
+# `cron` est la forme d'affichage (minute heure jour mois jour_semaine) et
+# `trigger` les arguments passes a `CronTrigger` — on ne derive pas l'un de
+# l'autre par `CronTrigger.from_crontab`, qui figerait le fuseau au moment de
+# la construction du declencheur alors qu'ici il doit rester celui du
+# planificateur (Europe/Paris, cf. `app/main.py`).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ScheduledJob:
+    name: str
+    func: Callable[[], Awaitable[None]]
+    cron: str
+    trigger: dict
+
+
+SCHEDULED_JOBS: tuple[ScheduledJob, ...] = (
+    ScheduledJob(
+        JOB_DAILY_FISCAL_CLOSE_GUARD,
+        run_daily_fiscal_close_guard,
+        "59 23 * * *",
+        {"hour": 23, "minute": 59},
+    ),
+    ScheduledJob(
+        JOB_MONTHLY_FISCAL_CLOSURE,
+        run_monthly_fiscal_closure,
+        "15 0 1 * *",
+        {"day": 1, "hour": 0, "minute": 15},
+    ),
+    ScheduledJob(
+        JOB_ANNUAL_FISCAL_CLOSURE,
+        run_annual_fiscal_closure,
+        "30 0 1 1 *",
+        {"month": 1, "day": 1, "hour": 0, "minute": 30},
+    ),
+    ScheduledJob(
+        JOB_NIGHTLY_DATABASE_BACKUP,
+        run_nightly_database_backup,
+        "0 3 * * *",
+        {"hour": 3, "minute": 0},
+    ),
+    ScheduledJob(
+        JOB_DAILY_CLIENT_DELETIONS,
+        run_daily_client_deletions,
+        "0 4 * * *",
+        {"hour": 4, "minute": 0},
+    ),
+)
+
+# Reference au planificateur en cours, posee par `register_all_jobs`. Elle
+# n'existe que pour LIRE les prochaines echeances (`next_run_time`) depuis
+# l'ecran de supervision : personne d'autre ne doit toucher au planificateur
+# par ce biais.
+_scheduler = None
+
+
 def register_all_jobs(scheduler) -> None:
     """Enregistre les jobs planifies (fuseau Europe/Paris, cf. `app/main.py`)."""
     from apscheduler.triggers.cron import CronTrigger
 
-    scheduler.add_job(
-        run_daily_fiscal_close_guard,
-        CronTrigger(hour=23, minute=59),
-        id=JOB_DAILY_FISCAL_CLOSE_GUARD,
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        run_monthly_fiscal_closure,
-        CronTrigger(day=1, hour=0, minute=15),
-        id=JOB_MONTHLY_FISCAL_CLOSURE,
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        run_annual_fiscal_closure,
-        CronTrigger(month=1, day=1, hour=0, minute=30),
-        id=JOB_ANNUAL_FISCAL_CLOSURE,
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        run_nightly_database_backup,
-        CronTrigger(hour=3, minute=0),
-        id=JOB_NIGHTLY_DATABASE_BACKUP,
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        run_daily_client_deletions,
-        CronTrigger(hour=4, minute=0),
-        id=JOB_DAILY_CLIENT_DELETIONS,
-        replace_existing=True,
-    )
+    global _scheduler
+    for job in SCHEDULED_JOBS:
+        scheduler.add_job(
+            job.func,
+            CronTrigger(**job.trigger),
+            id=job.name,
+            replace_existing=True,
+        )
+    _scheduler = scheduler
+
+
+def list_registered_jobs() -> list[dict]:
+    """Taches planifiees `[{name, cron, next_run_at}]` (PR12, N2).
+
+    La liste declaree fait foi : elle reste complete meme quand aucun
+    planificateur ne tourne (tests, API demarree sans APScheduler), auquel
+    cas `next_run_at` vaut `None` — un ecran de supervision qui n'afficherait
+    plus rien serait pire qu'un ecran qui affiche « prochaine execution
+    inconnue ».
+    """
+    live: dict[str, object] = {}
+    if _scheduler is not None:
+        try:
+            for job in _scheduler.get_jobs():
+                live[job.id] = getattr(job, "next_run_time", None)
+        except Exception:  # noqa: BLE001 — la supervision ne casse jamais
+            logger.exception("Lecture des jobs du planificateur impossible")
+
+    result: list[dict] = []
+    for job in SCHEDULED_JOBS:
+        next_run = live.get(job.name)
+        result.append(
+            {
+                "name": job.name,
+                "cron": job.cron,
+                "next_run_at": next_run.isoformat() if next_run is not None else None,
+            }
+        )
+    return result

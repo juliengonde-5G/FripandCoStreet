@@ -222,3 +222,15 @@ async def get_current(db: AsyncSession) -> dict[str, Any]:
 def api_key_configured() -> bool:
     """Etat de la cle pour l'ecran de reglages — jamais sa valeur (M3)."""
     return bool((settings.OPENWEATHER_API_KEY or "").strip())
+
+
+def cache_age_seconds() -> int | None:
+    """Age du cache meteo en secondes, `None` s'il est vide (PR12, N2).
+
+    Sert uniquement a la supervision : un cache qui ne vieillit jamais
+    trahit un service meteo qui ne repond plus, sans avoir a declencher une
+    requete sortante depuis l'ecran de supervision."""
+    cached = _CACHE
+    if cached is None:
+        return None
+    return max(int(time.monotonic() - cached[1]), 0)

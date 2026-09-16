@@ -29,6 +29,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import urlsplit
 
@@ -325,6 +326,33 @@ def _extract_sumup_error_code(body_text: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Dernier etat connu du TPE (PR12, N2) — memoire de processus, pose par
+# `ping_reader`. La supervision le relit sans declencher d'appel sortant.
+# ---------------------------------------------------------------------------
+
+_last_reader_ping: dict | None = None
+
+
+def _remember_reader_ping(ready: bool) -> None:
+    global _last_reader_ping
+    _last_reader_ping = {
+        "ready": ready,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def last_reader_ping() -> dict | None:
+    """`{"ready": bool, "at": iso}` ou `None` si aucun ping depuis le demarrage."""
+    return dict(_last_reader_ping) if _last_reader_ping else None
+
+
+def reset_last_reader_ping() -> None:
+    """Oublie le dernier ping — tests uniquement."""
+    global _last_reader_ping
+    _last_reader_ping = None
+
+
 class SumUpService:
     """Client fin de l'API SumUp Checkout/Readers (production uniquement).
 
@@ -547,6 +575,19 @@ class SumUpService:
     # Pré-vol TPE
     # ------------------------------------------------------------------
     async def ping_reader(self) -> dict:
+        """Sonde le reader configuré et mémorise le résultat (PR12, N2).
+
+        Enveloppe fine autour de :meth:`_ping_reader` : l'écran de
+        supervision doit pouvoir dire « dernier état connu du TPE », sans
+        jamais déclencher lui-même un appel sortant vers SumUp (une page de
+        diagnostic rafraîchie toutes les 60 s ne doit pas marteler le
+        fournisseur, ni ralentir sur un réseau coupé).
+        """
+        result = await self._ping_reader()
+        _remember_reader_ping(bool(result.get("ready")))
+        return result
+
+    async def _ping_reader(self) -> dict:
         """Sonde le reader configuré et retourne un statut structuré.
 
         Distingue l'état d'appairage (``GET /readers/{id}``) de l'état live

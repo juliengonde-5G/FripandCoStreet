@@ -8,12 +8,63 @@ import logging
 import time
 import traceback
 import uuid
+from collections import deque
+from datetime import datetime, timezone
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger("fripco")
+
+# ---------------------------------------------------------------------------
+# Tampon des dernieres erreurs 500 (PR12, N5/N2) — alimente la carte
+# « Dernieres erreurs » de la supervision.
+#
+# En memoire de processus, volontairement : c'est une aide au diagnostic a
+# chaud (« la vendeuse vient d'avoir une erreur, quelle reference ? »), pas
+# une piste d'audit. Le JET reste le seul journal durable, et ecrire en base
+# depuis la frontiere d'erreur reviendrait a tenter une ecriture au moment
+# precis ou la base est peut-etre la cause de la panne.
+#
+# On n'y met JAMAIS le corps de la reponse ni celui de la requete : une
+# erreur peut survenir sur une route qui porte un e-mail client, et ce
+# tampon est relu par une route d'administration (CLAUDE.md : aucune donnee
+# personnelle hors des tables prevues).
+# ---------------------------------------------------------------------------
+
+RECENT_ERRORS_MAX = 50
+_recent_errors: deque[dict] = deque(maxlen=RECENT_ERRORS_MAX)
+
+
+def record_recent_error(
+    *,
+    request_id: str,
+    method: str,
+    path: str,
+    status: int,
+    error_type: str | None,
+) -> None:
+    _recent_errors.append(
+        {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "error_type": error_type,
+        }
+    )
+
+
+def recent_errors() -> list[dict]:
+    """Copie du tampon, la plus recente d'abord (lecture seule)."""
+    return [dict(item) for item in reversed(_recent_errors)]
+
+
+def reset_recent_errors() -> None:
+    """Vide le tampon — tests uniquement (le processus vit sinon en continu)."""
+    _recent_errors.clear()
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
@@ -75,10 +126,30 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                 },
             )
             err_response.headers["x-request-id"] = request_id
+            record_recent_error(
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                status=500,
+                error_type=type(exc).__name__,
+            )
             return err_response
 
         duration_ms = int((time.perf_counter() - start) * 1000)
         response.headers["x-request-id"] = request_id
+
+        # Une 5xx peut aussi arriver sans exception remontee jusqu'ici (un
+        # endpoint qui renvoie deliberement un 502, le filet global de
+        # `main.py`...). Elle merite la meme trace : c'est la reference
+        # affichee a la vendeuse qui doit permettre de la retrouver.
+        if response.status_code >= 500:
+            record_recent_error(
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                error_type=None,
+            )
 
         if request.url.path != "/api/health" or response.status_code >= 400:
             logger.info(
