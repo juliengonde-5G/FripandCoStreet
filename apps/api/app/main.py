@@ -138,11 +138,20 @@ async def lifespan(app: FastAPI):
     logger.info("fripco-street API shutting down")
 
 
+# Le reverse-proxy ne route que `/api/*` vers l'API (le reste va au front,
+# voir docker/Caddyfile.fragment) : la description de l'API et sa page de
+# documentation doivent donc vivre SOUS `/api`, sinon elles sont servies par
+# le front en production et repondent 404. `redoc_url=None` : une seule page
+# de documentation suffit, et chaque route publique de plus est une surface
+# d'exposition de plus.
 app = FastAPI(
     title="Frip & Co Street — API",
     description="API de caisse pour la boutique Frip & Co Street (Rouen)",
     version=APP_VERSION,
     lifespan=lifespan,
+    openapi_url="/api/openapi.json",
+    docs_url="/api/docs",
+    redoc_url=None,
 )
 
 # Les middlewares sont appliques du bas vers le haut : le DERNIER ajoute est
