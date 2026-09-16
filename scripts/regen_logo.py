@@ -38,6 +38,12 @@ Pipeline :
    `#FFF9F9` opaque) et `logo-mark-on-blue.png` (256, RGBA, disque blanc +
    esperluette bleue — variante par inversion des deux couleurs, pour usage
    sur fond `--fc-primary` comme la barre de caisse, voir I2).
+4. Produit les icônes de l'application installable (PR9, contrat K6) dans
+   `apps/web/public/icons/` : `icon-192.png` et `icon-512.png` (RGBA, fond
+   transparent, `purpose: any`) et `icon-maskable-512.png` (fond `--fc-bg`
+   opaque, monogramme réduit à la zone sûre de 80 % réclamée par Android,
+   `purpose: maskable`). Ces trois fichiers sont référencés par
+   `apps/web/public/manifest.webmanifest`.
 4. Contrôle automatisé (échoue le script sinon, voir `validate_mark()`) sur
    chaque variante transparente : aucun pixel noir opaque dans les 5 %
    extérieurs, les 4 coins sont transparents, le centre est blanc ou bleu,
@@ -63,6 +69,7 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BRAND_DIR = REPO_ROOT / "apps" / "web" / "public" / "brand"
 PUBLIC_DIR = REPO_ROOT / "apps" / "web" / "public"
+ICONS_DIR = PUBLIC_DIR / "icons"
 
 DEFAULT_SOURCE = BRAND_DIR / "logo-fripco-street.png"
 
@@ -72,6 +79,12 @@ WHITE = (255, 255, 255)
 FC_BG = (0xFF, 0xF9, 0xF9)  # --fc-bg
 
 MARGIN_RATIO = 0.08  # 8 % de marge de chaque côté du canevas (§3 charte).
+# Icône « maskable » (contrat K6) : Android peut rogner l'icône en cercle,
+# en goutte ou en losange et ne garantit que la **zone sûre** — le disque
+# central de 80 % du canevas. On dessine donc le monogramme avec 15 % de
+# marge (rayon 35 % < 40 % du rayon sûr) et sur un fond opaque, sans quoi
+# le lanceur afficherait un carré transparent rogné.
+MASKABLE_MARGIN_RATIO = 0.15
 EDGE_FEATHER_PX = 1.0  # demi-largeur de l'anti-aliasing du bord du disque.
 
 # Seuils de classification des pixels source (voir docstring, étape 2).
@@ -179,17 +192,20 @@ def build_mark(
     size: int,
     *,
     invert: bool = False,
+    margin_ratio: float = MARGIN_RATIO,
 ) -> Image.Image:
     """Reconstruit le monogramme en RGBA `size`×`size`, fond transparent.
 
     `invert=True` produit la variante disque blanc + esperluette bleue
     (usage sur fond `--fc-primary`).
+    `margin_ratio` élargit la marge autour du disque : la valeur par défaut
+    suit la charte (8 %), l'icône maskable demande 15 % (zone sûre de 80 %).
     """
     rgb = source.convert("RGB")
     w, h = rgb.size
     px = rgb.load()
 
-    radius_t = size * (0.5 - MARGIN_RATIO)
+    radius_t = size * (0.5 - margin_ratio)
     center_t = size / 2
     scale = radius_t / r_source
 
@@ -291,6 +307,41 @@ def validate_mark(img: Image.Image, name: str) -> None:
     print(f"  [OK] {name} : contrôles automatisés passés (boîte {bw}x{bh}, coins transparents, centre {'blanc' if is_white_ish else 'bleu'})")
 
 
+def validate_maskable(img: Image.Image, name: str) -> None:
+    """Contrôle de l'icône maskable — voir docs/ARCHITECTURE_PR9.md contrat K6.
+
+    Une icône `maskable` est rognée par le lanceur Android : elle doit être
+    **opaque de bord à bord** (sinon coins transparents visibles) et ne rien
+    porter d'essentiel hors du disque central de 80 %.
+    """
+    rgba = img.convert("RGBA")
+    w, h = rgba.size
+    px = rgba.load()
+
+    # 1. Opacité totale (les 4 coins suffisent à attraper une erreur de fond,
+    #    on balaie quand même toute l'image : le coût est négligeable ici).
+    for y in range(h):
+        for x in range(w):
+            if px[x, y][3] != 255:
+                raise SystemExit(f"[{name}] pixel non opaque en ({x},{y}) — fond maskable incomplet")
+
+    # 2. Rien que le fond hors de la zone sûre (disque de rayon 40 % du canevas).
+    cx, cy = w / 2, h / 2
+    safe_r = 0.40 * w
+    for y in range(h):
+        for x in range(w):
+            if math.hypot((x + 0.5) - cx, (y + 0.5) - cy) <= safe_r:
+                continue
+            r, g, b, _ = px[x, y]
+            if (r, g, b) != FC_BG:
+                raise SystemExit(
+                    f"[{name}] pixel de marque en ({x},{y}) hors de la zone sûre de 80 % "
+                    f"(rgb={(r, g, b)}) — il serait rogné par le lanceur"
+                )
+
+    print(f"  [OK] {name} : opaque de bord à bord, monogramme contenu dans la zone sûre de 80 %")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -347,6 +398,26 @@ def main() -> int:
     apple_icon = composite_on_bg(mark_180, FC_BG)
     apple_icon.save(PUBLIC_DIR / "apple-touch-icon.png")
     print(f"Écrit {PUBLIC_DIR / 'apple-touch-icon.png'} (fond {FC_BG} opaque)")
+
+    # --- icônes de l'application installable (PR9, contrat K6) ---
+    ICONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # `purpose: any` : fond transparent, marge de charte (8 %).
+    for size in (192, 512):
+        icon = build_mark(source, cx, cy, r, size=size)
+        validate_mark(icon, f"icons/icon-{size}.png")
+        icon.save(ICONS_DIR / f"icon-{size}.png")
+        print(f"Écrit {ICONS_DIR / f'icon-{size}.png'} (purpose any, fond transparent)")
+
+    # `purpose: maskable` : fond --fc-bg opaque, monogramme dans la zone sûre.
+    maskable_mark = build_mark(
+        source, cx, cy, r, size=512, margin_ratio=MASKABLE_MARGIN_RATIO
+    )
+    validate_mark(maskable_mark, "icons/icon-maskable-512.png (avant fond)")
+    maskable = composite_on_bg(maskable_mark, FC_BG)
+    validate_maskable(maskable, "icons/icon-maskable-512.png")
+    maskable.save(ICONS_DIR / "icon-maskable-512.png")
+    print(f"Écrit {ICONS_DIR / 'icon-maskable-512.png'} (purpose maskable, fond {FC_BG} opaque)")
 
     print("\nTous les fichiers ont été régénérés et validés.")
     return 0
