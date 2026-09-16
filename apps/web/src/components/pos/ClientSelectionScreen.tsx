@@ -21,16 +21,35 @@
  * devant la file d'attente), le nombre de visites et la date de la
  * dernière.
  *
+ * PR10 (L7) : deux ajouts, tous deux au service du même réflexe — ne pas
+ * créer une deuxième fiche à quelqu'un qui en a déjà une, et savoir si la
+ * personne en face est une habituée. (a) pendant la saisie d'un nouveau
+ * client, un encart « Une fiche existe peut-être déjà » propose jusqu'à
+ * trois fiches proches ; (b) chaque carte de résultat porte un bouton
+ * « Historique » qui ouvre `ClientHistoryPanel`.
+ *
  * Accessibilité : `role="dialog"`, focus piégé et restauré
- * (`useDialogA11y`), Échap = Retour. L'arrière-plan est rendu inert par la
- * page de caisse, comme pour les autres écrans plein écran.
+ * (`useDialogA11y`), Échap = Retour — sauf quand le panneau Historique est
+ * ouvert par-dessus : c'est alors lui qui prend Échap, et l'écran de
+ * sélection reste en place. L'arrière-plan est rendu inert par la page de
+ * caisse, comme pour les autres écrans plein écran.
  */
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 
+import ClientHistoryPanel from "@/components/pos/ClientHistoryPanel";
 import { api, ApiError } from "@/lib/api";
+import { duplicateReasonLabel, fetchPosDuplicates, type DuplicateCandidate } from "@/lib/clients";
 import { formatClientName, formatRelativeTime, isValidEmail } from "@/lib/format";
 import { useDialogA11y } from "@/lib/useDialogA11y";
 import type { CreatePosClientResponse, PosClient, PosClientSearchResponse } from "@/lib/types";
+
+/** Fiche dont on veut voir l'historique : l'identifiant, et le nom déjà
+ * calculé par la carte qui a ouvert le panneau (PR10, L7). Type strictement
+ * caisse, il ne sort pas de cet écran ni de la page de caisse. */
+export interface ClientHistoryTarget {
+  id: string;
+  name: string;
+}
 
 interface Props {
   open: boolean;
@@ -50,7 +69,17 @@ const MIN_QUERY_LENGTH = 2;
 
 export default function ClientSelectionScreen({ open, onClose, onSelect, dpoEmail }: Props) {
   const titleId = useId();
-  const containerRef = useDialogA11y<HTMLDivElement>(open, onClose);
+  /** Fiche dont l'historique est ouvert par-dessus cet écran (PR10, L7). */
+  const [historyTarget, setHistoryTarget] = useState<ClientHistoryTarget | null>(null);
+  // Échap ferme le panneau du dessus, pas les deux d'un coup : les deux
+  // écouteurs vivent sur `document`, celui du parent se déclenche donc
+  // même quand l'enfant a « arrêté » l'événement. On le neutralise ici
+  // tant que le panneau Historique est ouvert.
+  const handleEscape = useCallback(() => {
+    if (historyTarget) return;
+    onClose();
+  }, [historyTarget, onClose]);
+  const containerRef = useDialogA11y<HTMLDivElement>(open, handleEscape);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const [query, setQuery] = useState("");
@@ -72,6 +101,7 @@ export default function ClientSelectionScreen({ open, onClose, onSelect, dpoEmai
     setSearchError(null);
     setSearched(false);
     setCreating(false);
+    setHistoryTarget(null);
   }, [open]);
 
   // Le champ de recherche prend le focus à l'ouverture — `useDialogA11y`
@@ -160,6 +190,7 @@ export default function ClientSelectionScreen({ open, onClose, onSelect, dpoEmai
               initialQuery={query}
               onCancel={() => setCreating(false)}
               onCreated={onSelect}
+              onUseExisting={onSelect}
             />
           ) : (
             <>
@@ -207,7 +238,11 @@ export default function ClientSelectionScreen({ open, onClose, onSelect, dpoEmai
                 <ul className="grid gap-2 sm:grid-cols-2">
                   {results.map((client) => (
                     <li key={client.id}>
-                      <ClientCard client={client} onSelect={() => onSelect(client)} />
+                      <ClientCard
+                        client={client}
+                        onSelect={() => onSelect(client)}
+                        onHistory={(target) => setHistoryTarget(target)}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -216,6 +251,13 @@ export default function ClientSelectionScreen({ open, onClose, onSelect, dpoEmai
           )}
         </div>
       </div>
+
+      <ClientHistoryPanel
+        open={historyTarget !== null}
+        clientId={historyTarget?.id ?? null}
+        clientName={historyTarget?.name}
+        onClose={() => setHistoryTarget(null)}
+      />
     </div>
   );
 }
@@ -224,7 +266,15 @@ export default function ClientSelectionScreen({ open, onClose, onSelect, dpoEmai
 // Carte d'un résultat de recherche
 // ---------------------------------------------------------------------------
 
-function ClientCard({ client, onSelect }: { client: PosClient; onSelect: () => void }) {
+function ClientCard({
+  client,
+  onSelect,
+  onHistory,
+}: {
+  client: PosClient;
+  onSelect: () => void;
+  onHistory: (target: ClientHistoryTarget) => void;
+}) {
   const name = formatClientName(client);
   // Sans nom, la fiche s'annonce par sa coordonnée masquée plutôt que par
   // un vide : elle reste identifiable et sélectionnable.
@@ -232,30 +282,43 @@ function ClientCard({ client, onSelect }: { client: PosClient; onSelect: () => v
   const initial = (name || client.email_masked || "?").trim().charAt(0).toUpperCase();
 
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className="flex w-full items-center gap-3 rounded-fc-lg border border-fc-line bg-fc-surface p-3 text-left transition-colors hover:border-fc-primary hover:bg-fc-primary-soft"
-    >
-      <span
-        aria-hidden
-        className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-fc-primary text-lg font-semibold text-white"
+    // Deux gestes distincts sur une même carte : choisir la fiche (la
+    // quasi-totalité de la surface) et regarder son historique (PR10, L7).
+    // D'où un conteneur plutôt qu'un seul grand bouton — on n'imbrique pas
+    // un bouton dans un bouton.
+    <div className="flex items-stretch gap-1 rounded-fc-lg border border-fc-line bg-fc-surface p-1 transition-colors focus-within:border-fc-primary hover:border-fc-primary">
+      <button
+        type="button"
+        onClick={onSelect}
+        className="flex min-w-0 flex-1 items-center gap-3 rounded-fc p-2 text-left transition-colors hover:bg-fc-primary-soft"
       >
-        {initial}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-semibold text-fc-ink">{heading}</span>
-        <span className="block truncate text-xs text-fc-ink-soft">
-          {[client.email_masked, client.phone_masked].filter(Boolean).join(" · ") || "Aucune coordonnée"}
+        <span
+          aria-hidden
+          className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-fc-primary text-lg font-semibold text-white"
+        >
+          {initial}
         </span>
-        <span className="mt-0.5 block truncate text-xs text-fc-ink-mute">
-          {client.visits_count > 0
-            ? `${client.visits_count} visite${client.visits_count > 1 ? "s" : ""}`
-            : "Aucune visite"}
-          {client.last_visit_at ? ` · Dernière visite ${formatRelativeTime(client.last_visit_at)}` : ""}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-semibold text-fc-ink">{heading}</span>
+          <span className="block truncate text-xs text-fc-ink-soft">
+            {[client.email_masked, client.phone_masked].filter(Boolean).join(" · ") || "Aucune coordonnée"}
+          </span>
+          <span className="mt-0.5 block truncate text-xs text-fc-ink-mute">
+            {client.visits_count > 0
+              ? `${client.visits_count} visite${client.visits_count > 1 ? "s" : ""}`
+              : "Aucune visite"}
+            {client.last_visit_at ? ` · Dernière visite ${formatRelativeTime(client.last_visit_at)}` : ""}
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+      <button
+        type="button"
+        onClick={() => onHistory({ id: client.id, name: heading })}
+        className="min-h-touch min-w-touch flex-shrink-0 rounded-fc border border-fc-line px-2 text-xs font-semibold text-fc-primary-deep transition-colors hover:bg-fc-primary-soft"
+      >
+        Historique
+      </button>
+    </div>
   );
 }
 
@@ -274,16 +337,45 @@ function seedFromQuery(raw: string): { email: string; phone: string; firstName: 
   return { email: "", phone: "", firstName: value };
 }
 
+/** Délai avant d'interroger le serveur sur les doublons (L7) : le temps
+ * de finir de taper un nom, sans attendre pour autant la fin de la
+ * saisie complète. */
+const DUPLICATE_DEBOUNCE_MS = 400;
+/** Nombre de fiches proposées dans l'encart. Le serveur en renvoie
+ * jusqu'à cinq ; trois suffisent au comptoir, au-delà on ne lit plus. */
+const MAX_DUPLICATES_SHOWN = 3;
+
+/** Une fiche candidate reprise telle quelle comme cliente du ticket. Le
+ * consentement newsletter n'est pas transmis par la route des doublons et
+ * n'est lu nulle part en caisse (il se pose à l'envoi du ticket, écran de
+ * fin de vente) : on ne l'invente pas, on le laisse à `false`. */
+function candidateAsPosClient(candidate: DuplicateCandidate): PosClient {
+  return {
+    id: candidate.id,
+    first_name: candidate.first_name,
+    last_name: candidate.last_name,
+    email_masked: candidate.email_masked,
+    phone_masked: candidate.phone_masked,
+    newsletter_optin: false,
+    last_visit_at: candidate.last_visit_at,
+    visits_count: candidate.visits_count,
+  };
+}
+
 function NewClientForm({
   dpoEmail,
   initialQuery,
   onCancel,
   onCreated,
+  onUseExisting,
 }: {
   dpoEmail?: string;
   initialQuery: string;
   onCancel: () => void;
   onCreated: (client: PosClient) => void;
+  /** Fiche existante retenue depuis l'encart « Une fiche existe
+   * peut-être déjà » : on la sélectionne, on ne crée rien. */
+  onUseExisting: (client: PosClient) => void;
 }) {
   const seed = seedFromQuery(initialQuery);
   const [firstName, setFirstName] = useState(seed.firstName);
@@ -297,6 +389,12 @@ function NewClientForm({
    * avant de repartir, sinon la vendeuse croit avoir créé un doublon. */
   const [reusedName, setReusedName] = useState<string | null>(null);
 
+  // PR10 (L7) — fiches proches de ce qui est en train d'être saisi.
+  const [duplicates, setDuplicates] = useState<DuplicateCandidate[]>([]);
+  /** « Créer quand même » : l'encart se tait jusqu'à la prochaine
+   * modification de la saisie. */
+  const [duplicatesDismissed, setDuplicatesDismissed] = useState(false);
+
   const emailFilled = email.trim().length > 0;
   const phoneFilled = phone.trim().length > 0;
   const emailValid = !emailFilled || isValidEmail(email);
@@ -307,6 +405,52 @@ function NewClientForm({
     const timer = setTimeout(() => firstFieldRef.current?.focus(), 0);
     return () => clearTimeout(timer);
   }, []);
+
+  // Recherche de doublons (L7). On n'interroge le serveur que sur des
+  // critères qui veulent dire quelque chose : un prénom ET un nom d'au
+  // moins deux lettres, une adresse e-mail valide, ou un numéro complet.
+  // Un critère à moitié tapé ne prouve rien et ferait clignoter l'encart.
+  // Chaque frappe annule la requête précédente (`AbortController`).
+  useEffect(() => {
+    const trimmedFirst = firstName.trim();
+    const trimmedLast = lastName.trim();
+    const trimmedEmail = email.trim();
+    const trimmedPhone = phone.trim();
+    const criteria: { first_name?: string; last_name?: string; email?: string; phone?: string } = {};
+    if (trimmedFirst.length >= 2 && trimmedLast.length >= 2) {
+      criteria.first_name = trimmedFirst;
+      criteria.last_name = trimmedLast;
+    }
+    if (isValidEmail(trimmedEmail)) criteria.email = trimmedEmail;
+    if (trimmedPhone.replace(/\D/g, "").length >= 10) criteria.phone = trimmedPhone;
+
+    setDuplicatesDismissed(false);
+    if (Object.keys(criteria).length === 0) {
+      setDuplicates([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetchPosDuplicates(criteria, { signal: controller.signal })
+        .then((found) => {
+          if (controller.signal.aborted) return;
+          setDuplicates(found);
+        })
+        .catch(() => {
+          // Un doublon non détecté n'empêche pas d'enregistrer la fiche :
+          // l'encart est une aide, jamais un obstacle. On se tait.
+          if (!controller.signal.aborted) setDuplicates([]);
+        });
+    }, DUPLICATE_DEBOUNCE_MS);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [firstName, lastName, email, phone]);
+
+  const shownDuplicates = duplicates.slice(0, MAX_DUPLICATES_SHOWN);
+  const duplicatesVisible = !duplicatesDismissed && !reusedName && shownDuplicates.length > 0;
 
   const handleSubmit = async (): Promise<void> => {
     if (!canSubmit) return;
@@ -424,6 +568,67 @@ function NewClientForm({
         facultative et se désinscrit en un clic. Responsable : Frip &amp; Co.{" "}
         {dpoEmail ? `Vos droits (accès, suppression) : ${dpoEmail}.` : "Vos droits (accès, suppression) : demandez en boutique."}
       </p>
+
+      {duplicatesVisible && (
+        <section
+          aria-live="polite"
+          className="rounded-fc-lg border border-fc-warn/40 bg-fc-warn-soft p-3"
+        >
+          <h3 className="text-sm font-semibold text-fc-ink">Une fiche existe peut-être déjà</h3>
+          <p className="mt-0.5 text-xs text-fc-ink-soft">
+            Vérifiez avant de créer une deuxième fiche à la même personne.
+          </p>
+          <ul className="mt-2 space-y-2">
+            {shownDuplicates.map((candidate) => {
+              const name = formatClientName(candidate);
+              const heading = name || candidate.email_masked || candidate.phone_masked || "Fiche sans nom";
+              return (
+                <li
+                  key={candidate.id}
+                  // Sur une petite tablette, le bouton passe sous la fiche
+                  // plutôt que de lui manger la moitié de la largeur.
+                  className="flex flex-col gap-2 rounded-fc border border-fc-line bg-fc-surface p-2 sm:flex-row sm:items-center"
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold text-fc-ink">
+                      {heading}{" "}
+                      <span className="text-xs font-normal text-fc-ink-mute">
+                        ({duplicateReasonLabel(candidate.reason)})
+                      </span>
+                    </span>
+                    <span className="block truncate text-xs text-fc-ink-soft">
+                      {[candidate.email_masked, candidate.phone_masked].filter(Boolean).join(" · ") ||
+                        "Aucune coordonnée"}
+                    </span>
+                    <span className="block truncate text-xs text-fc-ink-mute">
+                      {candidate.visits_count > 0
+                        ? `${candidate.visits_count} visite${candidate.visits_count > 1 ? "s" : ""}`
+                        : "Aucune visite"}
+                      {candidate.last_visit_at
+                        ? ` · Dernière visite ${formatRelativeTime(candidate.last_visit_at)}`
+                        : ""}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onUseExisting(candidateAsPosClient(candidate))}
+                    className="min-h-touch w-full flex-shrink-0 rounded-fc bg-fc-primary px-3 text-sm font-semibold text-white transition-colors hover:bg-fc-primary-deep sm:w-auto"
+                  >
+                    Utiliser cette fiche
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <button
+            type="button"
+            onClick={() => setDuplicatesDismissed(true)}
+            className="mt-2 min-h-touch w-full rounded-fc border border-fc-line bg-fc-surface px-3 text-sm font-medium text-fc-ink transition-colors hover:bg-fc-bg-alt"
+          >
+            Créer quand même
+          </button>
+        </section>
+      )}
 
       <div className="flex gap-2">
         <button

@@ -666,6 +666,7 @@ function reset(): void {
   pinAttempts.clear();
   seedDemoSales();
   seedDemoClients();
+  seedPr10CaisseDemo();
   seedDemoInvoice();
   // `backupConfig` n'est pas remis à zéro, comme `settings` — un réglage
   // édité par la personne reste après un reset (état applicatif, pas une
@@ -1509,6 +1510,185 @@ function seedDemoClients(): void {
     tx.client = clientRefOf(client);
     tx.receipt_text = buildReceiptText(tx);
   });
+}
+
+// ---------------------------------------------------------------------------
+// PR10 — caisse : doublons de fiches et historique d'achats
+// (docs/ARCHITECTURE_PR10.md §1, L2 / L4 / L7)
+//
+// Ce bloc ne simule que ce que la CAISSE consomme : les candidats au
+// doublon proposés pendant la saisie d'une nouvelle fiche, et l'historique
+// d'achats d'une cliente. La fusion et la suppression différée vivent dans
+// le bloc « PR10 — administration ».
+// ---------------------------------------------------------------------------
+
+/** Deux fiches en double posées exprès sur le jeu de démo, pour que
+ * l'encart « Une fiche existe peut-être déjà » se déclenche sans
+ * préparation : une homonyme de Julie Vasseur (même nom, autre téléphone)
+ * et une fiche qui partage le téléphone de Sophie Lemoine. Un ticket
+ * annulé est par ailleurs rattaché à Julie Vasseur : son historique porte
+ * la mention « annulé » et un total qui l'exclut. */
+function seedPr10CaisseDemo(): void {
+  const olderIso = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const doubles: Client[] = [
+    {
+      id: uuid(),
+      email: null,
+      phone: "+33781920304",
+      first_name: "Julie",
+      last_name: "Vasseur",
+      newsletter_optin: false,
+      created_at: olderIso(12),
+      anonymized_at: null,
+    },
+    {
+      id: uuid(),
+      email: "sofia.lemoine@exemple.fr",
+      phone: "+33699887766",
+      first_name: "Sofia",
+      last_name: "Lemoine",
+      newsletter_optin: false,
+      created_at: olderIso(9),
+      anonymized_at: null,
+    },
+  ];
+  doubles.forEach((client) => clients.push(client));
+
+  const julie = clients.find(
+    (c) => c.first_name === "Julie" && c.last_name === "Vasseur" && c.email === "julie.vasseur@exemple.fr",
+  );
+  if (!julie) return;
+  // Les trois ventes récentes encore libres reviennent à Julie : son
+  // historique montre plusieurs tickets datés, avec leurs articles.
+  const recent = transactions.filter((t) => t.transaction_type === "sale" && !t.client).slice(0, 3);
+  recent.forEach((tx) => {
+    tx.client = clientRefOf(julie);
+    tx.receipt_text = buildReceiptText(tx);
+  });
+
+  // Et l'un d'eux est annulé, pour que la mention « Annulé » et le total
+  // qui l'exclut soient visibles sans manipulation. L'annulation du jeu de
+  // démo (PR6) tombe un jour fermé certaines semaines : on ne compte pas
+  // dessus, on en pose une ici.
+  const victim = [...recent].reverse().find((tx) => !cancelledToRefund.has(tx.id));
+  if (!victim) return;
+  const refund = buildTransaction(
+    "refund",
+    victim.items.map((item) => ({ label: item.label, unit_price: item.unit_price, quantity: item.quantity })),
+    null,
+    victim.payments.map((payment) => ({ method: payment.method, amount: payment.amount })),
+    {
+      original_transaction_id: victim.id,
+      refund_reason: "Taille qui ne convient pas",
+      original_transaction_number: victim.transaction_number,
+    },
+  );
+  const refundedAt = new Date(victim.created_at);
+  refundedAt.setHours(refundedAt.getHours() + 2);
+  refund.created_at = refundedAt.toISOString();
+  refund.receipt_text = buildReceiptText(refund, victim.transaction_number);
+  transactions.unshift(refund);
+  cancelledToRefund.set(victim.id, refund.id);
+}
+
+/** `name_key` du contrat (L2) : minuscules, accents retirés, espaces et
+ * tirets réduits. `null` quand le nom de famille est vide — un prénom
+ * seul ne fait jamais un doublon. */
+function nameKeyMock(firstName: string | null | undefined, lastName: string | null | undefined): string | null {
+  const squash = (value: string) =>
+    value
+      .normalize("NFKD")
+      .replace(/[̀-ͯ]/g, "")
+      .toLowerCase()
+      .replace(/[\s-]+/g, " ")
+      .trim();
+  const last = squash(lastName ?? "");
+  if (!last) return null;
+  return `${squash(firstName ?? "")} ${last}`.trim();
+}
+
+/** Une fiche encore utilisable : ni anonymisée, ni absorbée par une
+ * fusion (L2). Le champ de fusion est lu de façon souple — il est
+ * modélisé dans le bloc « PR10 — administration ». */
+function isActiveClientMock(client: Client): boolean {
+  if (client.anonymized_at) return false;
+  return !(client as { merged_into_client_id?: string | null }).merged_into_client_id;
+}
+
+/** Candidats au doublon pour la saisie en cours (L2) : e-mail, puis
+ * téléphone, puis nom ; 5 fiches au maximum, jamais deux fois la même. */
+function pr10DuplicateCandidates(criteria: {
+  first_name?: string | null;
+  last_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+}): Array<Record<string, unknown>> {
+  const email = normalizeEmail(criteria.email) || null;
+  let phone: string | null = null;
+  try {
+    phone = normalizePhoneMock(criteria.phone);
+  } catch {
+    // Une saisie de téléphone encore incomplète ne fait pas échouer la
+    // recherche de doublons : on l'ignore, les autres critères restent.
+    phone = null;
+  }
+  const nameKey = nameKeyMock(criteria.first_name, criteria.last_name);
+
+  const seen = new Set<string>();
+  const candidates: Array<Record<string, unknown>> = [];
+  const push = (client: Client, reason: "email" | "phone" | "name") => {
+    if (seen.has(client.id) || candidates.length >= 5) return;
+    seen.add(client.id);
+    const stats = visitStats(client.id);
+    candidates.push({
+      id: client.id,
+      first_name: client.first_name,
+      last_name: client.last_name,
+      email_masked: client.email ? maskEmail(client.email) : null,
+      phone_masked: maskPhoneMock(client.phone),
+      visits_count: stats.visits_count,
+      last_visit_at: stats.last_visit_at,
+      reason,
+    });
+  };
+
+  const active = clients.filter(isActiveClientMock);
+  if (email) active.filter((c) => normalizeEmail(c.email) === email).forEach((c) => push(c, "email"));
+  if (phone) active.filter((c) => c.phone === phone).forEach((c) => push(c, "phone"));
+  if (nameKey) active.filter((c) => nameKeyMock(c.first_name, c.last_name) === nameKey).forEach((c) => push(c, "name"));
+  return candidates;
+}
+
+/** Historique d'achats d'une fiche (L4) : ventes seulement, plus
+ * récentes d'abord, 5 articles listés par ticket, montants en chaînes à
+ * deux décimales. Le total dépensé ignore les tickets annulés. */
+function pr10ClientHistory(clientId: string, limit: number): Record<string, unknown> {
+  const sales = transactions
+    .filter((t) => t.transaction_type === "sale" && t.client?.id === clientId)
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  const stats = visitStats(clientId);
+  const totalSpent = sales
+    .filter((t) => !cancelledToRefund.has(t.id))
+    .reduce((sum, t) => sum + t.total_ttc, 0);
+  return {
+    client_id: clientId,
+    visits_count: stats.visits_count,
+    last_visit_at: stats.last_visit_at,
+    total_spent: money(totalSpent),
+    transactions: sales.slice(0, limit).map((tx) => ({
+      id: tx.id,
+      transaction_number: tx.transaction_number,
+      created_at: tx.created_at,
+      total_ttc: money(tx.total_ttc),
+      items_count: tx.items.length,
+      items: tx.items.slice(0, 5).map((item) => ({
+        label: item.label,
+        quantity: item.quantity,
+        unit_price: money(item.unit_price),
+      })),
+      refunded: cancelledToRefund.has(tx.id),
+    })),
+  };
 }
 
 /** Une facture pro de démonstration (PR8, J6), posée sur une vente
@@ -2795,6 +2975,30 @@ export async function mockFetchAPI<T = unknown>(
     const response: CreatePosClientResponse = { client: posClientPayload(client), created };
     return response as unknown as T;
   }
+  // --- PR10 — caisse (L2/L4) : doublons proposés à la saisie, historique ---
+
+  if (path === "/api/pos/clients/duplicates" && method === "GET") {
+    const criteria = {
+      first_name: query.get("first_name"),
+      last_name: query.get("last_name"),
+      email: query.get("email"),
+      phone: query.get("phone"),
+    };
+    if (!Object.values(criteria).some((value) => (value ?? "").trim())) {
+      fail(422, "Renseignez au moins un critère.", "criteria_required");
+    }
+    return { candidates: pr10DuplicateCandidates(criteria) } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/pos\/clients\/([^/]+)\/history$/)) && method === "GET") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client || !isActiveClientMock(client)) fail(404, "Fiche introuvable.", "not_found");
+    const raw = query.get("limit");
+    const parsed = raw ? Number.parseInt(raw, 10) : 5;
+    const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 20) : 5;
+    return pr10ClientHistory(client!.id, limit) as unknown as T;
+  }
+
 
   if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/client$/)) && method === "DELETE") {
     const tx = transactions.find((t) => t.id === m![1]);
@@ -3498,6 +3702,7 @@ export async function mockFetchBytesWithHeaders(endpoint: string, options?: Fetc
 // toucher à la journée en cours (ventes datées d'hier et avant).
 seedDemoSales();
 seedDemoClients();
+seedPr10CaisseDemo();
 seedDemoInvoice();
 
 // Expose un reset pour d'éventuels tests / Playwright (état frais par page load
