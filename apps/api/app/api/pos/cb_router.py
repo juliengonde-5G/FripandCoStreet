@@ -24,6 +24,7 @@ from app.models.user import User
 from app.services.fiscal import PosServiceError
 from app.services.jet import JournalService
 from app.services.settings_service import SettingsService
+from app.services.sumup_exchange_log import persist as persist_exchanges
 from app.services.sumup_service import SumUpService, is_test_api_key, redact_sumup_error
 
 router = APIRouter(prefix="/pos/payments/cb", tags=["cb"])
@@ -83,6 +84,17 @@ def _request_id(request: Request) -> str | None:
     return getattr(request.state, "request_id", None)
 
 
+async def _log_exchanges(db: AsyncSession, svc: SumUpService, request: Request) -> None:
+    """Déverse le journal des échanges SumUp (PR9/K1) APRÈS l'opération métier.
+
+    Jamais avant : une trace de débogage ne doit pas peser sur le chemin du
+    paiement, et `persist` est écrit pour ne jamais faire échouer son
+    appelant (savepoint + log). Le `request_id` corrèle l'échange à la ligne
+    de log de la requête entrante.
+    """
+    await persist_exchanges(db, svc.drain_exchanges(), request_id=_request_id(request))
+
+
 async def _cb_description(db: AsyncSession) -> str:
     """Libellé envoyé au TPE (PR5, G7, docs/ARCHITECTURE_PR5.md §1) — dérivé
     du nom de boutique courant (`SettingsService.get("shop")`), lu à chaque
@@ -135,7 +147,11 @@ def _guard_configured_and_key(svc: SumUpService) -> None:
 
 
 @router.get("/status")
-async def cb_status(current_user: Annotated[User, Depends(get_current_user)]):
+async def cb_status(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     svc = SumUpService()
     if not svc.is_configured:
         return {
@@ -146,6 +162,9 @@ async def cb_status(current_user: Annotated[User, Depends(get_current_user)]):
             "message": "Aucun terminal de paiement configuré — encaissez en espèces.",
         }
     ping = await _cached_ping(svc)
+    # PR9/K1 — le pré-vol TPE est justement l'échange que l'on veut relire
+    # quand la caissière dit « le bouton CB était grisé ».
+    await _log_exchanges(db, svc, request)
     return {
         "configured": True,
         "reader_id": svc.reader_id,
@@ -217,6 +236,9 @@ async def initiate_cb_payment(
         amount=body.amount, client_transaction_id=client_transaction_id, description=description
     )
     failed = str(result.get("status", "")).upper() == "FAILED"
+    # PR9/K1 — le push est joué, on peut journaliser l'échange (pré-vol
+    # compris) : `persist` ne peut pas faire échouer le paiement.
+    await _log_exchanges(db, svc, request)
 
     attempt = PaymentAttempt(
         client_uuid=body.client_uuid,
@@ -286,6 +308,9 @@ async def get_cb_payment_status(
     svc = SumUpService()
     poll = await svc.get_checkout_status(checkout_id)
     norm = str(poll.get("status", "PENDING")).upper()
+    # PR9/K1 — avant le retour anticipé « pending » : c'est la suite des
+    # polls qui raconte ce qu'a fait le terminal.
+    await _log_exchanges(db, svc, request)
 
     if norm == "PENDING":
         return {"status": "pending"}
@@ -390,6 +415,9 @@ async def cancel_cb_payment(
                 status_code=409,
             )
 
+    # PR9/K1 — couvre l'annulation ET la revérification éventuelle.
+    await _log_exchanges(db, svc, request)
+
     attempt.status = PaymentAttemptStatus.cancelled
     await db.flush()
 
@@ -447,6 +475,8 @@ async def retry_cb_payment(
         description=description,
     )
     failed = str(result.get("status", "")).upper() == "FAILED"
+    # PR9/K1 — même journalisation que dans `initiate_cb_payment`.
+    await _log_exchanges(db, svc, request)
 
     new_attempt = PaymentAttempt(
         client_uuid=attempt.client_uuid,
