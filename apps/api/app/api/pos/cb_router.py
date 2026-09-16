@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +21,9 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.payment_attempt import PaymentAttempt, PaymentAttemptStatus
+from app.models.pos import CashDrawer
 from app.models.user import User
+from app.services import failed_payment_service
 from app.services.fiscal import PosServiceError
 from app.services.jet import JournalService
 from app.services.settings_service import SettingsService
@@ -123,6 +126,75 @@ async def _get_attempt(db: AsyncSession, checkout_id: str) -> PaymentAttempt | N
             select(PaymentAttempt).where(PaymentAttempt.checkout_id == checkout_id)
         )
     ).scalar_one_or_none()
+
+
+async def _current_cashier_id(db: AsyncSession):
+    """Vendeuse identifiee en caisse a cet instant (PR8/J2), ou ``None``.
+
+    Lue sur le tiroir ouvert plutot que demandee au front : c'est la meme
+    source que celle recopiee sur chaque vente, donc une ligne en file porte
+    le nom de la personne qui etait devant le terminal.
+    """
+    drawer = (
+        await db.execute(select(CashDrawer).where(CashDrawer.is_open.is_(True)).limit(1))
+    ).scalar_one_or_none()
+    return drawer.current_cashier_id if drawer is not None else None
+
+
+async def _fail_and_queue(
+    db: AsyncSession,
+    request: Request,
+    current_user: User,
+    attempt: PaymentAttempt,
+    result: dict,
+) -> JSONResponse:
+    """Repond 409 `payment_failed` en mettant la vente en file si c'est rattrapable (K3).
+
+    Le corps porte A LA RACINE `recoverable`, `failed_payment_id`,
+    `retry_count` et `max_retries` pour que la caisse sache quoi afficher
+    sans second appel : « le terminal n'a pas repondu, la vente n'est pas
+    perdue » + bouton Reessayer quand la cause est recuperable, simple
+    invitation a changer de moyen de paiement quand la carte a ete refusee
+    (un declin n'entre jamais en file : il n'y a rien a rejouer). Les memes
+    cles sont toujours presentes, a `None` dans ce dernier cas : la forme de
+    la reponse ne change pas selon le cas, seules les valeurs changent.
+
+    Reponse construite ici plutot que levee via `PosServiceError` : le
+    handler global ne sait produire que `{detail, code}`, et on ne modifie
+    pas un contrat d'erreur partage pour des champs propres a la CB — meme
+    parti pris que `pos/router.py::identify_cashier` avec `retry_after`.
+    """
+    recoverable, error_type = failed_payment_service.classify_push_result(result)
+    failed_payment = None
+    if recoverable:
+        failed_payment = await failed_payment_service.enqueue(
+            db,
+            attempt,
+            error_type=error_type,
+            last_error=result.get("error_detail") or result.get("error_friendly"),
+            cashier_id=await _current_cashier_id(db),
+            user_id=current_user.id,
+            username=current_user.username,
+            ip=_client_ip(request),
+            request_id=_request_id(request),
+        )
+
+    # L'essai, son evenement JET et l'eventuelle ligne en file sont deja
+    # ecrits : on commite explicitement avant de repondre en erreur, sinon
+    # une exception ulterieure et le rollback de `get_db` effaceraient cette
+    # trace (meme raison que dans `auth/router.py::login`, PR1).
+    await db.commit()
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": (
+                result.get("error_friendly") or "Le paiement a été refusé par le terminal."
+            ),
+            "code": "payment_failed",
+            "recoverable": recoverable,
+            **failed_payment_service.error_fields(failed_payment),
+        },
+    )
 
 
 def _guard_configured_and_key(svc: SumUpService) -> None:
@@ -272,15 +344,9 @@ async def initiate_cb_payment(
     )
 
     if failed:
-        # L'essai (checkout_id + JET) est déjà écrit : commit explicite avant
-        # de lever, sinon le rollback déclenché par `get_db` sur l'exception
-        # effacerait cette trace — comme `auth/router.py::login` (PR1).
-        await db.commit()
-        raise PosServiceError(
-            result.get("error_friendly") or "Le paiement a été refusé par le terminal.",
-            code="payment_failed",
-            status_code=409,
-        )
+        # PR9/K3 : la 409 met la vente en file quand la cause est
+        # rattrapable, et porte `failed_payment_id` + `recoverable`.
+        return await _fail_and_queue(db, request, current_user, attempt, result)
     return {"checkout_id": attempt.checkout_id, "status": "pending"}
 
 
@@ -333,6 +399,18 @@ async def get_cb_payment_status(
             ip=_client_ip(request),
             request_id=_request_id(request),
             payload=payload,
+        )
+        # PR9/K3 — point de constat n° 1 du `paid` : si cette vente avait un
+        # incident en file, il se referme ici. La vente, elle, n'existe pas
+        # encore (regle PR2) : `transaction_id` sera pose au constat n° 2,
+        # dans `sumup_verify.verify_card_tender`, a l'ecriture de la vente.
+        await failed_payment_service.resolve_if_queued(
+            db,
+            attempt.client_uuid,
+            user_id=current_user.id,
+            username=current_user.username,
+            ip=_client_ip(request),
+            request_id=_request_id(request),
         )
     elif norm == "CANCELLED":
         attempt.status = PaymentAttemptStatus.cancelled
@@ -512,11 +590,118 @@ async def retry_cb_payment(
 
     if failed:
         # Même raison que dans `initiate_cb_payment` : l'essai est déjà écrit,
-        # il doit survivre au rollback déclenché par `get_db` sur l'exception.
-        await db.commit()
+        # il doit survivre au rollback déclenché par `get_db` — et la vente
+        # rejoint la file si la cause est rattrapable (PR9/K3).
+        return await _fail_and_queue(db, request, current_user, new_attempt, result)
+    return {"checkout_id": new_attempt.checkout_id, "status": "pending"}
+
+
+# ---------------------------------------------------------------------------
+# POST /pos/payments/cb/retry-failed/{failed_payment_id} (PR9, K3)
+#
+# Le réessai est un GESTE DE LA VENDEUSE, devant la cliente : pas de tâche de
+# fond qui relancerait un terminal sans personne pour surveiller ce qui
+# s'affiche dessus (hors périmètre, §2 du contrat). La route ne crée aucune
+# vente : elle repousse un paiement, le polling existant conclura.
+#
+# Déclarée après `/{checkout_id}/retry` sans ambiguïté de routage : ce
+# dernier exige « retry » en second segment, là où l'on a ici un identifiant.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/retry-failed/{failed_payment_id}")
+async def retry_failed_payment(
+    failed_payment_id: uuid.UUID,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    failed_payment = await failed_payment_service.get_or_404(db, failed_payment_id)
+
+    svc = SumUpService()
+    _guard_configured_and_key(svc)
+
+    ping = await _cached_ping(svc)
+    if not ping.get("ready"):
         raise PosServiceError(
-            result.get("error_friendly") or "Le paiement a été refusé par le terminal.",
-            code="payment_failed",
+            ping.get("message") or "Terminal de paiement indisponible.",
+            code="reader_unavailable",
             status_code=409,
         )
-    return {"checkout_id": new_attempt.checkout_id, "status": "pending"}
+
+    description = await _cb_description(db)
+    try:
+        outcome = await failed_payment_service.retry(
+            db,
+            failed_payment,
+            svc=svc,
+            description=description,
+            user_id=current_user.id,
+            username=current_user.username,
+            ip=_client_ip(request),
+            request_id=_request_id(request),
+        )
+    except failed_payment_service.RetriesExhausted as exc:
+        # Corps enrichi (`failed_payment_id`, `retry_count`, `max_retries` à
+        # la racine) : la caisse affiche « réessais épuisés » avec le
+        # compteur, sans second appel. Rien n'a été écrit ici — pas de push,
+        # donc pas de commit à forcer.
+        return JSONResponse(status_code=409, content=exc.as_body())
+    attempt = outcome.attempt
+    new_checkout_id = attempt.checkout_id
+    new_attempt_count = attempt.attempt_count
+    # PR9/K1 — même journalisation des échanges que sur les autres routes de
+    # push : un réessai est précisément l'échange que l'on relira pour
+    # comprendre pourquoi le terminal restait muet.
+    await _log_exchanges(db, svc, request)
+
+    await JournalService(db).record(
+        EVENT_CB_FAILED if outcome.failed else EVENT_CB_INITIATED,
+        user_id=current_user.id,
+        username=current_user.username,
+        ip=_client_ip(request),
+        request_id=_request_id(request),
+        payload={
+            "checkout_id": new_checkout_id,
+            "amount": str(failed_payment.amount),
+            "client_uuid": str(failed_payment.client_uuid),
+            "attempt_count": new_attempt_count,
+        },
+    )
+
+    serialized = await failed_payment_service.snapshot(db, failed_payment)
+    # Le checkout à repoller est celui du nouvel essai, pas celui de l'essai
+    # d'origine auquel la ligne en file reste rattachée.
+    serialized["checkout_id"] = new_checkout_id
+
+    if outcome.failed:
+        # Le nouvel essai, le compteur de réessais et l'éventuel passage en
+        # « réessais épuisés » sont déjà écrits : ils doivent survivre au
+        # rollback de `get_db` (même raison que dans `initiate`).
+        await db.commit()
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": (
+                    outcome.result.get("error_friendly")
+                    or "Le paiement a été refusé par le terminal."
+                ),
+                "code": "payment_failed",
+                "recoverable": failed_payment_service.classify_push_result(outcome.result)[0],
+                "failed_payment_id": str(failed_payment.id),
+                "retry_count": serialized["retry_count"],
+                "max_retries": serialized["max_retries"],
+                "failed_payment": serialized,
+            },
+        )
+
+    return {
+        "checkout_id": new_checkout_id,
+        "status": "pending",
+        # À plat, ce dont la caisse a besoin pour reprendre son suivi et
+        # afficher « réessai 2 sur 3 » ; la ligne complète suit pour l'écran
+        # d'administration.
+        "failed_payment_id": str(failed_payment.id),
+        "retry_count": serialized["retry_count"],
+        "failed_payment": serialized,
+    }
