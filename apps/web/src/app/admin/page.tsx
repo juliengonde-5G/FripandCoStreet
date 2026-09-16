@@ -14,6 +14,7 @@ import BackupsTab from "@/components/admin/BackupsTab";
 import CashiersTab from "@/components/admin/CashiersTab";
 import ClientsTab from "@/components/admin/ClientsTab";
 import FiscalArchivesTab from "@/components/admin/FiscalArchivesTab";
+import MonitoringTab from "@/components/admin/MonitoringTab";
 import PaymentsTab from "@/components/admin/PaymentsTab";
 import RequireAuth from "@/components/layout/RequireAuth";
 import Sidebar from "@/components/layout/Sidebar";
@@ -32,6 +33,11 @@ import {
 import { downloadFile } from "@/lib/download";
 import { formatCurrency, formatDateTime } from "@/lib/format";
 import { kickDrawer } from "@/lib/printing";
+import {
+  fetchHardwareCompatibility,
+  type HardwareCompatibilityItem,
+  type HardwareCompatibilityStatus,
+} from "@/lib/monitoring";
 import {
   fetchWeather,
   fetchWeatherSettings,
@@ -58,7 +64,7 @@ import {
 import { findPairedUsbDevice, getStoredPrinter, isWebUsbSupported, pairUsbPrinter, sendBytes } from "@/lib/webusb-printer";
 
 /** Onglets de la page — l'ordre suit celui de la barre latérale (PR7, I1). */
-type Tab = "settings" | "hardware" | "clients" | "cashiers" | "payments" | "accounting" | "fiscal" | "backups";
+type Tab = "settings" | "hardware" | "clients" | "cashiers" | "payments" | "accounting" | "fiscal" | "backups" | "monitoring";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "settings", label: "Réglages" },
@@ -69,6 +75,8 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "accounting", label: "Comptabilité" },
   { id: "fiscal", label: "Archives fiscales" },
   { id: "backups", label: "Sauvegardes" },
+  // PR12 (N2) — état technique de l'installation.
+  { id: "monitoring", label: "Supervision" },
 ];
 
 /** Onglet ouvert par défaut quand l'URL ne porte pas de `?tab=`. */
@@ -144,6 +152,9 @@ function AdminTabs() {
       {tab === "hardware" && (
         <div className="space-y-6">
           <HardwareSettingsCard />
+          {/* PR12 (N4) — ce qu'on sait faire fonctionner, et ce qu'il ne
+              faut pas acheter. */}
+          <HardwareCompatibilityCard />
         </div>
       )}
 
@@ -160,6 +171,9 @@ function AdminTabs() {
       {tab === "fiscal" && <FiscalArchivesTab />}
 
       {tab === "backups" && <BackupsTab />}
+
+      {/* PR12 (N2) — supervision technique. */}
+      {tab === "monitoring" && <MonitoringTab />}
     </>
   );
 }
@@ -1465,4 +1479,90 @@ const EVENT_LABELS: Record<string, string> = {
 
 function describeEvent(type: string): string {
   return EVENT_LABELS[type] ?? type;
+}
+
+
+// ---------------------------------------------------------------------------
+// Matériel compatible (PR12, N4)
+// ---------------------------------------------------------------------------
+
+const COMPATIBILITY_LABELS: Record<HardwareCompatibilityStatus, string> = {
+  tested: "Testé",
+  recommended: "Devrait convenir",
+  not_supported: "À éviter",
+};
+
+function CompatibilityBadge({ status }: { status: HardwareCompatibilityStatus }) {
+  const cls =
+    status === "tested"
+      ? "bg-fc-success-soft text-fc-success"
+      : status === "recommended"
+        ? "bg-fc-bg-alt text-fc-ink-soft"
+        : "bg-fc-danger-soft text-fc-danger";
+  const dot = status === "tested" ? "bg-fc-success" : status === "recommended" ? "bg-fc-ink-mute" : "bg-fc-danger";
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-fc px-2.5 py-1 text-xs font-medium ${cls}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden />
+      {COMPATIBILITY_LABELS[status] ?? status}
+    </span>
+  );
+}
+
+/**
+ * Le matériel que la caisse sait piloter — « testé » veut dire branché et
+ * vérifié en boutique, pas « supposé compatible ». La liste vit côté
+ * serveur : une seule source de vérité, la même pour tout le monde.
+ */
+function HardwareCompatibilityCard() {
+  const [items, setItems] = useState<HardwareCompatibilityItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<DisplayableError>(null);
+
+  useEffect(() => {
+    fetchHardwareCompatibility()
+      .then(setItems)
+      .catch((err) => setError(describeError(err, "Impossible de charger la liste du matériel compatible.")))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <Card title="Matériel compatible" subtitle="Ce qui a été testé en boutique, ce qui devrait convenir, ce qu'il faut éviter.">
+      {loading ? (
+        <p className="text-sm text-fc-ink-soft">Chargement…</p>
+      ) : (
+        <div className="space-y-4">
+          <ErrorNotice message={error} />
+          {items.length === 0 && !errorText(error) && <p className="text-sm text-fc-ink-soft">Aucun matériel listé.</p>}
+          {items.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-fc-ink-mute uppercase text-xs tracking-wide">
+                    <th className="py-2 pr-4">Matériel</th>
+                    <th className="py-2 pr-4">Modèle</th>
+                    <th className="py-2 pr-4">Raccordement</th>
+                    <th className="py-2 pr-4">Statut</th>
+                    <th className="py-2 pr-4">Remarque</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item, index) => (
+                    <tr key={`${item.category}-${item.model}-${index}`} className="border-t border-fc-line align-top">
+                      <td className="py-2 pr-4 text-fc-ink">{item.category}</td>
+                      <td className="py-2 pr-4 text-fc-ink">{item.model}</td>
+                      <td className="py-2 pr-4 text-fc-ink-soft">{item.connection}</td>
+                      <td className="py-2 pr-4">
+                        <CompatibilityBadge status={item.status} />
+                      </td>
+                      <td className="py-2 pr-4 text-fc-ink-soft break-words">{item.notes ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
 }

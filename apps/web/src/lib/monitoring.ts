@@ -40,7 +40,7 @@ export interface MonitoringDatabase {
 }
 
 export interface MonitoringBackupLast {
-  created_at: string;
+  created_at: string | null;
   status: string;
   size_bytes: number | null;
 }
@@ -54,7 +54,7 @@ export interface MonitoringBackups {
 }
 
 export interface MonitoringJobRun {
-  at: string;
+  at: string | null;
   status: "ok" | "failed";
   detail: string | null;
 }
@@ -77,9 +77,11 @@ export interface MonitoringIntegrityChain {
 }
 
 export interface MonitoringIntegrity {
-  jet: MonitoringIntegrityChain | null;
-  fiscal: MonitoringIntegrityChain | null;
-  closures: MonitoringIntegrityChain | null;
+  jet: MonitoringIntegrityChain;
+  /** « Fiscal » couvre les ventes ET les rapports Z : un seul sujet pour
+   * l'exploitant. */
+  fiscal: MonitoringIntegrityChain;
+  closures: MonitoringIntegrityChain;
 }
 
 export interface MonitoringSumup {
@@ -100,10 +102,12 @@ export interface MonitoringPrinter {
   latency_ms: number | null;
 }
 
+/** Compteurs `null` quand la lecture a échoué : l'écran affiche « — »
+ * plutôt qu'un zéro rassurant mais faux. */
 export interface MonitoringQueues {
-  failed_payments_pending: number;
-  sumup_exchange_errors_24h: number;
-  clients_deletion_due: number;
+  failed_payments_pending: number | null;
+  sumup_exchange_errors_24h: number | null;
+  clients_deletion_due: number | null;
 }
 
 /** Une réponse 500 récente, telle que le serveur l'a retenue dans son
@@ -123,7 +127,9 @@ export interface Monitoring {
   database: MonitoringDatabase;
   backups: MonitoringBackups;
   jobs: MonitoringJob[];
-  integrity: MonitoringIntegrity;
+  /** `null` tant qu'aucune vérification n'a été demandée depuis le
+   * démarrage (le serveur ne recalcule qu'à la demande). */
+  integrity: MonitoringIntegrity | null;
   external: MonitoringExternal;
   printer: MonitoringPrinter;
   queues: MonitoringQueues;
