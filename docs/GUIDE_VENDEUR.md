@@ -60,6 +60,29 @@ vente, son adresse est déjà remplie pour l'envoi du ticket, et son prénom
 apparaît sur le ticket imprimé. Pour détacher une cliente d'un ticket déjà
 encaissé : **Tickets du jour** → sélectionne-le → **Détacher**.
 
+## Elle est déjà venue ? (historique)
+1. Sur la carte d'une fiche, dans **Choisir la cliente**, touche
+   **Historique** — ou touche **Historique** sur la pastille, à côté du
+   nom de la cliente déjà posée sur le ticket.
+2. Lis l'en-tête : « Déjà venue 3 fois · dernière visite il y a 8 j ·
+   142,00 € en tout ». En dessous, ses cinq derniers tickets avec leurs
+   articles ; un ticket annulé porte la mention **Annulé** et ne compte pas
+   dans le total. Une fiche sans achat affiche **Première visite**.
+3. Touche **Retour** (ou la touche Échap) pour revenir à la vente. Rien
+   n'est modifié, et rien de tout cela ne s'imprime sur le ticket.
+
+## Une fiche existe déjà ?
+1. Dans **Nouveau client**, remplis la fiche comme d'habitude. Dès que tu as
+   tapé un prénom **et** un nom, ou une adresse e-mail complète, ou un
+   numéro complet, la caisse regarde toute seule si quelqu'un lui ressemble.
+2. Si oui, l'encart **Une fiche existe peut-être déjà** montre jusqu'à trois
+   fiches, avec le motif (même e-mail, même téléphone, même nom), les
+   coordonnées masquées et le nombre de visites.
+3. C'est bien elle → **Utiliser cette fiche** : la fiche existante est posée
+   sur le ticket, rien n'est créé. Ce n'est pas elle (une homonyme, une
+   ligne fixe partagée) → **Créer quand même**, puis **Créer et
+   sélectionner**.
+
 ## Faire une remise
 Avant d'encaisser, touche le chip **Remise** (ou **Remise globale**) au-dessus
 du total, choisis € ou %, saisis la valeur : elle s'applique à tout le panier.
