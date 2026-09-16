@@ -108,6 +108,9 @@ export async function fetchAPI<T = unknown>(
     const detail = extractErrorDetail(data);
     const code = extractErrorCode(data);
     const error = new ApiError(res.status, detail, code);
+    // Corps brut conservé pour les erreurs qui portent des champs de reprise
+    // en plus de `detail`/`code` (PR9 : `recoverable`, `failed_payment_id`).
+    error.body = data;
     // Retry-After est utilisé par la page de connexion pour le rate-limit.
     const retryAfter = res.headers.get("Retry-After");
     if (retryAfter) {

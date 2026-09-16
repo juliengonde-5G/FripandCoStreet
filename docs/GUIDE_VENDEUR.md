@@ -92,6 +92,22 @@ sans vente : touche **Mouvement de caisse**, choisis **Entrée** ou
 ## Si le terminal refuse la carte
 Touche **Réessayer**. Si ça persiste, encaisse en **Espèces**.
 
+## Le terminal n'a pas répondu : réessayer
+Quand l'écran affiche « Le terminal n'a pas répondu, la vente n'est pas
+perdue », le montant n'est jamais arrivé au terminal : **rien n'a été
+débité, rien n'a été encaissé, le panier est intact**. Deux boutons :
+
+- **Réessayer** — le montant repart sur le terminal, fais présenter la carte
+  à nouveau. C'est le geste normal.
+- **Autre moyen de paiement** — retour au choix Espèces / Carte / Mixte avec
+  le même panier, pour encaisser autrement.
+
+Au bout de trois réessais, l'écran affiche « Réessais épuisés, choisissez un
+autre moyen de paiement » et le bouton **Réessayer** disparaît : encaisse en
+**Espèces**. Dans tous les cas la vente ne s'enregistre qu'une fois le
+paiement accepté. L'essai raté reste tracé côté **Administration** (onglet
+**Paiements CB**) : rien de plus à faire en caisse.
+
 ## Si l'imprimante ne répond pas
 Le message « Imprimante injoignable » apparaît. Vérifie qu'elle est allumée
 et connectée au réseau, puis touche **Réessayer**. Le ticket reste
