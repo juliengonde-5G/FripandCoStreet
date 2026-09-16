@@ -23,8 +23,9 @@ from tests.conftest import API_DIR, TEST_DATABASE_URL
 
 pytestmark = pytest.mark.anyio
 
-# Base dediee, derivee de celle de la suite : deux agents (ou deux CI) qui
-# travaillent en parallele sur des bases differentes gardent chacun la leur.
+# Base dediee, DERIVEE de celle de la suite plutot qu'ecrite en dur : deux
+# executions en parallele (deux postes, deux branches de CI) pointant sur des
+# bases de test differentes gardent chacune la sienne.
 RESET_DATABASE_URL = TEST_DATABASE_URL + "_reset"
 RESET_DATABASE_NAME = RESET_DATABASE_URL.rsplit("/", 1)[-1]
 MAINTENANCE_DSN = (
