@@ -451,9 +451,22 @@ class ClientService:
         return (await self.db.execute(query)).first() is not None
 
     async def search(
-        self, q: str | None, *, limit: int = 50, include_anonymized: bool = True
+        self,
+        q: str | None,
+        *,
+        limit: int = 50,
+        include_anonymized: bool = True,
+        newsletter_only: bool = False,
+        deletion_pending: bool = False,
     ) -> list[Client]:
         """Recherche par e-mail, prenom, nom — et par telephone (I3).
+
+        PR11 (M4) — deux filtres ADDITIFS, cumulables avec la recherche :
+        `newsletter_only` ne garde que les fiches abonnees, `deletion_pending`
+        celles dont la suppression est programmee et pas encore executee
+        (demande posee, fiche pas encore anonymisee). Ils se posent en SQL,
+        jamais apres coup en memoire : sinon la limite ramenerait 50 fiches
+        dont trois abonnees.
 
         Quand la saisie ne contient que des chiffres, des separateurs et un
         eventuel `+` (`phone_search_digits`), la recherche porte AUSSI sur
@@ -470,6 +483,13 @@ class ClientService:
         )
         if not include_anonymized:
             query = query.where(Client.anonymized_at.is_(None))
+        if newsletter_only:
+            query = query.where(Client.newsletter_optin.is_(True))
+        if deletion_pending:
+            query = query.where(
+                Client.deletion_requested_at.is_not(None),
+                Client.anonymized_at.is_(None),
+            )
         if q and q.strip():
             like = f"%{q.strip().lower()}%"
             condition = (
@@ -1691,3 +1711,116 @@ def _serialize_communication(c: Communication) -> dict:
         "error": c.error,
         "created_at": c.created_at.isoformat() if c.created_at else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Export CSV des abonnes a la newsletter (PR11, M4)
+# ---------------------------------------------------------------------------
+
+# Colonnes du fichier, dans l'ordre. En-tetes en francais : ce fichier est lu
+# par une personne (et importe dans l'outil d'e-mailing declare), pas par un
+# programme de l'application.
+NEWSLETTER_EXPORT_COLUMNS = [
+    "email",
+    "prenom",
+    "nom",
+    "telephone",
+    "consentement_le",
+    "source",
+]
+
+
+async def newsletter_export_csv(db: AsyncSession) -> tuple[str, str, int]:
+    """Abonnes a la newsletter, en CSV (BOM UTF-8, separateur « ; »).
+
+    Ne sortent QUE les fiches actives et abonnees :
+      - `newsletter_optin` vrai (l'etat courant du registre) ;
+      - ni anonymisee (RGPD deja execute), ni absorbee par une fusion (son
+        contenu vit desormais sur la fiche conservee : l'exporter serait
+        envoyer deux fois le meme message a la meme personne), ni en attente
+        de suppression (elle a demande a partir — l'ajouter a une campagne
+        pendant son delai de reflexion serait exactement ce qu'elle a
+        refuse) ;
+      - avec une adresse e-mail : une ligne sans adresse n'est pas
+        importable dans un outil d'e-mailing, et gonflerait le compteur
+        d'abonnes d'un contact qu'on ne peut pas joindre.
+
+    `consentement_le` et `source` viennent de la DERNIERE ligne `newsletter`
+    ACCORDEE du registre append-only : c'est la preuve a produire en cas de
+    controle, pas le cache `newsletter_optin`.
+
+    Retourne ``(filename, csv_text, count)``.
+    """
+    import csv
+    import io
+    from zoneinfo import ZoneInfo
+
+    paris = ZoneInfo("Europe/Paris")
+
+    clients = (
+        (
+            await db.execute(
+                select(Client)
+                .where(
+                    Client.newsletter_optin.is_(True),
+                    Client.anonymized_at.is_(None),
+                    Client.merged_into_client_id.is_(None),
+                    Client.deletion_requested_at.is_(None),
+                    Client.email.is_not(None),
+                )
+                .order_by(Client.email.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    consents: dict[uuid.UUID, Consent] = {}
+    if clients:
+        # Une seule requete pour tout le fichier : jamais une requete par
+        # fiche (une boutique qui dure finit avec des milliers d'abonnes).
+        rows = (
+            (
+                await db.execute(
+                    select(Consent)
+                    .where(
+                        Consent.client_id.in_([c.id for c in clients]),
+                        Consent.purpose == ConsentPurpose.newsletter,
+                        Consent.granted.is_(True),
+                    )
+                    .order_by(Consent.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # Parcours croissant : la derniere ligne vue par client est la plus
+        # recente.
+        for consent in rows:
+            consents[consent.client_id] = consent
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
+    writer.writerow(NEWSLETTER_EXPORT_COLUMNS)
+    for client in clients:
+        consent = consents.get(client.id)
+        granted_at = ""
+        if consent is not None and consent.created_at is not None:
+            moment = consent.created_at
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            granted_at = moment.astimezone(paris).strftime("%d/%m/%Y %H:%M:%S")
+        writer.writerow(
+            [
+                client.email or "",
+                client.first_name or "",
+                client.last_name or "",
+                client.phone or "",
+                granted_at,
+                consent.source.value if consent is not None else "",
+            ]
+        )
+
+    today = datetime.now(paris).date().isoformat()
+    # BOM : sans lui, Excel lit « Léa » en « LÃ©a » a l'ouverture.
+    return f"abonnes_newsletter_{today}.csv", "﻿" + buffer.getvalue(), len(clients)
