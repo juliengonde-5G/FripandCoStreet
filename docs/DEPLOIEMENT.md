@@ -138,6 +138,8 @@ l'opération.
 - [ ] Cron de sauvegarde installé (§5) et une restauration testée une fois
       (§5, critère d'acceptation §6 du CDC).
 - [ ] TTL DNS remonté à une valeur normale une fois le service stabilisé.
+- [ ] Le matin de l'ouverture : remise à zéro des données d'essai (§12),
+      essai à blanc d'abord.
 
 ## 3. Déploiement
 
