@@ -24,10 +24,15 @@ import Modal from "@/components/ui/Modal";
 import { api, ApiError } from "@/lib/api";
 import {
   cancelClientDeletion,
+  CLIENT_FILTERS,
+  clientFilterParams,
+  downloadNewsletterCsv,
   duplicateReasonLabel,
+  fetchClients,
   fetchDuplicateGroups,
   mergeClients,
   requestClientDeletion,
+  type ClientListFilter,
   type DuplicateGroup,
   type DuplicateGroupClient,
 } from "@/lib/clients";
@@ -305,6 +310,12 @@ export default function ClientsTab() {
   const [list, setList] = useState<Client[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
+  // PR11 (M4) : la liste se restreint aux abonnées à la newsletter ou aux
+  // fiches dont la suppression est programmée. Les deux puces s'ajoutent à
+  // la recherche libre, elles ne la remplacent pas.
+  const [filter, setFilter] = useState<ClientListFilter>("all");
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Recompté après chaque fusion : la carte des doublons se relit sans
   // que la page entière ne se remonte.
@@ -313,19 +324,37 @@ export default function ClientsTab() {
   // fiche conservée à sa place, en le disant.
   const [mergedNotice, setMergedNotice] = useState<string | null>(null);
 
-  const search = (q: string) => {
+  const search = (q: string, listFilter: ClientListFilter = filter) => {
     setLoadingList(true);
     setListError(null);
-    const qs = new URLSearchParams({ limit: "50" });
-    if (q.trim()) qs.set("q", q.trim());
-    api
-      .get<{ clients: Client[] }>(`/api/admin/clients?${qs.toString()}`)
-      .then((data) => setList(data.clients))
+    fetchClients({ q, ...clientFilterParams(listFilter) })
+      .then((clients) => setList(clients))
       .catch((err) => setListError(err instanceof ApiError ? err.detail : "Impossible de charger les clients."))
       .finally(() => setLoadingList(false));
   };
 
   useEffect(() => search(""), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Changement de puce : la liste se relit tout de suite, sans repasser
+   * par le bouton « Rechercher » — le filtre est un geste, pas une saisie. */
+  const changeFilter = (next: ClientListFilter): void => {
+    setFilter(next);
+    search(query, next);
+  };
+
+  /** Export des abonnés. Le fichier part vers l'outil d'e-mailing déclaré
+   * de la boutique, et nulle part ailleurs (voir docs/MANUEL_MANAGER.md). */
+  const exportSubscribers = async (): Promise<void> => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      await downloadNewsletterCsv();
+    } catch (err) {
+      setExportError(err instanceof ApiError ? err.detail : "Impossible de préparer l'export.");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   /** Après une fusion : la liste, la fiche ouverte et les doublons
    * repartent de la fiche conservée. */
@@ -369,6 +398,47 @@ export default function ClientsTab() {
           <Button variant="outline" size="sm" onClick={() => search(query)} disabled={loadingList}>
             {loadingList ? "Recherche…" : "Rechercher"}
           </Button>
+
+          {/* PR11 (M4) — puces de filtre, compteur et export des abonnés. */}
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Filtrer les fiches">
+            {CLIENT_FILTERS.map((chip) => (
+              <button
+                key={chip.value}
+                type="button"
+                onClick={() => changeFilter(chip.value)}
+                aria-pressed={filter === chip.value}
+                className={`min-h-touch rounded-fc border px-3 py-2 text-xs font-medium transition-colors ${
+                  filter === chip.value
+                    ? "border-fc-primary bg-fc-primary-soft text-fc-primary-deep"
+                    : "border-fc-line bg-fc-surface text-fc-ink-soft hover:bg-fc-bg-alt"
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-xs text-fc-ink-mute" aria-live="polite">
+            {loadingList
+              ? "Recherche…"
+              : `${list.length} ${list.length > 1 ? "fiches" : "fiche"}${
+                  filter === "newsletter"
+                    ? " abonnées à la newsletter"
+                    : filter === "deletion"
+                      ? " dont la suppression est programmée"
+                      : ""
+                }`}
+          </p>
+
+          <Button variant="outline" size="sm" onClick={() => void exportSubscribers()} disabled={exporting}>
+            {exporting ? "Préparation…" : "Exporter les abonnés (CSV)"}
+          </Button>
+          <p className="text-xs text-fc-ink-mute">
+            Le fichier ne contient que les fiches abonnées et actives. Il ne sert qu&apos;à alimenter
+            l&apos;outil d&apos;e-mailing déclaré de la boutique.
+          </p>
+          <ErrorNotice message={exportError} />
+
           <ErrorNotice message={listError} />
           {!loadingList && list.length === 0 && <p className="text-sm text-fc-ink-soft">Aucun client.</p>}
           <ul className="divide-y divide-fc-line max-h-[520px] overflow-y-auto -mx-1">
