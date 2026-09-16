@@ -339,7 +339,28 @@ chaque ouverture de tiroir sont journalisées (JET `receipt.printed`,
 - La clé `FISCAL_SIGNING_KEY` est indispensable pour vérifier les signatures :
   la conserver hors ligne, sous accès restreint, avec les archives.
 
-## 10. Déploiement automatique
+## 10. Météo locale (PR11)
+
+La carte météo de l'accueil et du cahier du jour interroge OpenWeather.
+
+- **Clé** : `OPENWEATHER_API_KEY` dans `.env` (compte gratuit sur
+  api.openweathermap.org). C'est un secret : il n'est jamais écrit en base,
+  jamais renvoyé par l'API (l'écran Réglages → Météo affiche seulement
+  « clé configurée » ou « clé absente ») et jamais journalisé. Le conteneur
+  API la reçoit par `env_file: ../.env`
+  (`docker/docker-compose.prod.yml`) — pas par une interpolation `${…}`,
+  qui irait chercher le `.env` du dossier `docker/` et écraserait la vraie
+  valeur par une chaîne vide.
+- **Lieu** : Réglages → Météo (ville, et facultativement latitude et
+  longitude, qui priment quand elles sont renseignées — deux communes
+  homonymes ne se départagent pas autrement). Ville vide : repli sur la
+  ville de la fiche boutique. Aucun géocodage n'est fait.
+- **Sans clé, ou si OpenWeather ne répond pas** : la carte affiche « Météo
+  indisponible » et la raison courte. Rien d'autre ne change — aucune page
+  ne tombe, aucune vente n'est affectée. Un appel sortant au plus par quart
+  d'heure (cache en mémoire de l'API), donc pas de quota à surveiller.
+
+## 11. Déploiement automatique
 
 `.github/workflows/deploy.yml` (actif dans le dépôt dédié) : après une CI verte
 sur `main`, connexion SSH et `./scripts/deploy.sh --pull`. Secrets à créer dans

@@ -61,6 +61,13 @@ services:
       # Sauvegardes applicatives (PR5) — sous le volume `fripco_data` monté
       # ci-dessous (persiste les redéploiements), jamais dans l'image.
       BACKUP_DIR: /app/data/backups
+      # Météo locale (PR11, M3) — clé OpenWeather. Elle transite par
+      # `env_file` ci-dessus (../.env) et NON par une interpolation
+      # `${OPENWEATHER_API_KEY}` : compose interpole depuis le .env du
+      # dossier `docker/`, pas depuis celui de la racine, et une clé absente
+      # de ce fichier-là écraserait ici la vraie valeur par une chaîne vide.
+      # Absente, la météo est simplement « indisponible » : rien d'autre ne
+      # change, aucune page ne tombe.
     volumes:
       - fripco_data:/app/data
     depends_on:
