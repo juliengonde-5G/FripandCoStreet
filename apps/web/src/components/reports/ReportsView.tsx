@@ -573,9 +573,11 @@ export default function ReportsView() {
           {report && (
             <p className="mt-0.5 text-sm text-fc-ink-soft">
               <span className="font-medium text-fc-ink">{report.period.label}</span>
-              {/* Le libellé du serveur porte déjà la date exacte d'un jour :
-                  les bornes ne s'ajoutent que pour une semaine ou un mois. */}
-              {report.period.from !== report.period.to && (
+              {/* Le libellé du serveur porte déjà les dates d'un jour
+                  (« mardi 15 septembre 2026 ») et d'une semaine (« semaine
+                  du 14 au 20 septembre 2026 ») : seules les bornes d'un
+                  mois valent d'être ajoutées. */}
+              {report.period.kind === "monthly" && (
                 <> — {periodRangeLabel(report.period.from, report.period.to)}</>
               )}
             </p>
