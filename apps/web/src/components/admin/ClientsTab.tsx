@@ -346,8 +346,16 @@ export default function ClientsTab() {
     <div className="space-y-6">
       <DuplicatesCard refreshKey={duplicatesKey} onMerged={handleMerged} />
 
+      {/* `min-w-0` sur les deux colonnes : sans cela, un élément de grille
+          garde sa largeur minimale automatique, les `truncate` ci-dessous
+          ne s'appliquent pas et une adresse longue pousse la page en
+          largeur (défilement horizontal sur téléphone). */}
       <div className="grid items-start gap-6 lg:grid-cols-[340px_1fr]">
-      <Card title="Clients" subtitle="Recherche par e-mail, par nom ou par téléphone.">
+        <Card
+          className="min-w-0"
+          title="Clients"
+          subtitle="Recherche par e-mail, par nom ou par téléphone."
+        >
         <div className="space-y-3">
           <Input
             label="Rechercher"
@@ -398,13 +406,13 @@ export default function ClientsTab() {
         </div>
       </Card>
 
-      <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
         {mergedNotice && (
           <div
             role="status"
             className="flex items-start justify-between gap-3 rounded-fc-lg border border-fc-primary/30 bg-fc-primary-soft px-4 py-3 text-sm text-fc-primary-deep"
           >
-            <span>{mergedNotice}</span>
+            <span className="min-w-0">{mergedNotice}</span>
             <button
               type="button"
               onClick={() => setMergedNotice(null)}
@@ -430,7 +438,7 @@ export default function ClientsTab() {
             <p className="text-sm text-fc-ink-soft">Aucun client sélectionné.</p>
           </Card>
         )}
-      </div>
+        </div>
       </div>
     </div>
   );
