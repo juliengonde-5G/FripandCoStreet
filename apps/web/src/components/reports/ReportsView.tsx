@@ -78,15 +78,19 @@ function shortDayLabel(iso: string): string {
   return d.toLocaleDateString("fr-FR", { weekday: "short", day: "numeric" });
 }
 
-/** « 14/09 » — libellé compact, pour un mois entier (jusqu'à 31 barres). */
+/** « 14 » — quantième seul, seul libellé qui tienne sous une barre quand
+ * le mois entier en aligne trente-et-une. */
 function compactDayLabel(iso: string): string {
   const d = parseIsoDay(iso);
   if (!d) return iso;
-  return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
+  return String(d.getDate());
 }
 
+/** Quantième horaire seul sous la barre : « 12h » ne tient pas dans un
+ * vingt-quatrième de la largeur d'un téléphone. Le titre du panneau
+ * (« Heure par heure ») dit déjà de quoi il s'agit. */
 function hourLabel(hour: number): string {
-  return `${hour}h`;
+  return String(hour);
 }
 
 /** Bornes de la période, en clair sous le titre. */
@@ -94,9 +98,11 @@ function periodRangeLabel(from: string, to: string): string {
   const a = parseIsoDay(from);
   const b = parseIsoDay(to);
   if (!a || !b) return `${from} → ${to}`;
-  const fmt = (d: Date) => d.toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
-  if (from === to) return fmt(a);
-  return `du ${a.toLocaleDateString("fr-FR", { day: "numeric", month: "long" })} au ${fmt(b)}`;
+  // « 1er », jamais « 1 » : c'est la seule irrégularité du français ici.
+  const dayOf = (d: Date) => (d.getDate() === 1 ? "1er" : String(d.getDate()));
+  const monthOf = (d: Date) => d.toLocaleDateString("fr-FR", { month: "long" });
+  if (from === to) return `${dayOf(a)} ${monthOf(a)} ${a.getFullYear()}`;
+  return `du ${dayOf(a)} ${monthOf(a)} au ${dayOf(b)} ${monthOf(b)} ${b.getFullYear()}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,8 +123,12 @@ function Panel({
   className?: string;
 }) {
   return (
+    /* `min-w-0` : sans lui, une carte placée dans une grille prend la
+       largeur de son contenu le plus large (le tableau « Par vendeuse » et
+       ses 520 px) et fait défiler la page entière à 400 px. Avec, c'est le
+       tableau seul qui défile dans son cadre. */
     <section
-      className={`fc-print-panel rounded-fc-lg border border-fc-line bg-fc-surface p-4 sm:p-6 ${className}`}
+      className={`fc-print-panel min-w-0 rounded-fc-lg border border-fc-line bg-fc-surface p-4 sm:p-6 ${className}`}
     >
       <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
         <div>
@@ -662,14 +672,19 @@ export default function ReportsView() {
                   />
                 ) : (
                   <p className="rounded-fc bg-fc-bg-alt px-3 py-2 text-sm text-fc-ink-soft">
-                    Aucun objectif défini pour cette période —{" "}
-                    <Link
-                      href="/admin"
-                      className="fc-print-hide font-medium text-fc-primary underline underline-offset-2 hover:text-fc-primary-deep"
-                    >
-                      le fixer dans Administration → Réglages
-                    </Link>
-                    .
+                    Aucun objectif défini pour cette période.
+                    {/* Masqué à l'impression avec sa ponctuation : sur une
+                        feuille, un renvoi vers un écran ne sert à rien. */}
+                    <span className="fc-print-hide">
+                      {" "}
+                      <Link
+                        href="/admin"
+                        className="font-medium text-fc-primary underline underline-offset-2 hover:text-fc-primary-deep"
+                      >
+                        Le fixer dans Administration → Réglages
+                      </Link>
+                      .
+                    </span>
                   </p>
                 )}
 
@@ -704,19 +719,22 @@ export default function ReportsView() {
             <BarChart points={chart.points} />
           </Panel>
 
-          <div className="grid gap-5 lg:grid-cols-2">
-            <Panel title="Par vendeuse" subtitle="Ventes, annulations et net par personne identifiée en caisse.">
-              <CashierTable rows={report.by_cashier} />
-            </Panel>
+          {/* Le tableau par vendeuse occupe toute la largeur : ses six
+              colonnes ne tiennent pas dans une demi-largeur sans que la
+              dernière disparaisse sous le bord de la carte. */}
+          <Panel title="Par vendeuse" subtitle="Ventes, annulations et net par personne identifiée en caisse.">
+            <CashierTable rows={report.by_cashier} />
+          </Panel>
 
+          <div className="grid gap-5 lg:grid-cols-2">
             <Panel title="Articles les plus vendus" subtitle="Dix libellés en tête, saisis en caisse.">
               <TopItemsTable rows={report.top_items} />
             </Panel>
-          </div>
 
-          <Panel title="Clôtures de caisse" subtitle="Rapports Z scellés sur la période.">
-            <ZList rows={report.z_reports} />
-          </Panel>
+            <Panel title="Clôtures de caisse" subtitle="Rapports Z scellés sur la période.">
+              <ZList rows={report.z_reports} />
+            </Panel>
+          </div>
         </div>
       )}
     </div>

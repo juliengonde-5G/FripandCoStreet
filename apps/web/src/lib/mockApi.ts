@@ -584,6 +584,10 @@ let settings: {
   hardware: HardwareSettings;
   accounting: AccountingSettings;
   targets: TargetsSettings;
+  // PR11 (M3) — localisation de la météo. La clé d'API n'est PAS un
+  // réglage (secret d'environnement) : `api_key_configured` est ajouté à
+  // la lecture, comme le fait le serveur, et jamais stocké.
+  weather: { city: string; lat: number | null; lon: number | null };
 } = {
   // PR8 (J2) — identification facultative par défaut, comme le contrat :
   // la caisse d'une boutique qui tourne seule ne doit pas se bloquer du
@@ -638,6 +642,9 @@ let settings: {
   // départ : le tableau de bord doit pouvoir être vu dans son état « aucun
   // objectif défini » sans manipulation préalable.
   targets: { daily: "0.00", monthly: {} },
+  // Ville de la boutique de démo, sans coordonnées : c'est le cas le plus
+  // courant (la ville suffit au fournisseur météo).
+  weather: { city: "Rouen", lat: null, lon: null },
 };
 
 // --- PR11 — cahier du jour (M2) -------------------------------------------
@@ -2252,6 +2259,388 @@ function seedPr11Cahier(): void {
   }
 }
 
+// --- PR11 — rapports, météo, réglages (M1 / M3 / M5) ----------------------
+//
+// Les rapports de démo sont calculés sur le MÊME jeu de ventes que le
+// tableau de bord d'accueil (`transactions`), avec les mêmes conventions :
+// net = ventes − annulations, montants en chaînes à deux décimales, jour
+// civil local. Rien n'est inventé pour faire joli — une journée sans vente
+// rend des zéros et des listes vides, comme le ferait le serveur.
+//
+// Le bloc « PR11 — cahier du jour » voisin fournit `cahierDailyTarget` (la
+// répartition de l'objectif du mois sur les jours d'ouverture) et
+// `cahierWeatherSnapshot` : l'objectif d'un rapport quotidien et celui du
+// cahier sont donc la même valeur, comme l'exige le contrat.
+
+const REPORT_WEEKDAY_NAMES = [
+  "lundi",
+  "mardi",
+  "mercredi",
+  "jeudi",
+  "vendredi",
+  "samedi",
+  "dimanche",
+];
+
+const REPORT_MONTH_NAMES = [
+  "janvier",
+  "février",
+  "mars",
+  "avril",
+  "mai",
+  "juin",
+  "juillet",
+  "août",
+  "septembre",
+  "octobre",
+  "novembre",
+  "décembre",
+];
+
+/** Libellé du jour de la vendeuse non identifiée — même valeur que le
+ * serveur (`cashier_service.UNIDENTIFIED_LABEL`). */
+const REPORT_UNIDENTIFIED = "Non identifiée";
+
+type MockReportKind = "daily" | "weekly" | "monthly";
+
+/** « lundi 14 septembre 2026 », sans dépendre de la locale du navigateur. */
+function reportFrenchDate(day: Date): string {
+  return `${REPORT_WEEKDAY_NAMES[(day.getDay() + 6) % 7]} ${day.getDate()} ${
+    REPORT_MONTH_NAMES[day.getMonth()]
+  } ${day.getFullYear()}`;
+}
+
+/** Bornes civiles inclusives et libellé lisible — mêmes règles que M1. */
+function reportPeriod(kind: MockReportKind, reference: Date): { from: Date; to: Date; label: string } {
+  if (kind === "daily") {
+    return { from: reference, to: reference, label: reportFrenchDate(reference) };
+  }
+  if (kind === "weekly") {
+    const from = new Date(reference);
+    from.setDate(from.getDate() - ((from.getDay() + 6) % 7));
+    const to = new Date(from);
+    to.setDate(to.getDate() + 6);
+    const span =
+      from.getMonth() === to.getMonth()
+        ? `du ${from.getDate()} au ${to.getDate()} ${REPORT_MONTH_NAMES[to.getMonth()]} ${to.getFullYear()}`
+        : `du ${from.getDate()} ${REPORT_MONTH_NAMES[from.getMonth()]} au ${to.getDate()} ${
+            REPORT_MONTH_NAMES[to.getMonth()]
+          } ${to.getFullYear()}`;
+    return { from, to, label: `semaine ${span}` };
+  }
+  const from = new Date(reference.getFullYear(), reference.getMonth(), 1);
+  const to = new Date(reference.getFullYear(), reference.getMonth() + 1, 0);
+  return { from, to, label: `${REPORT_MONTH_NAMES[from.getMonth()]} ${from.getFullYear()}` };
+}
+
+/** Même période précédente : la veille, la semaine d'avant, le mois CIVIL
+ * d'avant (jamais « les 30 jours précédents »). */
+function reportPreviousPeriod(kind: MockReportKind, from: Date, to: Date): { from: Date; to: Date } {
+  if (kind === "monthly") {
+    const previousLast = new Date(from.getFullYear(), from.getMonth(), 0);
+    return { from: new Date(previousLast.getFullYear(), previousLast.getMonth(), 1), to: previousLast };
+  }
+  const span = Math.round((to.getTime() - from.getTime()) / 86400000) + 1;
+  const previousFrom = new Date(from);
+  previousFrom.setDate(previousFrom.getDate() - span);
+  const previousTo = new Date(to);
+  previousTo.setDate(previousTo.getDate() - span);
+  return { from: previousFrom, to: previousTo };
+}
+
+/** Transactions d'une plage de jours civils, bornes incluses. */
+function reportTransactions(from: Date, to: Date): TransactionOut[] {
+  const fromKey = dayKeyOf(from);
+  const toKey = dayKeyOf(to);
+  return transactions.filter((tx) => {
+    const key = dayKeyOf(new Date(tx.created_at));
+    return key >= fromKey && key <= toKey;
+  });
+}
+
+/** Vendeuse attribuée à une vente en mode démo. Les transactions du mock
+ * n'en portent pas (le contrat PR8 les pose côté serveur) : on en dérive
+ * une, stable pour une transaction donnée, pour que le tableau « Par
+ * vendeuse » ait quelque chose à montrer. */
+function reportCashierOf(tx: TransactionOut): { id: string | null; display_name: string } {
+  if (cashiers.length === 0) return { id: null, display_name: REPORT_UNIDENTIFIED };
+  const seed = fnv1a(tx.id);
+  // Une vente sur sept reste non identifiée : la ligne « Non identifiée »
+  // du rapport est un cas réel, pas une curiosité.
+  if (seed % 7 === 0) return { id: null, display_name: REPORT_UNIDENTIFIED };
+  const chosen = cashiers[seed % cashiers.length];
+  return { id: chosen.id, display_name: chosen.display_name };
+}
+
+function reportNet(sales: TransactionOut[], refunds: TransactionOut[]): number {
+  return round2(
+    sales.reduce((sum, t) => sum + t.total_ttc, 0) - refunds.reduce((sum, t) => sum + t.total_ttc, 0),
+  );
+}
+
+/** Objectif de la période : le mois pour un rapport mensuel, l'objectif du
+ * jour du cahier pour un rapport quotidien, leur somme pour une semaine. */
+function reportTarget(kind: MockReportKind, from: Date, to: Date): number {
+  if (kind === "monthly") return monthlyTargetOf(monthKeyOf(from));
+  let total = 0;
+  const cursor = new Date(from);
+  while (cursor <= to) {
+    total = round2(total + cahierDailyTarget(dayKeyOf(cursor)));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return total;
+}
+
+/** Enveloppe complète d'un rapport (M1). */
+function buildReport(kind: MockReportKind, reference: Date): Record<string, unknown> {
+  const { from, to, label } = reportPeriod(kind, reference);
+  const inPeriod = reportTransactions(from, to);
+  const sales = inPeriod.filter((t) => t.transaction_type === "sale");
+  const refunds = inPeriod.filter((t) => t.transaction_type === "refund");
+  const net = reportNet(sales, refunds);
+  const gross = round2(sales.reduce((sum, t) => sum + t.total_ttc, 0));
+  const refundsTotal = round2(refunds.reduce((sum, t) => sum + t.total_ttc, 0));
+  // Une vente annulée ne compte pas au dénominateur du panier moyen.
+  const basketCount = sales.filter((t) => !cancelledToRefund.has(t.id)).length;
+  const itemsCount = sales.reduce((sum, t) => sum + t.items.reduce((n, it) => n + it.quantity, 0), 0);
+
+  // --- Par vendeuse -------------------------------------------------------
+  const byCashier = new Map<
+    string,
+    {
+      cashier_id: string | null;
+      display_name: string;
+      sales_count: number;
+      sales_total: number;
+      refunds_count: number;
+      refunds_total: number;
+    }
+  >();
+  for (const tx of inPeriod) {
+    const who = reportCashierOf(tx);
+    const key = who.id ?? "sans-vendeuse";
+    const row =
+      byCashier.get(key) ??
+      {
+        cashier_id: who.id,
+        display_name: who.display_name,
+        sales_count: 0,
+        sales_total: 0,
+        refunds_count: 0,
+        refunds_total: 0,
+      };
+    if (tx.transaction_type === "sale") {
+      row.sales_count += 1;
+      row.sales_total = round2(row.sales_total + tx.total_ttc);
+    } else {
+      row.refunds_count += 1;
+      row.refunds_total = round2(row.refunds_total + tx.total_ttc);
+    }
+    byCashier.set(key, row);
+  }
+
+  // --- Articles (libellé normalisé, ventes non annulées) ------------------
+  const items = new Map<string, { label: string; quantity: number; net: number }>();
+  for (const tx of sales) {
+    if (cancelledToRefund.has(tx.id)) continue;
+    for (const item of tx.items) {
+      const key = item.label.trim().toLowerCase().replace(/\s+/g, " ");
+      const row = items.get(key) ?? { label: key, quantity: 0, net: 0 };
+      row.quantity += item.quantity;
+      row.net = round2(row.net + item.line_total);
+      items.set(key, row);
+    }
+  }
+  const topItems = [...items.values()]
+    .sort((a, b) => b.net - a.net || a.label.localeCompare(b.label))
+    .slice(0, 10);
+
+  // --- Période précédente -------------------------------------------------
+  const previous = reportPreviousPeriod(kind, from, to);
+  const previousInPeriod = reportTransactions(previous.from, previous.to);
+  const previousNet = reportNet(
+    previousInPeriod.filter((t) => t.transaction_type === "sale"),
+    previousInPeriod.filter((t) => t.transaction_type === "refund"),
+  );
+  const deltaPct = previousNet > 0 ? Math.round(((net - previousNet) / previousNet) * 1000) / 10 : null;
+
+  const targetAmount = reportTarget(kind, from, to);
+
+  const payload: Record<string, unknown> = {
+    period: { kind, from: dayKeyOf(from), to: dayKeyOf(to), label },
+    totals: {
+      sales_count: sales.length,
+      refunds_count: refunds.length,
+      gross: money(gross),
+      refunds: money(refundsTotal),
+      net: money(net),
+      average_basket: money(basketCount > 0 ? net / basketCount : 0),
+      items_count: itemsCount,
+    },
+    payments: {
+      cash: money(sumPayments(sales, "cash") - sumPayments(refunds, "cash")),
+      card: money(sumPayments(sales, "card") - sumPayments(refunds, "card")),
+    },
+    by_cashier: [...byCashier.values()]
+      .map((row) => ({
+        cashier_id: row.cashier_id,
+        display_name: row.display_name,
+        sales_count: row.sales_count,
+        sales_total: money(row.sales_total),
+        refunds_count: row.refunds_count,
+        refunds_total: money(row.refunds_total),
+        net_total: money(round2(row.sales_total - row.refunds_total)),
+      }))
+      .sort((a, b) => a.display_name.localeCompare(b.display_name)),
+    top_items: topItems.map((row) => ({ label: row.label, quantity: row.quantity, net: money(row.net) })),
+    previous: {
+      from: dayKeyOf(previous.from),
+      to: dayKeyOf(previous.to),
+      net: money(previousNet),
+      delta_pct: deltaPct,
+    },
+    target:
+      targetAmount > 0 ? { amount: money(targetAmount), progress_pct: progressPct(net, targetAmount) } : null,
+    z_reports: zReports
+      .filter((z) => {
+        const key = dayKeyOf(new Date(z.closed_at));
+        return key >= dayKeyOf(from) && key <= dayKeyOf(to);
+      })
+      .map((z) => ({ report_number: z.report_number, closed_at: z.closed_at, net: money(z.total_net) })),
+  };
+
+  if (kind === "daily") {
+    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, net: 0, sales_count: 0 }));
+    for (const tx of inPeriod) {
+      const hour = new Date(tx.created_at).getHours();
+      const slot = hours[hour];
+      if (tx.transaction_type === "sale") {
+        slot.sales_count += 1;
+        slot.net = round2(slot.net + tx.total_ttc);
+      } else {
+        slot.net = round2(slot.net - tx.total_ttc);
+      }
+    }
+    payload.by_hour = hours.map((h) => ({ hour: h.hour, net: money(h.net), sales_count: h.sales_count }));
+    // L'instantané météo n'existe que pour une journée déjà ouverte dans le
+    // cahier — comme le serveur, qui relit `cahier_days.weather_snapshot`.
+    payload.weather = cahierDays.get(dayKeyOf(from))?.weather ?? null;
+  } else {
+    const series: { date: string; net: string; sales_count: number }[] = [];
+    const cursor = new Date(from);
+    while (cursor <= to) {
+      const key = dayKeyOf(cursor);
+      const { net: dayNet, sales: daySales } = netOfDay(key);
+      series.push({ date: key, net: money(dayNet), sales_count: daySales.length });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    payload.by_day = series;
+  }
+
+  return payload;
+}
+
+/** CSV d'un rapport — sections, `;`, virgule décimale, BOM (M1). */
+function buildReportCsv(report: Record<string, unknown>): string {
+  const BOM = "\uFEFF";
+  const period = report.period as { kind: string; from: string; to: string; label: string };
+  const totals = report.totals as Record<string, string | number>;
+  const payments = report.payments as Record<string, string>;
+  const target = report.target as { amount: string; progress_pct: number } | null;
+  const previous = report.previous as { net: string };
+  const rows: string[] = [];
+  const line = (...cells: (string | number)[]) => rows.push(cells.map((c) => csvField(String(c))).join(";"));
+  const fr = (amount: string) => amount.replace(".", ",");
+
+  line("Rapport", period.label);
+  line("Période", period.from, period.to);
+  rows.push("");
+
+  line("Totaux");
+  line("Libellé", "Valeur");
+  line("Ventes", totals.sales_count);
+  line("Annulations", totals.refunds_count);
+  line("Chiffre brut", fr(String(totals.gross)));
+  line("Annulations (montant)", fr(String(totals.refunds)));
+  line("Chiffre net", fr(String(totals.net)));
+  line("Panier moyen", fr(String(totals.average_basket)));
+  line("Articles", totals.items_count);
+  line("Espèces", fr(payments.cash));
+  line("Carte", fr(payments.card));
+  if (target) {
+    line("Objectif", fr(target.amount));
+    line("Progression (%)", String(target.progress_pct).replace(".", ","));
+  }
+  line("Période précédente (net)", fr(previous.net));
+  rows.push("");
+
+  if (report.by_hour) {
+    line("Par heure");
+    line("Heure", "Chiffre net", "Ventes");
+    for (const row of report.by_hour as { hour: number; net: string; sales_count: number }[]) {
+      line(String(row.hour).padStart(2, "0"), fr(row.net), row.sales_count);
+    }
+  } else {
+    line("Par jour");
+    line("Jour", "Chiffre net", "Ventes");
+    for (const row of report.by_day as { date: string; net: string; sales_count: number }[]) {
+      line(row.date, fr(row.net), row.sales_count);
+    }
+  }
+  rows.push("");
+
+  line("Par vendeuse");
+  line("Vendeuse", "Ventes", "Total ventes", "Annulations", "Total annulations", "Net");
+  for (const row of report.by_cashier as {
+    display_name: string;
+    sales_count: number;
+    sales_total: string;
+    refunds_count: number;
+    refunds_total: string;
+    net_total: string;
+  }[]) {
+    line(
+      row.display_name,
+      row.sales_count,
+      fr(row.sales_total),
+      row.refunds_count,
+      fr(row.refunds_total),
+      fr(row.net_total),
+    );
+  }
+  rows.push("");
+
+  line("Articles");
+  line("Article", "Quantité", "Chiffre net");
+  for (const row of report.top_items as { label: string; quantity: number; net: string }[]) {
+    line(row.label, row.quantity, fr(row.net));
+  }
+
+  return BOM + rows.join("\r\n");
+}
+
+/** Date de référence d'une requête de rapport, ou 422 comme le serveur. */
+function parseReportReference(kind: MockReportKind, query: URLSearchParams): Date {
+  if (kind === "monthly") {
+    const raw = query.get("month") ?? monthKeyOf(new Date());
+    const parsed = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(raw);
+    if (!parsed) fail(422, `Mois invalide (${JSON.stringify(raw)}) : format AAAA-MM attendu.`, "invalid_date");
+    return new Date(Number(parsed![1]), Number(parsed![2]) - 1, 1);
+  }
+  const raw = query.get("date") ?? dayKeyOf(new Date());
+  const parsed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!parsed) fail(422, `Date invalide (${JSON.stringify(raw)}) : format AAAA-MM-JJ attendu.`, "invalid_date");
+  return new Date(Number(parsed![1]), Number(parsed![2]) - 1, Number(parsed![3]));
+}
+
+/** Champs dérivés ajoutés à la LECTURE d'un réglage, jamais stockés — même
+ * rôle que `_decorate_settings` côté serveur. En démo la clé météo est
+ * réputée configurée : le relevé de démo répond toujours. */
+function decorateSettings(key: string, value: unknown): unknown {
+  if (key === "weather") return { ...(value as object), api_key_configured: true };
+  return value;
+}
+
 export async function mockFetchAPI<T = unknown>(
   endpoint: string,
   options?: FetchAPIOptions,
@@ -2739,10 +3128,33 @@ export async function mockFetchAPI<T = unknown>(
     return buildDashboard(reference) as unknown as T;
   }
 
+  // --- PR11 : rapports par période et météo (M1 / M3) --------------------
+  if ((m = path.match(/^\/api\/reports\/(daily|weekly|monthly)$/)) && method === "GET") {
+    const kind = m[1] as MockReportKind;
+    return buildReport(kind, parseReportReference(kind, query)) as unknown as T;
+  }
+
+  if (path === "/api/reports/weather" && method === "GET") {
+    // Ville non renseignée : le serveur répond « indisponible » plutôt que
+    // d'interroger le fournisseur à l'aveugle. Le mode démo fait pareil.
+    if (!settings.weather.city.trim()) {
+      return { unavailable: true, reason: "ville non renseignée dans les réglages" } as unknown as T;
+    }
+    return cahierWeatherSnapshot(dayKeyOf(new Date())) as unknown as T;
+  }
+
   // --- Administration ---------------------------------------------------
-  if ((m = path.match(/^\/api\/admin\/settings\/(pos|shop|fiscal|receipt|hardware|accounting|targets)$/))) {
-    const key = m[1] as "pos" | "shop" | "fiscal" | "receipt" | "hardware" | "accounting" | "targets";
-    if (method === "GET") return settings[key] as unknown as T;
+  if ((m = path.match(/^\/api\/admin\/settings\/(pos|shop|fiscal|receipt|hardware|accounting|targets|weather)$/))) {
+    const key = m[1] as
+      | "pos"
+      | "shop"
+      | "fiscal"
+      | "receipt"
+      | "hardware"
+      | "accounting"
+      | "targets"
+      | "weather";
+    if (method === "GET") return decorateSettings(key, settings[key]) as unknown as T;
     if (method === "PUT") {
       const body = parseBody<Record<string, unknown>>(options);
       if (key === "pos" && typeof body.cashier_required !== "boolean") {
@@ -2823,7 +3235,7 @@ export async function mockFetchAPI<T = unknown>(
       }
       settings = { ...settings, [key]: { ...settings[key], ...body } };
       logJet("config.changed", { key, diff: body });
-      return settings[key] as unknown as T;
+      return decorateSettings(key, settings[key]) as unknown as T;
     }
   }
 
@@ -4174,6 +4586,23 @@ export async function mockFetchBytesWithHeaders(endpoint: string, options?: Fetc
     logJet("export.downloaded", { kind: "clients_newsletter_csv", count: rows.length });
     return asResult(BOM + lines.join("\r\n"), "text/csv; charset=utf-8", {
       "content-disposition": `attachment; filename="abonnes_newsletter_${today}.csv"`,
+    });
+  }
+
+  // PR11 (M1) — export CSV d'un rapport : même corps que la route JSON,
+  // mis en sections. Le journal des événements ne retient que la période.
+  if ((m = path.match(/^\/api\/reports\/(daily|weekly|monthly)$/)) && method === "GET") {
+    const kind = m[1] as MockReportKind;
+    const report = buildReport(kind, parseReportReference(kind, query));
+    const period = report.period as { from: string; to: string };
+    logJet("export.downloaded", {
+      kind: "report_csv",
+      period_kind: kind,
+      from: period.from,
+      to: period.to,
+    });
+    return asResult(buildReportCsv(report), "text/csv; charset=utf-8", {
+      "content-disposition": `attachment; filename="rapport_${kind}_${period.from}.csv"`,
     });
   }
 

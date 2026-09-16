@@ -572,7 +572,9 @@ function OpeningDaysCard() {
       ) : (
         <div className="space-y-4">
           <ErrorNotice message={error} />
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+          {/* Quatre colonnes au plus : à sept, « Mercredi » et « Dimanche »
+              se retrouvent tronqués dans la largeur d'une carte. */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {WEEKDAY_LABELS.map((label, index) => (
               <label
                 key={label}
@@ -692,6 +694,10 @@ function WeatherCard() {
           <ErrorNotice message={error} />
           <div className="grid gap-4 sm:grid-cols-3">
             <Input
+              /* Identifiant explicite : la carte « Boutique » de la même
+                 page porte déjà un champ « Ville », et deux `id` identiques
+                 casseraient l'association libellé ↔ champ. */
+              id="weather-city"
               label="Ville"
               value={form.city}
               placeholder="Ville de la boutique"
@@ -701,6 +707,7 @@ function WeatherCard() {
               }}
             />
             <Input
+              id="weather-lat"
               label="Latitude (facultatif)"
               inputMode="decimal"
               value={coordinateValue(form.lat)}
@@ -710,6 +717,7 @@ function WeatherCard() {
               }}
             />
             <Input
+              id="weather-lon"
               label="Longitude (facultatif)"
               inputMode="decimal"
               value={coordinateValue(form.lon)}
