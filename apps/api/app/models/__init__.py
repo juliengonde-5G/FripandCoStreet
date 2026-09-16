@@ -30,6 +30,8 @@ from app.models.communication import (
 from app.models.database_backup import BackupStatus, BackupTrigger, DatabaseBackup
 from app.models.cashier import Cashier
 from app.models.invoice import Invoice, InvoiceKind
+from app.models.sumup_exchange import SumUpExchange
+from app.models.failed_payment import FailedPayment, FailedPaymentStatus
 
 __all__ = [
     "Base",
@@ -65,4 +67,7 @@ __all__ = [
     "Cashier",
     "Invoice",
     "InvoiceKind",
+    "SumUpExchange",
+    "FailedPayment",
+    "FailedPaymentStatus",
 ]
