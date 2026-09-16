@@ -1570,15 +1570,17 @@ function buildJournalResponse(
   accountPrefix: string,
   zFilter: string,
 ): Record<string, unknown> {
-  const inPeriod = [...journalDemoLines, ...journalLinesFromExports()].filter(
-    (l) => l.date >= from && l.date <= to,
-  );
+  // Ordre des filtres calqué sur le backend : la période, puis le n° de Z
+  // (qui restreint aussi `z_without_export`), et seulement ensuite le
+  // préfixe de compte (qui, lui, n'enlève jamais l'avertissement).
+  const inPeriod = [...journalDemoLines, ...journalLinesFromExports()]
+    .filter((l) => l.date >= from && l.date <= to)
+    .filter((l) => (zFilter ? String(l.z_report_number) === zFilter : true));
   const zWithoutExport = [...new Set(inPeriod.filter((l) => l.source === "computed").map((l) => l.z_report_number))].sort(
     (a, b) => a - b,
   );
   const lines = inPeriod
     .filter((l) => (accountPrefix ? l.account_number.startsWith(accountPrefix) : true))
-    .filter((l) => (zFilter ? String(l.z_report_number) === zFilter : true))
     .sort(
       (a, b) =>
         a.date.localeCompare(b.date) ||

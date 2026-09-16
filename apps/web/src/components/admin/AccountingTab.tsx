@@ -228,7 +228,7 @@ function JournalCard() {
           <div className="rounded-fc bg-fc-warn-soft border border-fc-warn/30 px-3 py-2 text-sm text-fc-warn">
             {missing.length === 1 ? "Clôture sans écriture enregistrée : " : "Clôtures sans écriture enregistrée : "}
             <span className="font-mono tabular-nums">{missing.map((n) => `Z${String(n).padStart(4, "0")}`).join(", ")}</span>
-            {" — leurs lignes sont recalculées ici. "}
+            {missing.length === 1 ? " — ses lignes sont recalculées ici. " : " — leurs lignes sont recalculées ici. "}
             <a href={`#${ENTRIES_CARD_ID}`} className="underline font-medium">
               Voir les écritures comptables
             </a>
