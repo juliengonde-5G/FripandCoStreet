@@ -28,7 +28,9 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
+from urllib.parse import urlsplit
 
 import httpx
 from tenacity import (
@@ -127,6 +129,168 @@ def redact_sumup_error(text: str | None, max_len: int = 300) -> str:
     return safe
 
 
+# ---------------------------------------------------------------------------
+# Journal des echanges SumUp (PR9, K1) — enregistrement EN MEMOIRE.
+#
+# Le service ne connait pas la base : il empile un `ExchangeRecord` par appel
+# HTTP sortant dans `self.exchanges`, et ce sont les routeurs qui deversent
+# cette liste dans `sumup_exchanges` APRES l'operation metier
+# (`services/sumup_exchange_log.persist`). Deux raisons a ce decouplage :
+#   - un echec d'ecriture du journal ne doit jamais faire echouer un
+#     paiement (on ne perd pas une vente parce qu'une trace de debogage
+#     n'a pas pu s'ecrire) ;
+#   - le service reste testable sans base, comme tout le reste de PR2.
+# ---------------------------------------------------------------------------
+
+# Taille maximale du payload de reponse conserve (contrat K1) : au-dela, on
+# tronque — une reponse SumUp anormalement volumineuse ne doit pas faire
+# enfler la table de journal.
+MAX_RESPONSE_PAYLOAD_BYTES = 4096
+
+# Cles JAMAIS journalisees, quelle que soit leur profondeur dans le payload :
+# tout ce qui peut porter un secret (en-tete Authorization, cle API, jeton)
+# ou une donnee personnelle. La valeur est remplacee, pas la cle : on garde
+# la trace qu'un champ existait.
+_FORBIDDEN_PAYLOAD_KEYS = frozenset(
+    {
+        "authorization",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "token",
+        "secret",
+        "client_secret",
+        "password",
+        "pan",
+        "card_number",
+        "cvv",
+        "cvc",
+        "email",
+        "e_mail",
+        "customer_email",
+        "name",
+        "customer_name",
+        "first_name",
+        "last_name",
+        "phone",
+    }
+)
+
+
+@dataclass
+class ExchangeRecord:
+    """Un appel HTTP sortant vers SumUp, tel qu'il sera journalise.
+
+    `retry_count` compte les essais AVANT la reponse finale (1 = aucun rejeu
+    transport), pour qu'on voie au debogage qu'un terminal a demande trois
+    tentatives avant de repondre.
+
+    Vocabulaire de `operation` : ping_reader, push_to_reader,
+    checkout_status, reader_checkout_status, cancel_checkout,
+    terminate_reader, refund, get_transaction. Deux d'entre eux ne sont
+    jamais emis en pratique — `get_checkout_status` delegue a
+    `_reader_checkout_status` et `cancel_checkout` a
+    `terminate_reader_checkout` — mais restent du vocabulaire accepte : le
+    journal decrit l'appel REELLEMENT emis, pas la methode publique
+    appelee.
+    """
+
+    operation: str
+    method: str
+    url_path: str
+    request_payload: dict | None = None
+    response_status: int | None = None
+    response_payload: dict | None = None
+    duration_ms: int = 0
+    retry_count: int = 1
+    is_error: bool = False
+    error_type: str | None = None
+    error_message: str | None = None
+    checkout_id: str | None = None
+    client_transaction_id: str | None = None
+    # Rempli a la persistance (identifiant de la requete HTTP entrante).
+    request_id: str | None = None
+    # Presence d'un champ liste par defaut : evite les mutables partages.
+    extra: dict = field(default_factory=dict)
+
+
+def _exchange_url_path(url: str) -> str:
+    """Chemin seul d'une URL — jamais la query (elle pourrait porter un secret)."""
+    return urlsplit(url).path or "/"
+
+
+def _redact_payload(value, *, depth: int = 0):
+    """Redige recursivement un payload avant journalisation.
+
+    Les cles sensibles sont neutralisees (`<REDACTED>`), les chaines passent
+    par `redact_sumup_error` (PAN, CVV, Bearer, cle API, JWT). La profondeur
+    est bornee : un payload SumUp inattendu ne doit pas pouvoir faire
+    exploser la pile.
+    """
+    if depth > 6:
+        return "<DEPTH_LIMIT>"
+    if isinstance(value, dict):
+        out = {}
+        for key, val in value.items():
+            if str(key).strip().lower() in _FORBIDDEN_PAYLOAD_KEYS:
+                out[str(key)] = "<REDACTED>"
+            else:
+                out[str(key)] = _redact_payload(val, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_redact_payload(v, depth=depth + 1) for v in value]
+    if isinstance(value, str):
+        return redact_sumup_error(value, max_len=1000)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return redact_sumup_error(str(value), max_len=1000)
+
+
+def _truncate_payload(payload):
+    """Borne la taille serialisee d'un payload a `MAX_RESPONSE_PAYLOAD_BYTES`.
+
+    Au-dela, on ne conserve qu'un extrait textuel : mieux vaut un debut de
+    reponse lisible qu'un document JSON coupe au milieu, donc invalide.
+    """
+    if payload is None:
+        return None
+    try:
+        encoded = _json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        encoded = str(payload)
+    if len(encoded.encode("utf-8")) <= MAX_RESPONSE_PAYLOAD_BYTES:
+        return payload
+    excerpt = encoded.encode("utf-8")[:MAX_RESPONSE_PAYLOAD_BYTES].decode("utf-8", "ignore")
+    return {"_truncated": True, "_excerpt": excerpt}
+
+
+def _response_payload(resp: httpx.Response) -> tuple[dict | None, bool]:
+    """Corps de reponse redige et tronque, + drapeau « corps illisible ».
+
+    Le drapeau alimente `error_type="decode"` : une reponse 2xx que l'on ne
+    sait pas relire est un incident de debogage a part entiere (SumUp repond
+    toujours du JSON), meme si HTTP dit que tout va bien.
+    """
+    if not resp.content:
+        return None, False
+    try:
+        parsed = resp.json()
+    except Exception:  # noqa: BLE001 — corps non-JSON : on garde le texte brut redige
+        return {"_text": redact_sumup_error(resp.text, max_len=1000)}, True
+    if not isinstance(parsed, (dict, list)):
+        parsed = {"_value": parsed}
+    redacted = _redact_payload(parsed)
+    if isinstance(redacted, list):
+        redacted = {"items": redacted}
+    return _truncate_payload(redacted), False
+
+
+def _exception_error_type(exc: BaseException) -> str:
+    """`timeout` pour un delai depasse, `transport` pour tout le reste."""
+    return "timeout" if isinstance(exc, httpx.TimeoutException) else "transport"
+
+
 def _extract_sumup_error_code(body_text: str | None) -> str | None:
     """Extrait le ``error_code`` machine d'un corps d'erreur JSON SumUp."""
     if not body_text:
@@ -175,6 +339,11 @@ class SumUpService:
         # Override de transport httpx — ``None`` = réseau réel. Les tests
         # injectent un ``httpx.MockTransport`` ici (comme dans l'application source).
         self._transport = None
+        # Journal des échanges HTTP de CETTE instance (PR9/K1) — une liste
+        # par service, jamais partagée : deux encaissements concurrents ne
+        # doivent pas mélanger leurs traces. Vidée par le routeur qui la
+        # persiste (`services/sumup_exchange_log.persist`).
+        self.exchanges: list[ExchangeRecord] = []
 
     def _url(self, path: str) -> str:
         """Construit une URL absolue depuis la racine ``SUMUP_API_BASE``.
@@ -276,20 +445,47 @@ class SumUpService:
         *,
         json: dict | None = None,
         params: dict | None = None,
+        checkout_id: str | None = None,
+        client_transaction_id: str | None = None,
     ) -> httpx.Response:
-        """Émet une requête authentifiée et journalise les échecs (redigés).
+        """Émet une requête authentifiée, la journalise (redigée) et la trace.
 
-        Ne persiste jamais rien en base (pas de table ``sumup_exchanges`` en
-        PR2) — uniquement des logs via ``logger``, jamais la clé API.
+        Ne touche JAMAIS la base (PR9/K1) : l'échange est empilé dans
+        ``self.exchanges``, à charge du routeur appelant de le persister
+        après l'opération métier. Succès comme échecs sont enregistrés — un
+        journal qui ne garderait que les erreurs ne permettrait pas de voir
+        qu'un terminal répond, mais lentement.
         """
         started = time.perf_counter()
         counter = {"n": 0}
+        # La query n'est jamais journalisée (elle pourrait porter un secret) ;
+        # les paramètres utiles, eux, partent dans `request_payload` rédigé.
+        record = ExchangeRecord(
+            operation=operation,
+            method=method.upper(),
+            url_path=_exchange_url_path(url),
+            request_payload=_truncate_payload(
+                _redact_payload(json)
+                if json is not None
+                else ({"_params": _redact_payload(params)} if params else None)
+            ),
+            checkout_id=checkout_id,
+            client_transaction_id=client_transaction_id,
+        )
+        self.exchanges.append(record)
         try:
             resp = await self._request_with_retry(
                 client, method, url, json=json, params=params, counter=counter
             )
         except Exception as exc:  # noqa: BLE001 — log puis re-lève
             elapsed_ms = int((time.perf_counter() - started) * 1000)
+            record.duration_ms = elapsed_ms
+            record.retry_count = max(counter["n"], 1)
+            record.is_error = True
+            record.error_type = _exception_error_type(exc)
+            record.error_message = redact_sumup_error(
+                f"{type(exc).__name__}: {exc}", max_len=500
+            )
             _log.error(
                 "SumUp %s %s a échoué après %d tentative(s) en %d ms : %s",
                 operation,
@@ -299,8 +495,16 @@ class SumUpService:
                 redact_sumup_error(f"{type(exc).__name__}: {exc}"),
             )
             raise
+        record.duration_ms = int((time.perf_counter() - started) * 1000)
+        record.retry_count = max(counter["n"], 1)
+        record.response_status = resp.status_code
+        payload, undecodable = _response_payload(resp)
+        record.response_payload = payload
         if resp.status_code >= 400:
             body = resp.text if resp.content else ""
+            record.is_error = True
+            record.error_type = "http_5xx" if resp.status_code >= 500 else "http_4xx"
+            record.error_message = redact_sumup_error(body, max_len=500)
             _log.warning(
                 "SumUp %s %s -> HTTP %d : %s",
                 operation,
@@ -308,7 +512,24 @@ class SumUpService:
                 resp.status_code,
                 redact_sumup_error(body, max_len=300),
             )
+        elif undecodable:
+            # Réponse « OK » que l'on ne sait pas relire : SumUp ne répond
+            # que du JSON, donc c'est un incident à voir au débogage.
+            record.is_error = True
+            record.error_type = "decode"
+            record.error_message = "Réponse SumUp illisible (JSON attendu)"
         return resp
+
+    def drain_exchanges(self) -> list[ExchangeRecord]:
+        """Retire et retourne les échanges accumulés (PR9/K1).
+
+        Le routeur appelle ceci après l'opération métier : vider la liste
+        évite de réécrire deux fois les mêmes lignes si le même service est
+        réutilisé dans la requête.
+        """
+        drained = list(self.exchanges)
+        self.exchanges.clear()
+        return drained
 
     # ------------------------------------------------------------------
     # Pré-vol TPE
@@ -345,7 +566,7 @@ class SumUpService:
 
         async with self._client(PING_TIMEOUT) as client:
             try:
-                resp = await self._send(client, "ping", "GET", reader_url)
+                resp = await self._send(client, "ping_reader", "GET", reader_url)
             except httpx.HTTPError as exc:
                 return {
                     "configured": True, "paired": False, "online": False, "ready": False,
@@ -379,7 +600,7 @@ class SumUpService:
                 }
 
             try:
-                live_resp = await self._send(client, "ping_status", "GET", status_url)
+                live_resp = await self._send(client, "ping_reader", "GET", status_url)
             except httpx.HTTPError:
                 return {
                     "configured": True, "paired": True, "online": False, "ready": True,
@@ -453,7 +674,15 @@ class SumUpService:
         }
         try:
             async with self._client(CHECKOUT_TIMEOUT) as client:
-                resp = await self._send(client, "reader_push", "POST", url, json=payload)
+                resp = await self._send(
+                    client,
+                    "push_to_reader",
+                    "POST",
+                    url,
+                    json=payload,
+                    checkout_id=client_transaction_id,
+                    client_transaction_id=client_transaction_id,
+                )
         except httpx.HTTPError as exc:
             return {
                 "checkout_id": client_transaction_id,
@@ -516,10 +745,12 @@ class SumUpService:
             async with self._client(STATUS_TIMEOUT) as client:
                 resp = await self._send(
                     client,
-                    "reader_status",
+                    "reader_checkout_status",
                     "GET",
                     url,
                     params={"client_transaction_id": client_transaction_id},
+                    checkout_id=client_transaction_id,
+                    client_transaction_id=client_transaction_id,
                 )
         except httpx.HTTPError:
             return {**base, "status": "PENDING"}
@@ -594,7 +825,7 @@ class SumUpService:
         url = self._url(f"/v0.1/merchants/{self.merchant_code}/readers/{self.reader_id}/terminate")
         try:
             async with self._client(STATUS_TIMEOUT) as client:
-                resp = await self._send(client, "terminate", "POST", url)
+                resp = await self._send(client, "terminate_reader", "POST", url)
         except httpx.HTTPError as exc:
             return {
                 "ok": False, "status": "network_error",

@@ -138,6 +138,28 @@ EVENT_CASHIER_IDENTIFIED = "cashier.identified"
 EVENT_CASHIER_RELEASED = "cashier.released"
 EVENT_CASHIER_PIN_REJECTED = "cashier.pin_rejected"
 
+# PR9 — file des paiements carte echoues (docs/ARCHITECTURE_PR9.md, K3).
+# Payloads : IDENTIFIANTS ET MONTANTS SEULEMENT (`failed_payment_id`,
+# `attempt_id`, `checkout_id`, `transaction_id`, `amount`, `error_type`,
+# `retry_count`) — jamais le message d'erreur brut renvoye par SumUp, qui
+# resterait piege dans un journal immuable. `payment.abandoned` porte en
+# plus le motif libre saisi par le manager (borne a 200 caracteres) : c'est
+# une phrase de gestion (« encaisse en especes »), pas une donnee
+# personnelle.
+EVENT_PAYMENT_FAILED_QUEUED = "payment.failed_queued"
+EVENT_PAYMENT_RETRY_STARTED = "payment.retry_started"
+EVENT_PAYMENT_RETRY_SUCCEEDED = "payment.retry_succeeded"
+EVENT_PAYMENT_RETRIES_EXHAUSTED = "payment.retries_exhausted"
+EVENT_PAYMENT_ABANDONED = "payment.abandoned"
+
+# PR9 — journal des echanges SumUp (docs/ARCHITECTURE_PR9.md, K2). Seule la
+# PURGE est journalisee : l'ecriture d'un echange, elle, ne l'est pas (on
+# n'inscrit pas dans un journal immuable qu'on a ecrit dans un journal
+# purgeable). Le payload se limite au nombre de lignes supprimees — savoir
+# QUE le journal de debogage a ete vide, et de combien, suffit a expliquer
+# un trou dans les traces.
+EVENT_SUMUP_EXCHANGES_PURGED = "sumup_exchanges.purged"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""
