@@ -36,12 +36,22 @@ export function duplicateReasonLabel(reason: DuplicateReason | string): string {
 
 /**
  * Une fiche d'un groupe de doublons côté administration
- * (`GET /api/admin/clients/duplicates`) : la fiche sérialisée habituelle,
- * plus les deux chiffres qui aident à choisir laquelle conserver.
+ * (`GET /api/admin/clients/duplicates`).
+ *
+ * Coordonnées MASQUÉES, comme en caisse : reconnaître la bonne fiche
+ * n'exige pas de lire l'adresse entière, et cet écran peut être ouvert
+ * devant du public. `created_at` sert à présélectionner la fiche à
+ * conserver (la plus visitée, puis la plus ancienne).
  */
-export interface DuplicateGroupClient extends Client {
+export interface DuplicateGroupClient {
+  id: string;
+  first_name: string | null;
+  last_name: string | null;
+  email_masked: string | null;
+  phone_masked: string | null;
   visits_count: number;
   last_visit_at: string | null;
+  created_at: string | null;
 }
 
 /** Deux fiches ou plus qui se ressemblent pour un même motif. */

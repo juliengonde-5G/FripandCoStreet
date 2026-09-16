@@ -1805,7 +1805,17 @@ function pr10DuplicateGroups(): Array<Record<string, unknown>> {
       bucket.forEach((c) => taken.add(c.id));
       groups.push({
         reason,
-        clients: bucket.map((client) => ({ ...client, ...visitStats(client.id) })),
+        // Coordonnées masquées, comme côté serveur : cet écran peut être
+        // ouvert devant du public.
+        clients: bucket.map((client) => ({
+          id: client.id,
+          first_name: client.first_name,
+          last_name: client.last_name,
+          email_masked: client.email ? maskEmail(client.email) : null,
+          phone_masked: maskPhoneMock(client.phone),
+          created_at: client.created_at,
+          ...visitStats(client.id),
+        })),
       });
     });
   };

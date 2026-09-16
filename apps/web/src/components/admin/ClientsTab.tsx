@@ -31,7 +31,7 @@ import {
   type DuplicateGroup,
   type DuplicateGroupClient,
 } from "@/lib/clients";
-import { formatClientName, formatCurrency, formatDate, formatDateTime, maskEmail } from "@/lib/format";
+import { formatClientName, formatCurrency, formatDate, formatDateTime } from "@/lib/format";
 import type { AnonymizeRequest, Client, ClientFull, ConsentUpdateRequest } from "@/lib/types";
 
 // Mêmes deux aides d'affichage que les autres onglets extraits
@@ -73,15 +73,6 @@ function shortClientName(client: Pick<Client, "first_name" | "last_name">): stri
   return first ? `${first[0].toUpperCase()}. ${last}` : last;
 }
 
-/** Numéro masqué — même esprit que `maskEmail` : on reconnaît la fiche
- * sans étaler le numéro à l'écran. */
-function maskPhone(phone: string | null | undefined): string {
-  if (!phone) return "—";
-  const digits = phone.replace(/\D/g, "");
-  if (digits.length < 2) return "•••";
-  return `•••••••${digits.slice(-2)}`;
-}
-
 /** « 3 visites · dernière le 12/09/2026 » — les deux chiffres qui aident
  * à choisir la fiche à conserver. */
 function visitsSummary(client: Pick<DuplicateGroupClient, "visits_count" | "last_visit_at">): string {
@@ -95,7 +86,7 @@ function visitsSummary(client: Pick<DuplicateGroupClient, "visits_count" | "last
 function preferredWinner(clients: DuplicateGroupClient[]): DuplicateGroupClient | undefined {
   return [...clients].sort((a, b) => {
     if (b.visits_count !== a.visits_count) return b.visits_count - a.visits_count;
-    return a.created_at < b.created_at ? -1 : 1;
+    return (a.created_at ?? "") < (b.created_at ?? "") ? -1 : 1;
   })[0];
 }
 
@@ -158,9 +149,9 @@ function DuplicatesCard({ refreshKey, onMerged }: { refreshKey: number; onMerged
                 <li key={client.id} className="rounded-fc bg-fc-surface px-3 py-2 text-sm">
                   <div className="font-medium text-fc-ink truncate">{shortClientName(client)}</div>
                   <div className="text-xs text-fc-ink-mute truncate">
-                    {client.email ? maskEmail(client.email) : "Pas d'e-mail"}
+                    {client.email_masked ?? "Pas d'e-mail"}
                     {" · "}
-                    {client.phone ? maskPhone(client.phone) : "Pas de téléphone"}
+                    {client.phone_masked ?? "Pas de téléphone"}
                   </div>
                   <div className="text-xs text-fc-ink-mute">{visitsSummary(client)}</div>
                 </li>
@@ -264,18 +255,13 @@ function MergeModal({
               <span className="min-w-0 text-sm">
                 <span className="block font-medium text-fc-ink truncate">{shortClientName(client)}</span>
                 <span className="block text-xs text-fc-ink-mute truncate">
-                  {client.email ? maskEmail(client.email) : "Pas d'e-mail"}
+                  {client.email_masked ?? "Pas d'e-mail"}
                   {" · "}
-                  {client.phone ? maskPhone(client.phone) : "Pas de téléphone"}
+                  {client.phone_masked ?? "Pas de téléphone"}
                 </span>
                 <span className="block text-xs text-fc-ink-mute">
                   {visitsSummary(client)} · fiche créée le {formatDate(client.created_at)}
                 </span>
-                {client.deletion_scheduled_for && (
-                  <span className="mt-1 block text-xs font-medium text-fc-warn">
-                    Suppression programmée le {formatDate(client.deletion_scheduled_for)}
-                  </span>
-                )}
               </span>
             </label>
           ))}
@@ -295,12 +281,6 @@ function MergeModal({
               : "L'autre fiche sera vidée de ses coordonnées et ne s'affichera plus dans la recherche."}
             {" Aucun ticket n'est modifié ni supprimé."}
           </p>
-          {winner?.deletion_scheduled_for && (
-            <p className="mt-2 font-medium text-fc-warn">
-              La fiche conservée a une suppression programmée : annulez-la d&apos;abord, sinon la fusion sera
-              refusée.
-            </p>
-          )}
         </div>
       </div>
     </Modal>
