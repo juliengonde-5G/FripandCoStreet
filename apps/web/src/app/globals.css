@@ -55,12 +55,23 @@ body {
 }
 
 /* Application installable (PR9, K6) : la bannière d'installation est une
-   carte fixée en bas de fenêtre. L'écran de caisse est un `h-screen` sans
-   défilement dont le bouton « Encaisser » touche le bas de la fenêtre —
-   la carte le recouvrirait. Tant qu'elle est affichée, `PwaInstallBanner`
-   pose `data-pwa-banner="on"` sur `<body>` avec sa hauteur mesurée, et
-   cette règle rend cette hauteur à la zone de travail. Aucune page n'a
-   donc à connaître l'existence de la bannière. */
+   carte fixée en bas de fenêtre. Sans précaution elle recouvrirait ce qui
+   se trouve au ras du bas — le bouton « Encaisser » de la caisse (écran
+   `h-screen` sans défilement) et le bouton « Se connecter » (écran
+   `min-h-screen` centré). Tant qu'elle est affichée, `PwaInstallBanner`
+   pose `data-pwa-banner="on"` sur `<body>` avec sa hauteur mesurée
+   (`--fc-pwa-banner-h`), et ces trois règles lui rendent cette hauteur :
+   les écrans pleine fenêtre se recalculent dessus, les pages qui défilent
+   gagnent une marge basse pour que leur dernier bloc reste atteignable.
+   Aucune page n'a donc à connaître l'existence de la bannière. */
+body[data-pwa-banner="on"] {
+  padding-bottom: var(--fc-pwa-banner-h, 0px);
+}
+
 body[data-pwa-banner="on"] .h-screen {
   height: calc(100vh - var(--fc-pwa-banner-h, 0px));
+}
+
+body[data-pwa-banner="on"] .min-h-screen {
+  min-height: calc(100vh - var(--fc-pwa-banner-h, 0px));
 }

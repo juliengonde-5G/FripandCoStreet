@@ -20,12 +20,13 @@
  *
  * `?reinstall=1` dans l'URL efface le refus persistant (voir `lib/pwaInstall`).
  *
- * La carte est fixée en bas, centrée. Sur `/caisse`, l'écran est un
- * `h-screen` sans défilement dont le bouton **Encaisser** touche le bas de
- * la fenêtre : tant que la bannière est visible elle pose
- * `data-pwa-banner="on"` sur `<body>`, et une règle de `globals.css` rend
- * cette hauteur à la zone de travail. La carte ne recouvre donc jamais les
- * boutons de paiement.
+ * La carte est fixée en bas, centrée. Elle ne doit rien recouvrir de ce
+ * qui vit au ras du bas de fenêtre — le bouton **Encaisser** de la caisse
+ * (`h-screen` sans défilement) comme le bouton **Se connecter**. Tant
+ * qu'elle est visible, elle pose `data-pwa-banner="on"` sur `<body>` avec
+ * sa **hauteur mesurée** dans `--fc-pwa-banner-h`, et les règles de
+ * `globals.css` rendent cette hauteur aux écrans pleine fenêtre. Aucune
+ * page n'a donc à connaître l'existence de la bannière.
  */
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -34,8 +35,6 @@ import {
   consumeReinstallRequest,
   getPwaInstallServerSnapshot,
   getPwaInstallSnapshot,
-  isInstallDismissedForever,
-  isInstallSnoozedForSession,
   promptInstall,
   setInstallDismissedForever,
   setInstallSnoozedForSession,
@@ -43,26 +42,27 @@ import {
 } from "@/lib/pwaInstall";
 
 export default function PwaInstallBanner() {
-  const { standalone, canInstall } = useSyncExternalStore(
+  // Les deux refus vivent dans le même magasin que l'invite différée : la
+  // carte « Application » des Réglages voit donc immédiatement un « Ne plus
+  // proposer » touché ici, et réciproquement. Le rendu serveur en ignore
+  // tout (`getPwaInstallServerSnapshot`), ce qui évite l'écart
+  // d'hydratation qu'une lecture directe de `localStorage` provoquerait.
+  const { standalone, canInstall, dismissedForever, snoozedForSession } = useSyncExternalStore(
     subscribeToPwaInstall,
     getPwaInstallSnapshot,
     getPwaInstallServerSnapshot,
   );
 
-  // `refused` couvre les deux refus (session et persistant). Il n'est lu
-  // qu'après le montage : le rendu serveur ne connaît ni `sessionStorage`
-  // ni `localStorage`, et un écart provoquerait une erreur d'hydratation.
-  const [refused, setRefused] = useState(true);
   const [mounted, setMounted] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    // `?reinstall=1` efface le refus persistant avant le premier affichage.
     consumeReinstallRequest();
-    setRefused(isInstallDismissedForever() || isInstallSnoozedForSession());
     setMounted(true);
   }, []);
 
-  const visible = mounted && !standalone && canInstall && !refused;
+  const visible = mounted && !standalone && canInstall && !dismissedForever && !snoozedForSession;
 
   // Réservation de la place en bas de la zone de travail (voir en-tête).
   // La hauteur est **mesurée**, pas devinée : à 400 px de large les boutons
@@ -105,21 +105,12 @@ export default function PwaInstallBanner() {
     const outcome = await promptInstall();
     // Acceptée : `canInstall` retombe à faux, la carte disparaît d'elle-même.
     // Refusée dans l'invite native : on ne réinsiste pas cette session.
-    if (outcome !== "accepted") {
-      setInstallSnoozedForSession(true);
-      setRefused(true);
-    }
+    if (outcome !== "accepted") setInstallSnoozedForSession(true);
   }, []);
 
-  const handleLater = useCallback(() => {
-    setInstallSnoozedForSession(true);
-    setRefused(true);
-  }, []);
+  const handleLater = useCallback(() => setInstallSnoozedForSession(true), []);
 
-  const handleNever = useCallback(() => {
-    setInstallDismissedForever(true);
-    setRefused(true);
-  }, []);
+  const handleNever = useCallback(() => setInstallDismissedForever(true), []);
 
   if (!visible) return null;
 
@@ -130,50 +121,56 @@ export default function PwaInstallBanner() {
       data-testid="pwa-install-banner"
       className="fixed inset-x-0 bottom-4 z-[70] flex justify-center px-4"
     >
+      {/* Sur tablette (≥ 640 px) le texte et les boutons tiennent sur une
+          seule ligne : la carte reste basse, donc la hauteur rendue à
+          l'écran de caisse reste faible et rien n'y est rogné. En dessous,
+          tout s'empile. */}
       <div
         ref={cardRef}
-        className="w-full max-w-lg rounded-fc-lg bg-fc-primary px-4 py-4 text-white shadow-lg sm:px-5"
+        className="w-full max-w-lg rounded-fc-lg bg-fc-primary px-4 py-3 text-white shadow-lg sm:max-w-3xl sm:px-5"
       >
-        <div className="flex items-start gap-3">
-          <Image
-            src="/brand/logo-mark-on-blue.png"
-            alt=""
-            aria-hidden
-            width={40}
-            height={40}
-            className="mt-0.5 h-10 w-10 flex-shrink-0 object-contain"
-          />
-          <div className="min-w-0">
-            <p className="text-base font-semibold leading-tight">Installer Frip &amp; Co Street</p>
-            <p className="mt-1 text-sm leading-snug text-white/90">
-              Ajoute l&apos;application à l&apos;écran d&apos;accueil de la tablette pour un
-              lancement direct, en plein écran.
-            </p>
+        <div className="sm:flex sm:items-center sm:gap-5">
+          <div className="flex items-start gap-3 sm:flex-1 sm:items-center">
+            <Image
+              src="/brand/logo-mark-on-blue.png"
+              alt=""
+              aria-hidden
+              width={40}
+              height={40}
+              className="mt-0.5 h-10 w-10 flex-shrink-0 object-contain sm:mt-0"
+            />
+            <div className="min-w-0">
+              <p className="text-base font-semibold leading-tight">Installer Frip &amp; Co Street</p>
+              <p className="mt-0.5 text-sm leading-snug text-white/90">
+                Ajoute l&apos;application à l&apos;écran d&apos;accueil de la tablette pour un
+                lancement direct, en plein écran.
+              </p>
+            </div>
           </div>
-        </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void handleInstall()}
-            className="min-h-touch flex-1 rounded-fc bg-white px-4 py-2 text-base font-semibold text-fc-primary-deep transition-colors hover:bg-fc-primary-soft sm:flex-none"
-          >
-            Installer
-          </button>
-          <button
-            type="button"
-            onClick={handleLater}
-            className="min-h-touch flex-1 rounded-fc border border-white/60 px-4 py-2 text-base font-medium text-white transition-colors hover:bg-white/10 sm:flex-none"
-          >
-            Plus tard
-          </button>
-          <button
-            type="button"
-            onClick={handleNever}
-            className="min-h-touch rounded-fc px-3 py-2 text-sm text-white/80 underline underline-offset-2 transition-colors hover:text-white"
-          >
-            Ne plus proposer
-          </button>
+          <div className="mt-3 flex flex-wrap items-center gap-2 sm:mt-0 sm:flex-shrink-0 sm:flex-nowrap">
+            <button
+              type="button"
+              onClick={() => void handleInstall()}
+              className="min-h-touch flex-1 rounded-fc bg-white px-4 py-2 text-base font-semibold text-fc-primary-deep transition-colors hover:bg-fc-primary-soft sm:flex-none"
+            >
+              Installer
+            </button>
+            <button
+              type="button"
+              onClick={handleLater}
+              className="min-h-touch flex-1 rounded-fc border border-white/60 px-4 py-2 text-base font-medium text-white transition-colors hover:bg-white/10 sm:flex-none"
+            >
+              Plus tard
+            </button>
+            <button
+              type="button"
+              onClick={handleNever}
+              className="min-h-touch w-full whitespace-nowrap rounded-fc px-3 py-2 text-sm text-white/80 underline underline-offset-2 transition-colors hover:text-white sm:w-auto"
+            >
+              Ne plus proposer
+            </button>
+          </div>
         </div>
       </div>
     </div>

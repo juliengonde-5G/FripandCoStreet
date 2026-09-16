@@ -44,6 +44,10 @@ export interface PwaInstallState {
   canInstall: boolean;
   /** Le navigateur a signalé l'installation pendant cette visite. */
   justInstalled: boolean;
+  /** « Ne plus proposer » a été touché sur cet appareil (persistant). */
+  dismissedForever: boolean;
+  /** « Plus tard » a été touché dans cet onglet. */
+  snoozedForSession: boolean;
 }
 
 // --- singleton de module -----------------------------------------------
@@ -57,9 +61,21 @@ const listeners = new Set<() => void>();
  * Instantané mémoïsé : `useSyncExternalStore` exige que deux lectures
  * consécutives sans notification renvoient la **même** référence.
  */
-let snapshot: PwaInstallState = { standalone: false, canInstall: false, justInstalled: false };
+let snapshot: PwaInstallState = {
+  standalone: false,
+  canInstall: false,
+  justInstalled: false,
+  dismissedForever: false,
+  snoozedForSession: false,
+};
 
-const SERVER_SNAPSHOT: PwaInstallState = { standalone: false, canInstall: false, justInstalled: false };
+const SERVER_SNAPSHOT: PwaInstallState = {
+  standalone: false,
+  canInstall: false,
+  justInstalled: false,
+  dismissedForever: false,
+  snoozedForSession: false,
+};
 
 /** L'application tourne-t-elle déjà en fenêtre autonome ? */
 export function isStandalone(): boolean {
@@ -78,11 +94,15 @@ function recompute(): void {
     standalone: isStandalone(),
     canInstall: deferred !== null,
     justInstalled,
+    dismissedForever: readFlag("local", DISMISS_STORAGE_KEY),
+    snoozedForSession: readFlag("session", SNOOZE_SESSION_KEY),
   };
   if (
     next.standalone === snapshot.standalone &&
     next.canInstall === snapshot.canInstall &&
-    next.justInstalled === snapshot.justInstalled
+    next.justInstalled === snapshot.justInstalled &&
+    next.dismissedForever === snapshot.dismissedForever &&
+    next.snoozedForSession === snapshot.snoozedForSession
   ) {
     return;
   }
@@ -191,6 +211,7 @@ export function isInstallDismissedForever(): boolean {
 
 export function setInstallDismissedForever(value: boolean): void {
   writeFlag("local", DISMISS_STORAGE_KEY, value);
+  recompute();
 }
 
 export function isInstallSnoozedForSession(): boolean {
@@ -199,6 +220,7 @@ export function isInstallSnoozedForSession(): boolean {
 
 export function setInstallSnoozedForSession(value: boolean): void {
   writeFlag("session", SNOOZE_SESSION_KEY, value);
+  recompute();
 }
 
 /**

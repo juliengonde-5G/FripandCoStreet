@@ -23,7 +23,6 @@ import Card from "@/components/ui/Card";
 import {
   getPwaInstallServerSnapshot,
   getPwaInstallSnapshot,
-  isInstallDismissedForever,
   promptInstall,
   setInstallDismissedForever,
   setInstallSnoozedForSession,
@@ -31,22 +30,21 @@ import {
 } from "@/lib/pwaInstall";
 
 export default function AppInstallCard() {
-  const { standalone, canInstall, justInstalled } = useSyncExternalStore(
+  // Même magasin que la bannière : un « Ne plus proposer » touché en bas
+  // d'écran se voit ici tout de suite, sans rechargement.
+  const { standalone, canInstall, justInstalled, dismissedForever } = useSyncExternalStore(
     subscribeToPwaInstall,
     getPwaInstallSnapshot,
     getPwaInstallServerSnapshot,
   );
 
-  // Lu après le montage seulement : `localStorage` n'existe pas au rendu
-  // serveur et un écart provoquerait une erreur d'hydratation.
-  const [dismissedForever, setDismissedForever] = useState(false);
+  // Le rendu serveur ignore l'état du navigateur : on n'affiche un
+  // diagnostic qu'une fois monté, pour ne pas annoncer « non proposée »
+  // le temps d'une image.
   const [mounted, setMounted] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    setDismissedForever(isInstallDismissedForever());
-    setMounted(true);
-  }, []);
+  useEffect(() => setMounted(true), []);
 
   const handleInstall = useCallback(async () => {
     setMessage(null);
@@ -59,8 +57,7 @@ export default function AppInstallCard() {
   const handleRestoreBanner = useCallback(() => {
     setInstallDismissedForever(false);
     setInstallSnoozedForSession(false);
-    setDismissedForever(false);
-    setMessage("La proposition d'installation réapparaîtra au prochain chargement.");
+    setMessage("La proposition d'installation est réactivée.");
   }, []);
 
   const installed = standalone || justInstalled;
