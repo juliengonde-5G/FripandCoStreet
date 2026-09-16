@@ -15,6 +15,7 @@ from app.models.user import User
 from app.services.fiscal import PosServiceError
 from app.services.pos import _PARIS
 from app.services.reporting import dashboard, serialize_dashboard
+from app.services.weather import get_current as weather_current
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -46,3 +47,17 @@ async def get_dashboard(
         now = datetime(day.year, day.month, day.day, 12, 0, tzinfo=_PARIS)
 
     return serialize_dashboard(await dashboard(db, now=now))
+
+
+@router.get("/weather")
+async def get_weather(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Meteo courante de la boutique (PR11, M3).
+
+    Toujours 200 : une meteo indisponible est une reponse valide
+    (`{"unavailable": true, "reason": "…"}`), pas une erreur — l'accueil
+    affiche alors une ligne discrete au lieu de casser.
+    """
+    return await weather_current(db)

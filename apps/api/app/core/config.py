@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # (app/services/settings_service.py), pas ici (pas un secret).
     BACKUP_DIR: str = "data/backups"
 
+    # Meteo locale (PR11, M3) — cle OpenWeather. Absente, la meteo est
+    # simplement « indisponible » : aucune page ne tombe (app/services/
+    # weather.py). Jamais stockee dans `app_settings` ni renvoyee par
+    # l'API : l'ecran de reglages n'expose que `api_key_configured`.
+    OPENWEATHER_API_KEY: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [s.strip() for s in self.CORS_ORIGINS.split(",") if s.strip()]

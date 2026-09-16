@@ -326,6 +326,25 @@ class RgpdSettingsIn(BaseModel):
     deletion_delay_days: int = Field(default=30, ge=1, le=90)
 
 
+class WeatherSettingsIn(BaseModel):
+    """Reglages meteo (PR11, M3) — localisation seulement.
+
+    Aucune cle d'API ici : `OPENWEATHER_API_KEY` est un secret, donc une
+    variable d'environnement. L'ecran de reglages en affiche l'ETAT
+    (`api_key_configured`), jamais la valeur — c'est `_decorate_settings`
+    qui l'ajoute a la reponse, sans jamais l'ecrire en base.
+    """
+
+    city: str = ""
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+
+    @field_validator("city")
+    @classmethod
+    def _strip_city(cls, value: str) -> str:
+        return (value or "").strip()[:120]
+
+
 _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "shop": ShopSettingsIn,
     "fiscal": FiscalSettingsIn,
@@ -337,7 +356,22 @@ _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "pos": PosSettingsIn,
     "payments": PaymentsSettingsIn,
     "rgpd": RgpdSettingsIn,
+    "weather": WeatherSettingsIn,
 }
+
+
+def _decorate_settings(key: str, value: dict) -> dict:
+    """Champs derives ajoutes a la LECTURE d'un reglage, jamais stockes.
+
+    `weather.api_key_configured` (PR11, M3) : l'ecran de reglages doit
+    pouvoir dire « clé configurée / absente » sans que la cle transite
+    jamais par une reponse d'API ni par `app_settings`.
+    """
+    if key == "weather":
+        from app.services.weather import api_key_configured
+
+        return {**value, "api_key_configured": api_key_configured()}
+    return value
 
 
 def _settings_to_json(value: Any) -> Any:
@@ -367,7 +401,7 @@ async def get_settings(
 ):
     if key not in _SETTINGS_SCHEMAS:
         raise PosServiceError(f"Paramètre inconnu : {key}", code="unknown_setting", status_code=404)
-    return await SettingsService(db).get(key)
+    return _decorate_settings(key, await SettingsService(db).get(key))
 
 
 @router.put("/settings/{key}")
@@ -388,7 +422,7 @@ async def put_settings(
         )
     row = await SettingsService(db).set(key, _settings_to_json(validated), user_id=user.id)
     await db.commit()
-    return row.value
+    return _decorate_settings(key, dict(row.value or {}))
 
 
 # ---------------------------------------------------------------------------
