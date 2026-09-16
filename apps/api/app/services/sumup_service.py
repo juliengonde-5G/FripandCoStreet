@@ -28,7 +28,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import urlsplit
 
@@ -211,8 +211,6 @@ class ExchangeRecord:
     client_transaction_id: str | None = None
     # Rempli a la persistance (identifiant de la requete HTTP entrante).
     request_id: str | None = None
-    # Presence d'un champ liste par defaut : evite les mutables partages.
-    extra: dict = field(default_factory=dict)
 
 
 # Une adresse e-mail n'a rien a faire dans `sumup_exchanges` (contrat K1 :
