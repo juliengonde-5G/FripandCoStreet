@@ -235,6 +235,15 @@ export interface CbCheckoutStatus {
 export interface CbInitiateResponse {
   checkout_id: string;
   status: CbCheckoutState;
+  /** PR9 : avant de repousser un montant sur le terminal, le serveur
+   * vérifie que l'encaissement d'origine n'est pas déjà passé. S'il
+   * l'était, rien ne repart : la réponse vaut `status: "paid"` avec le
+   * `checkout_id` **d'origine** et `reconciled: true`, et la caisse
+   * enchaîne sur la vente sans relancer le suivi. */
+  reconciled?: boolean;
+  transaction_code?: string;
+  card_brand?: string;
+  last4?: string;
 }
 
 // ---------------------------------------------------------------------------

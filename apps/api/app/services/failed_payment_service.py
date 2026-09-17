@@ -52,6 +52,21 @@ ABANDON_REASON_MAX_LEN = 200
 # est en cause, pas un alea.
 DEFAULT_MAX_RETRIES = 3
 
+# Causes AMBIGUES : le POST de push a pu atteindre SumUp sans que la reponse
+# nous parvienne (coupure, delai depasse). Impossible de savoir, de notre
+# cote, si un montant s'affiche sur le terminal — voire s'il a deja ete
+# encaisse. Repousser sans verifier, c'est risquer un DOUBLE DEBIT.
+#
+# Les autres causes ne sont pas ambigues : un `http_5xx` / `http_4xx` est une
+# REPONSE de SumUp (la requete a ete traitee et rejetee, aucun paiement n'a
+# demarre), et un terminal indisponible est refuse par le pre-vol avant tout
+# envoi. Dans ces cas on repousse directement, sans appel supplementaire.
+AMBIGUOUS_ERROR_TYPES = ("transport", "timeout")
+
+# Verdicts de la reconciliation.
+RECONCILE_PUSH = "push"
+RECONCILE_PAID = "paid"
+
 # Statuts « ouverts » : une ligne encore susceptible d'etre resolue par un
 # paiement qui finit par passer. `exhausted` en fait partie — la vendeuse
 # peut avoir encaisse via le reessai historique (`/{checkout_id}/retry`)
@@ -96,6 +111,79 @@ def classify_push_result(result: dict) -> tuple[bool, str]:
         # recuperable, donc le libelle ne sera pas persiste dans ce cas.
         return recoverable, "http_4xx" if recoverable else "declined"
     return recoverable, "declined"
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation avant un nouveau push (anti double debit)
+# ---------------------------------------------------------------------------
+
+
+def apply_paid_fields(attempt: PaymentAttempt, poll: dict) -> None:
+    """Passe un essai a `paid` avec les identifiants SumUp du releve.
+
+    Memes champs que le constat par le polling de la caisse : un essai
+    reconcilie ne doit pas etre plus pauvre qu'un essai suivi normalement.
+    """
+    attempt.status = PaymentAttemptStatus.paid
+    attempt.sumup_transaction_id = poll.get("sumup_transaction_id")
+    attempt.sumup_transaction_code = poll.get("sumup_transaction_code")
+    attempt.sumup_auth_code = poll.get("sumup_auth_code")
+    attempt.sumup_card_brand = poll.get("sumup_card_brand")
+    attempt.sumup_card_last4 = poll.get("sumup_card_last4")
+
+
+async def queued_error_type(db: AsyncSession, client_uuid: uuid.UUID) -> str | None:
+    """Cause du dernier echec de cette vente, telle que mise en file.
+
+    C'est la seule trace qui distingue « SumUp a repondu non » de « on n'a
+    jamais su ce que SumUp a fait » : `payment_attempts` ne garde qu'un
+    message. Pas de ligne en file = echec non recuperable = SumUp a repondu.
+    """
+    failed_payment = await find_open_for_client_uuid(db, client_uuid)
+    return failed_payment.error_type if failed_payment is not None else None
+
+
+async def reconcile_before_push(
+    db: AsyncSession,
+    svc,
+    attempt: PaymentAttempt,
+    *,
+    error_type: str | None,
+) -> tuple[str, dict | None]:
+    """Verifie le sort du checkout d'origine avant d'en pousser un nouveau.
+
+    Retourne ``(RECONCILE_PAID | RECONCILE_PUSH, releve SumUp | None)`` :
+
+    - cause non ambigue → on repousse sans rien demander (aucun paiement
+      n'a pu demarrer cote terminal) ;
+    - le checkout d'origine est PAID → **on ne repousse pas** : la cliente a
+      deja ete debitee, l'essai passe `paid` et la caisse enchaine sur la
+      vente avec ce checkout-la ;
+    - sinon le terminal peut encore afficher le montant (la Transactions
+      API repond « en attente » aussi bien pour un paiement en cours que
+      pour un checkout jamais cree) : on coupe l'ecran du TPE
+      (`terminate_reader_checkout`) avant de repousser, pour qu'il n'y ait
+      jamais deux montants en circulation ;
+    - un checkout d'origine explicitement echoue ou annule ne necessite
+      aucune coupure : on repousse directement.
+
+    Aucun commit ici : l'appelant reste maitre de sa transaction.
+    """
+    if error_type not in AMBIGUOUS_ERROR_TYPES:
+        return RECONCILE_PUSH, None
+
+    poll = await svc.get_checkout_status(attempt.checkout_id)
+    status = str(poll.get("status") or "").upper()
+
+    if status == "PAID":
+        apply_paid_fields(attempt, poll)
+        await db.flush()
+        return RECONCILE_PAID, poll
+
+    if status == "PENDING":
+        await svc.terminate_reader_checkout()
+
+    return RECONCILE_PUSH, poll
 
 
 # ---------------------------------------------------------------------------
@@ -297,12 +385,25 @@ async def enqueue(
 
 
 class RetryOutcome:
-    """Resultat d'un reessai : le nouvel essai, la reponse SumUp, l'echec eventuel."""
+    """Resultat d'un reessai : l'essai concerne, la reponse SumUp, l'echec eventuel.
 
-    def __init__(self, attempt: PaymentAttempt, result: dict, failed: bool) -> None:
+    `reconciled_paid` signale le cas ou AUCUN nouveau paiement n'a ete
+    pousse : le checkout d'origine etait deja paye. `attempt` est alors
+    l'essai d'ORIGINE (passe `paid`), pas un nouvel essai.
+    """
+
+    def __init__(
+        self,
+        attempt: PaymentAttempt,
+        result: dict,
+        failed: bool,
+        *,
+        reconciled_paid: bool = False,
+    ) -> None:
         self.attempt = attempt
         self.result = result
         self.failed = failed
+        self.reconciled_paid = reconciled_paid
 
 
 class RetriesExhausted(PosServiceError):
@@ -389,9 +490,11 @@ async def retry(
     N'ecrit AUCUNE vente : un push accepte rend un essai `pending`, et c'est
     le polling (`GET /{checkout_id}/status`) puis la creation de vente qui
     constateront `paid`.
-    """
-    _guard_retryable(failed_payment)
 
+    Avant tout nouveau push, le sort du checkout d'origine est reconcilie
+    quand la cause de l'echec est ambigue (cf. `reconcile_before_push`) :
+    c'est ce qui evite de presenter deux fois le meme montant a la carte.
+    """
     source = (
         await db.execute(
             select(PaymentAttempt)
@@ -420,6 +523,28 @@ async def retry(
         raise PosServiceError(
             "Ce paiement a déjà été encaissé.", code="already_paid", status_code=409
         )
+
+    # Reconciliation AVANT le garde-fou des relances : si la cliente a deja
+    # ete debitee, il faut le constater meme quand les reessais sont
+    # epuises — refuser la lecture laisserait un encaissement orphelin.
+    if failed_payment.status in OPEN_STATUSES:
+        verdict, poll = await reconcile_before_push(
+            db, svc, source, error_type=failed_payment.error_type
+        )
+        if verdict == RECONCILE_PAID:
+            await mark_succeeded(
+                db,
+                failed_payment,
+                user_id=user_id,
+                username=username,
+                ip=ip,
+                request_id=request_id,
+            )
+            # Aucun push : le compteur de relances ne bouge pas, et il n'y a
+            # pas de `retry_started` a journaliser — rien n'a ete lance.
+            return RetryOutcome(source, poll or {}, False, reconciled_paid=True)
+
+    _guard_retryable(failed_payment)
 
     new_count = source.attempt_count + 1
     new_client_transaction_id = f"{failed_payment.client_uuid}:r{new_count}"

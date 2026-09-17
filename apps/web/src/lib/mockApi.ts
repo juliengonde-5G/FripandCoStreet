@@ -484,11 +484,19 @@ const cbAttempts = new Map<string, CbAttempt>();
 // (`POST /api/pos/payments/cb/retry-failed/{id}`) ou un autre moyen de
 // paiement, sans jamais perdre le panier et sans créer de vente.
 //
-// Règle de la démo, choisie pour être déclenchable à volonté sans matériel :
-// **la première tentative carte d'un montant se terminant par ,99 €
-// échoue de façon récupérable, le réessai réussit.** Tout autre montant
-// passe comme avant (payé ~2 s après l'envoi au terminal). Un deuxième
-// panier au même montant repart sur une file neuve (`client_uuid` différent).
+// Règles de la démo, choisies pour être déclenchables à volonté sans
+// matériel :
+//   - montant se terminant par **,99 €** → la première tentative carte
+//     échoue de façon récupérable, le réessai repart sur le terminal et
+//     réussit ;
+//   - montant se terminant par **,98 €** → même échec, mais le paiement
+//     d'origine était en fait passé : le réessai ne repousse rien, le
+//     serveur **réconcilie** et répond `status: "paid"` avec le
+//     `checkout_id` d'origine et `reconciled: true` (la cliente n'est
+//     débitée qu'une fois).
+// Tout autre montant passe comme avant (payé ~2 s après l'envoi au
+// terminal). Un deuxième panier au même montant repart sur une file neuve
+// (`client_uuid` différent).
 //
 // La file elle-même (`failedPayments`) est déclarée avec le bloc « PR9 —
 // administration », qui la lit pour la carte « Échecs en attente ».
@@ -498,9 +506,18 @@ function findQueuedPayment(id: string): FailedPayment | undefined {
   return failedPayments.find((f) => f.id === id);
 }
 
-/** Un montant de démo qui déclenche l'échec récupérable : …,99 €. */
+function centsOf(amount: number): number {
+  return Math.round(Math.abs(amount) * 100) % 100;
+}
+
+/** Montants de démo qui n'aboutissent pas du premier coup : …,99 € et …,98 €. */
 function triggersRecoverableFailure(amount: number): boolean {
-  return Math.round(Math.abs(amount) * 100) % 100 === 99;
+  return centsOf(amount) === 99 || centsOf(amount) === 98;
+}
+
+/** …,98 € : au réessai, le serveur découvre que l'original était payé. */
+function triggersReconciliation(amount: number): boolean {
+  return centsOf(amount) === 98;
 }
 
 /** 409 enrichie : `detail` + `code` comme partout (§5), plus les champs de
@@ -2416,6 +2433,26 @@ export async function mockFetchAPI<T = unknown>(
         retry_count: queued!.retry_count,
         max_retries: queued!.max_retries,
       });
+    }
+    // Réconciliation (revue Codex) : avant de repousser, le serveur relit
+    // l'encaissement d'origine. S'il était passé, rien ne repart sur le
+    // terminal et la caisse enchaîne sur la vente avec ce checkout-là.
+    const original = cbAttempts.get(queued!.attempt_id);
+    if (original && triggersReconciliation(queued!.amount)) {
+      original.status = "paid";
+      original.failed_payment_id = queued!.id;
+      resolveQueuedPayment(original);
+      return {
+        checkout_id: original.checkout_id,
+        status: "paid",
+        reconciled: true,
+        failed_payment_id: queued!.id,
+        retry_count: queued!.retry_count,
+        transaction_code: `MOCK-${original.checkout_id.slice(0, 8).toUpperCase()}`,
+        card_brand: "VISA",
+        last4: "4242",
+        failed_payment: queued,
+      } as unknown as T;
     }
     const checkout_id = uuid();
     queued!.retry_count += 1;
