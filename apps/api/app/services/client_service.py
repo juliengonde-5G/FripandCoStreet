@@ -1417,6 +1417,20 @@ class ClientService:
     # Fusion de deux fiches en double (PR10/L3)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_merge_allowed(winner: Client, source: Client) -> None:
+        """Conditions d'une fusion (L3). Extrait en methode parce qu'il est
+        joue DEUX fois : une premiere pour refuser au plus tot, sans prendre
+        de verrou, et une seconde sur les valeurs relues sous verrou — c'est
+        cette seconde qui fait foi."""
+        if winner.id == source.id:
+            raise MergeSameClient()
+        for candidate in (winner, source):
+            if candidate.anonymized_at is not None or candidate.merged_into_client_id is not None:
+                raise MergeClientInactive()
+        if winner.deletion_requested_at is not None or winner.deletion_scheduled_for is not None:
+            raise MergeDeletionPending()
+
     async def merge(
         self, *, winner: Client, source: Client, user_id: uuid.UUID | None
     ) -> dict:
@@ -1434,13 +1448,7 @@ class ClientService:
         un renvoi vers la fiche conservee, pour que l'ancienne URL et les
         anciens exports continuent de mener quelque part.
         """
-        if winner.id == source.id:
-            raise MergeSameClient()
-        for candidate in (winner, source):
-            if candidate.anonymized_at is not None or candidate.merged_into_client_id is not None:
-                raise MergeClientInactive()
-        if winner.deletion_requested_at is not None or winner.deletion_scheduled_for is not None:
-            raise MergeDeletionPending()
+        self._check_merge_allowed(winner, source)
 
         # Meme verrou que `create_or_get`, pris sur les DEUX moyens de
         # contact et dans un ordre deterministe (tri) : une vente en caisse
@@ -1454,6 +1462,44 @@ class ClientService:
             }
         ):
             await self._acquire_client_write_lock(key)
+
+        # RELECTURE SOUS VERROU, puis memes controles sur les valeurs
+        # fraiches (revue de code).
+        #
+        # Les deux fiches ont ete chargees par la route AVANT le verrou :
+        # entre ce chargement et ici, une autre requete a pu fusionner la
+        # meme source vers une AUTRE conservee et commiter. Poursuivre avec
+        # les objets en memoire, valides sur un etat perime, ecraserait son
+        # `merged_into_client_id` et recopierait ses coordonnees sur la
+        # mauvaise fiche, pendant que ses ventes resteraient rattachees a la
+        # premiere. Les controles ne valent donc que rejoues ici.
+        #
+        # `FOR UPDATE` verrouille les deux lignes par id croissant (ordre
+        # deterministe, donc pas d'interblocage entre deux fusions croisees)
+        # et couvre les ecritures qui, elles, ne passent pas par le verrou
+        # consultatif — une anonymisation RGPD concurrente, par exemple.
+        # `populate_existing` force la relecture des colonnes : sans lui,
+        # SQLAlchemy rendrait les instances deja en memoire, c'est-a-dire
+        # exactement les valeurs perimees qu'on cherche a ecarter.
+        reloaded = {
+            row.id: row
+            for row in (
+                await self.db.execute(
+                    select(Client)
+                    .where(Client.id.in_([winner.id, source.id]))
+                    .order_by(Client.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalars().all()
+        }
+        winner = reloaded.get(winner.id)
+        source = reloaded.get(source.id)
+        if winner is None or source is None:
+            # Une ligne `clients` n'est jamais supprimee (RGPD =
+            # anonymisation) : si elle a disparu, on ne fusionne rien.
+            raise MergeClientInactive()
+        self._check_merge_allowed(winner, source)
 
         # L'e-mail de la source doit etre capture AVANT qu'elle ne soit
         # videe : c'est lui qu'il faudra retirer de la liste Brevo.
