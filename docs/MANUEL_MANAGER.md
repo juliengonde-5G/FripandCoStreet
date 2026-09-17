@@ -39,6 +39,11 @@ cahier garde l'objectif qu'elle avait au premier affichage. C'est voulu —
 un objectif relevé en fin de mois ne doit pas réécrire l'histoire des jours
 déjà passés.
 
+Cas de l'ouverture d'une journée **avant** d'avoir saisi le moindre objectif :
+elle reste sans objectif jusqu'à ce qu'un objectif existe, puis le prend au
+premier affichage suivant — tant qu'elle n'est pas révolue. Une journée
+terminée sans objectif n'en reçoit jamais après coup.
+
 Une journée révolue se relit, elle ne se modifie plus : ni texte, ni
 signature. Le journal des événements retient qu'un texte a été modifié et
 qu'une journée a été signée, **jamais le texte lui-même**.

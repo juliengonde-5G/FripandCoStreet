@@ -36,6 +36,7 @@ from app.models.client import Client, Consent, ConsentPurpose, ConsentSource
 from app.models.communication import Communication
 from app.models.pos import Transaction, TransactionType
 from app.models.receipt import Receipt
+from app.services.csv_safety import neutralize_csv_row
 from app.services.fiscal import PosServiceError
 from app.services.jet import (
     EVENT_BREVO_SYNC_FAILED,
@@ -1880,15 +1881,23 @@ async def newsletter_export_csv(db: AsyncSession) -> tuple[str, str, int]:
             if moment.tzinfo is None:
                 moment = moment.replace(tzinfo=timezone.utc)
             granted_at = moment.astimezone(paris).strftime("%d/%m/%Y %H:%M:%S")
+        # Neutralisation tableur (revue Codex #17) : prenom, nom, e-mail,
+        # telephone et source sont du texte venu de la saisie en caisse. Un
+        # prenom `=1+1` deviendrait une FORMULE a l'ouverture du fichier
+        # chez la personne qui l'importe — la victime de cette injection
+        # n'est pas notre application, c'est la boutique ou son outil
+        # d'e-mailing. La date de consentement, elle, est produite par nous.
         writer.writerow(
-            [
-                client.email or "",
-                client.first_name or "",
-                client.last_name or "",
-                client.phone or "",
-                granted_at,
-                consent.source.value if consent is not None else "",
-            ]
+            neutralize_csv_row(
+                [
+                    client.email or "",
+                    client.first_name or "",
+                    client.last_name or "",
+                    client.phone or "",
+                    granted_at,
+                    consent.source.value if consent is not None else "",
+                ]
+            )
         )
 
     today = datetime.now(paris).date().isoformat()

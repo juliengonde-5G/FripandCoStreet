@@ -4,6 +4,7 @@
 # caisse ouverte) : jamais d'INSERT direct dans `transactions`. Les journees
 # passees ne sont pas antidatees non plus — une transaction signee est
 # immuable, `created_at` comprise : c'est la DATE CONSULTEE qui bouge.
+import asyncio
 import json
 import uuid
 from datetime import date, timedelta
@@ -18,10 +19,13 @@ from app.models.jet import JournalEvent
 from app.services.cahier import (
     compute_daily_target,
     daily_target_for,
+    effective_daily_target_for,
     open_days_in_month,
+    paris_today,
+    sign,
     weather_snapshot_for,
 )
-from app.services.cahier import paris_today
+from app.services.fiscal import PosServiceError
 
 pytestmark = pytest.mark.anyio
 
@@ -492,3 +496,110 @@ async def test_required_daily_is_null_without_any_open_day_left(client, auth_hea
     # Plus aucun jour ouvert : rien a repartir. « 0,00 € par jour » se lirait
     # comme un objectif atteint alors que le mois est entierement en retard.
     assert body["target"]["required_daily_rest_of_month"] is None
+
+
+# ---------------------------------------------------------------------------
+# Figeage tardif (revue Codex #17) — une journee ouverte avant tout objectif
+# ---------------------------------------------------------------------------
+
+
+async def test_target_set_after_opening_the_day_is_frozen_late(client, auth_headers):
+    today = _today()
+    # La journee est ouverte dans le cahier AVANT qu'aucun objectif n'existe :
+    # sa ligne part avec un objectif a NULL.
+    first = await _get_day(client, auth_headers, today.isoformat())
+    assert first["target"]["daily"] is None
+    async with async_session() as db:
+        row = (
+            await db.execute(select(CahierDay).where(CahierDay.day == today))
+        ).scalar_one()
+        assert row.frozen_daily_target is None
+
+    # Le manager saisit son objectif a 10 h : la journee en cours doit le
+    # prendre, sur les DEUX ecrans.
+    await _set_targets(client, auth_headers, daily="150.00")
+    second = await _get_day(client, auth_headers, today.isoformat())
+    assert second["target"]["daily"] == "150.00"
+
+    async with async_session() as db:
+        row = (
+            await db.execute(select(CahierDay).where(CahierDay.day == today))
+        ).scalar_one()
+        assert row.frozen_daily_target == Decimal("150.00")
+        # Le rapport du jour lit exactement la meme valeur.
+        assert await effective_daily_target_for(db, today) == Decimal("150.00")
+
+    # Et une fois fige, il ne bouge plus.
+    await _set_targets(client, auth_headers, daily="999.00")
+    assert (await _get_day(client, auth_headers, today.isoformat()))["target"][
+        "daily"
+    ] == "150.00"
+
+
+async def test_past_day_opened_without_target_never_gets_one(client, auth_headers):
+    yesterday = _today() - timedelta(days=1)
+    first = await _get_day(client, auth_headers, yesterday.isoformat())
+    assert first["target"]["daily"] is None
+
+    # L'objectif arrive le lendemain : la journee revolue ne le reprend pas —
+    # on ne demande pas apres coup un chiffre a une journee deja faite.
+    await _set_targets(client, auth_headers, daily="150.00")
+    again = await _get_day(client, auth_headers, yesterday.isoformat())
+    assert again["target"]["daily"] is None
+
+    async with async_session() as db:
+        row = (
+            await db.execute(select(CahierDay).where(CahierDay.day == yesterday))
+        ).scalar_one()
+        assert row.frozen_daily_target is None
+        # Le rapport du jour dit la meme chose que le cahier : aucun objectif.
+        assert await effective_daily_target_for(db, yesterday) is None
+
+
+async def test_never_opened_day_follows_the_current_target(client, auth_headers):
+    await _set_targets(client, auth_headers, daily="150.00")
+    # Jamais ouvert dans le cahier : aucune ligne n'est creee par un rapport,
+    # et l'objectif courant s'applique.
+    async with async_session() as db:
+        assert await effective_daily_target_for(db, _today()) == Decimal("150.00")
+        assert (
+            await db.execute(select(CahierDay).where(CahierDay.day == _today()))
+        ).scalar_one_or_none() is None
+
+
+# ---------------------------------------------------------------------------
+# Signatures concurrentes (revue Codex #17)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", ["manager", "team"])
+async def test_two_simultaneous_signatures_keep_only_one(client, auth_headers, manager, role):
+    today = _today()
+
+    async def _sign_once():
+        async with async_session() as db:
+            try:
+                await sign(db, today, role=role, name="Léa", user=manager)
+                await db.commit()
+                return "ok"
+            except PosServiceError as exc:
+                await db.rollback()
+                return exc.code
+
+    results = await asyncio.gather(_sign_once(), _sign_once())
+    # Une seule des deux tablettes signe ; l'autre est refusee proprement,
+    # au lieu d'effacer silencieusement la premiere signature.
+    assert sorted(results) == ["already_signed", "ok"]
+
+    async with async_session() as db:
+        events = (
+            await db.execute(
+                select(JournalEvent).where(JournalEvent.event_type == "cahier.signed")
+            )
+        ).scalars().all()
+        row = (
+            await db.execute(select(CahierDay).where(CahierDay.day == today))
+        ).scalar_one()
+    assert len(events) == 1
+    signed_at = row.manager_signed_at if role == "manager" else row.team_signed_at
+    assert signed_at is not None

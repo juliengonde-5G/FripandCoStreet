@@ -222,3 +222,27 @@ async def test_unknown_filter_value_is_refused(client, auth_headers):
         "/api/admin/clients", params={"optin": "sms"}, headers=auth_headers
     )
     assert r.status_code == 422
+
+
+async def test_export_neutralizes_spreadsheet_formulas(client, auth_headers):
+    """Revue Codex #17 — une cellule qui commence par `=`, `+`, `-` ou `@`
+    est lue comme une FORMULE par un tableur. Le fichier part chez la
+    boutique et dans l'outil d'e-mailing : c'est la qu'elle s'executerait."""
+    await _create_client(
+        client,
+        auth_headers,
+        email="formule@example.com",
+        first_name="=1+1",
+        last_name="-Jean",
+        newsletter_optin=True,
+    )
+
+    response = await _export(client, auth_headers)
+    assert response.status_code == 200, response.text
+    rows = _rows(response.text)
+    assert len(rows) == 2
+    assert rows[1][1] == "'=1+1"
+    assert rows[1][2] == "'-Jean"
+    # La valeur reste lisible : l'apostrophe est une marque de texte, pas un
+    # caractere affiche par le tableur.
+    assert "=1+1" in rows[1][1]
