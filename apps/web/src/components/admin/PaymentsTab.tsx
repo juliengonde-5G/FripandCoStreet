@@ -15,9 +15,13 @@
  *
  * Deux gestes sont irréversibles et demandent donc une confirmation : vider
  * le journal, et renoncer à un encaissement en file (motif obligatoire, il
- * part au journal des événements). Le réessai, lui, n'est proposé que si
- * une caisse est ouverte : sans caisse ouverte la vente ne pourrait pas
- * être écrite même si le paiement passait.
+ * part au journal des événements).
+ *
+ * On ne relance PAS un encaissement depuis ici : seule la caisse a le
+ * panier, suit le terminal et écrit la vente une fois le paiement accepté.
+ * Un réessai lancé depuis l'administration ferait payer la cliente sans que
+ * l'application le voie. La reprise se fait donc en caisse, en resélectionnant
+ * Carte pour le même montant — l'encaissement en file y repart tout seul.
  */
 import React, { useCallback, useEffect, useState } from "react";
 
@@ -25,7 +29,6 @@ import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
 import ErrorNotice from "@/components/ui/ErrorNotice";
-import { api } from "@/lib/api";
 import { describeError, type DisplayableError, type ErrorDetails } from "@/lib/apiError";
 import { formatCurrency, formatDateTime, formatRelativeTime } from "@/lib/format";
 import {
@@ -37,7 +40,6 @@ import {
   fetchPaymentFailures,
   fetchSumupExchanges,
   purgeSumupExchanges,
-  retryFailedPayment,
   type FailedPayment,
   type FailedPaymentErrorType,
   type PaymentFailuresReport,
@@ -46,7 +48,6 @@ import {
   type SumupExchangeFilters,
   type SumupOperation,
 } from "@/lib/payments";
-import type { DrawerCurrentResponse } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Éléments communs
@@ -99,10 +100,6 @@ function PendingFailuresCard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<DisplayableError>(null);
 
-  // Une caisse fermée ne peut rien encaisser : le bouton Réessayer
-  // disparaît plutôt que d'échouer en 409 devant la cliente.
-  const [drawerOpen, setDrawerOpen] = useState(false);
-
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<DisplayableError>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -116,29 +113,9 @@ function PendingFailuresCard() {
       .then(setList)
       .catch((err) => setError(messageOf(err, "Impossible de charger les encaissements en attente.")))
       .finally(() => setLoading(false));
-    api
-      .get<DrawerCurrentResponse>("/api/pos/drawer/current")
-      .then((data) => setDrawerOpen(!!data?.open))
-      .catch(() => setDrawerOpen(false));
   }, []);
 
   useEffect(load, [load]);
-
-  const handleRetry = async (payment: FailedPayment): Promise<void> => {
-    setBusyId(payment.id);
-    setActionError(null);
-    setNotice(null);
-    try {
-      await retryFailedPayment(payment.id);
-      setNotice("Encaissement renvoyé sur le terminal : terminez l'opération en caisse.");
-      load();
-    } catch (err) {
-      setActionError(messageOf(err, "Le réessai n'a pas pu être lancé."));
-      load();
-    } finally {
-      setBusyId(null);
-    }
-  };
 
   const handleAbandon = async (payment: FailedPayment): Promise<void> => {
     const reason = abandonReason.trim();
@@ -165,7 +142,7 @@ function PendingFailuresCard() {
   return (
     <Card
       title="Échecs en attente"
-      subtitle="Encaissements carte qui n'ont pas abouti et que l'on peut encore relancer."
+      subtitle="Encaissements carte qui n'ont pas abouti et que la caisse peut encore reprendre."
       action={
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
           Actualiser
@@ -176,12 +153,6 @@ function PendingFailuresCard() {
         <ErrorNotice message={error} />
         <ErrorNotice message={actionError} />
         {notice && !actionError && <p className="text-sm text-fc-success font-medium">{notice}</p>}
-
-        {!loading && !drawerOpen && list.length > 0 && (
-          <p className="rounded-fc bg-fc-warn-soft border border-fc-warn/30 px-3 py-2 text-sm text-fc-warn">
-            Ouvrez la caisse pour pouvoir relancer un encaissement.
-          </p>
-        )}
 
         {loading ? (
           <p className="text-sm text-fc-ink-soft">Chargement…</p>
@@ -208,19 +179,12 @@ function PendingFailuresCard() {
                     <div className="mt-1 text-xs text-fc-ink-mute font-mono tabular-nums">
                       Réessais : {payment.retry_count}/{payment.max_retries}
                     </div>
+                    <div className="mt-1 text-xs text-fc-ink-mute">
+                      À reprendre en caisse : sélectionner Carte pour le même montant.
+                    </div>
                   </div>
 
                   <div className="flex flex-wrap gap-2">
-                    {drawerOpen && (
-                      <Button
-                        size="sm"
-                        onClick={() => void handleRetry(payment)}
-                        disabled={busyId === payment.id || payment.retry_count >= payment.max_retries}
-                        aria-busy={busyId === payment.id}
-                      >
-                        {busyId === payment.id ? "Envoi…" : "Réessayer"}
-                      </Button>
-                    )}
                     {abandonId !== payment.id && (
                       <Button
                         variant="outline"

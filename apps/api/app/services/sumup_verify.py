@@ -84,78 +84,102 @@ async def verify_card_tender(
         )
 
     svc = SumUpService()
-    status_result = await svc.get_checkout_status(tender.checkout_id)
-    sumup_status = str(status_result.get("status") or "").upper()
-    if sumup_status != "PAID":
-        raise CardNotConfirmed(
-            f"Paiement CB non confirmé par SumUp (statut : {sumup_status or 'inconnu'})."
-        )
-
-    reported_amount = status_result.get("amount")
-    if reported_amount is None:
-        raise CardNotConfirmed("Montant du paiement CB indisponible côté SumUp.")
-    reported = Decimal(str(reported_amount)).quantize(_CENTS)
-    expected = Decimal(tender.amount).quantize(_CENTS)
-    if reported != expected:
-        raise CardNotConfirmed(
-            f"Montant CB différent : attendu {expected} €, SumUp a débité {reported} €."
-        )
-
-    # Complète les identifiants de traçabilité (auth_code, marque, 4 derniers
-    # chiffres) via la Transactions API — la réponse de statut du push reader
-    # les inclut déjà quand PAID, mais get_transaction() reste la source
-    # canonique (§4.5 : « get_checkout_status puis get_transaction »).
-    sumup_transaction_id = status_result.get("sumup_transaction_id")
-    sumup_transaction_code = status_result.get("sumup_transaction_code")
-    sumup_auth_code = status_result.get("sumup_auth_code")
-    sumup_card_brand = status_result.get("sumup_card_brand")
-    sumup_card_last4 = status_result.get("sumup_card_last4")
-
-    txn = None
-    if sumup_transaction_id:
-        txn = await svc.get_transaction(transaction_id=sumup_transaction_id)
-    if txn:
-        card = txn.get("card") or {}
-        sumup_transaction_id = txn.get("id") or sumup_transaction_id
-        sumup_transaction_code = txn.get("transaction_code") or sumup_transaction_code
-        sumup_auth_code = txn.get("auth_code") or sumup_auth_code
-        sumup_card_brand = card.get("type") or card.get("scheme") or sumup_card_brand
-        sumup_card_last4 = card.get("last_4_digits") or sumup_card_last4
-
-    attempt.status = PaymentAttemptStatus.paid
-    attempt.sumup_transaction_id = sumup_transaction_id
-    attempt.sumup_transaction_code = sumup_transaction_code
-    attempt.sumup_auth_code = sumup_auth_code
-    attempt.sumup_card_brand = sumup_card_brand
-    attempt.sumup_card_last4 = sumup_card_last4
-    await db.flush()
-
-    # PR9/K3 — point de constat n° 2 du `paid`, le seul ou la vente existe :
-    # si ce panier avait un incident en file (terminal muet, puis reessai),
-    # la ligne se referme ICI et porte enfin la vente encaissee. On lit la
-    # vente en cours d'ecriture par son `client_uuid` (deja `flush`ee par
-    # `PosService.create_transaction` avant la boucle des paiements) plutot
-    # que de changer la signature de cette fonction, qui est l'interface
-    # opposable a `pos.py`. Aucune vente n'est creee ici : on ne fait que
-    # rattacher celle que l'appelant est en train d'ecrire.
-    transaction_id = (
-        await db.execute(
-            select(Transaction.id)
-            .where(
-                Transaction.client_uuid == client_uuid,
-                Transaction.transaction_type == TransactionType.sale,
+    # PR9/K1 — la verification finale de la carte est le dernier echange
+    # avec SumUp avant l'ecriture de la vente : c'est celui qu'on ira
+    # relire quand une vente est refusee alors que la cliente jure avoir
+    # ete debitee. Il doit donc etre journalise dans les DEUX sorties.
+    # Sur un refus, `CardNotConfirmed` remonte en 409 et `get_db` annule
+    # la transaction : la trace passe par une session independante
+    # (`persist_detached`), sinon elle disparaitrait avec le rollback.
+    verification_failed = False
+    try:
+        status_result = await svc.get_checkout_status(tender.checkout_id)
+        sumup_status = str(status_result.get("status") or "").upper()
+        if sumup_status != "PAID":
+            raise CardNotConfirmed(
+                f"Paiement CB non confirmé par SumUp (statut : {sumup_status or 'inconnu'})."
             )
-            .order_by(Transaction.created_at.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    await failed_payment_service.resolve_if_queued(db, client_uuid, transaction_id)
 
-    return VerifiedCardTender(
-        sumup_checkout_id=tender.checkout_id,
-        sumup_transaction_id=sumup_transaction_id,
-        sumup_transaction_code=sumup_transaction_code,
-        sumup_auth_code=sumup_auth_code,
-        sumup_card_brand=sumup_card_brand,
-        sumup_card_last4=sumup_card_last4,
-    )
+        reported_amount = status_result.get("amount")
+        if reported_amount is None:
+            raise CardNotConfirmed("Montant du paiement CB indisponible côté SumUp.")
+        reported = Decimal(str(reported_amount)).quantize(_CENTS)
+        expected = Decimal(tender.amount).quantize(_CENTS)
+        if reported != expected:
+            raise CardNotConfirmed(
+                f"Montant CB différent : attendu {expected} €, SumUp a débité {reported} €."
+            )
+
+        # Complète les identifiants de traçabilité (auth_code, marque, 4 derniers
+        # chiffres) via la Transactions API — la réponse de statut du push reader
+        # les inclut déjà quand PAID, mais get_transaction() reste la source
+        # canonique (§4.5 : « get_checkout_status puis get_transaction »).
+        sumup_transaction_id = status_result.get("sumup_transaction_id")
+        sumup_transaction_code = status_result.get("sumup_transaction_code")
+        sumup_auth_code = status_result.get("sumup_auth_code")
+        sumup_card_brand = status_result.get("sumup_card_brand")
+        sumup_card_last4 = status_result.get("sumup_card_last4")
+
+        txn = None
+        if sumup_transaction_id:
+            txn = await svc.get_transaction(transaction_id=sumup_transaction_id)
+        if txn:
+            card = txn.get("card") or {}
+            sumup_transaction_id = txn.get("id") or sumup_transaction_id
+            sumup_transaction_code = txn.get("transaction_code") or sumup_transaction_code
+            sumup_auth_code = txn.get("auth_code") or sumup_auth_code
+            sumup_card_brand = card.get("type") or card.get("scheme") or sumup_card_brand
+            sumup_card_last4 = card.get("last_4_digits") or sumup_card_last4
+
+        attempt.status = PaymentAttemptStatus.paid
+        attempt.sumup_transaction_id = sumup_transaction_id
+        attempt.sumup_transaction_code = sumup_transaction_code
+        attempt.sumup_auth_code = sumup_auth_code
+        attempt.sumup_card_brand = sumup_card_brand
+        attempt.sumup_card_last4 = sumup_card_last4
+        await db.flush()
+
+        # PR9/K3 — point de constat n° 2 du `paid`, le seul ou la vente existe :
+        # si ce panier avait un incident en file (terminal muet, puis reessai),
+        # la ligne se referme ICI et porte enfin la vente encaissee. On lit la
+        # vente en cours d'ecriture par son `client_uuid` (deja `flush`ee par
+        # `PosService.create_transaction` avant la boucle des paiements) plutot
+        # que de changer la signature de cette fonction, qui est l'interface
+        # opposable a `pos.py`. Aucune vente n'est creee ici : on ne fait que
+        # rattacher celle que l'appelant est en train d'ecrire.
+        transaction_id = (
+            await db.execute(
+                select(Transaction.id)
+                .where(
+                    Transaction.client_uuid == client_uuid,
+                    Transaction.transaction_type == TransactionType.sale,
+                )
+                .order_by(Transaction.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        await failed_payment_service.resolve_if_queued(db, client_uuid, transaction_id)
+
+        return VerifiedCardTender(
+            sumup_checkout_id=tender.checkout_id,
+            sumup_transaction_id=sumup_transaction_id,
+            sumup_transaction_code=sumup_transaction_code,
+            sumup_auth_code=sumup_auth_code,
+            sumup_card_brand=sumup_card_brand,
+            sumup_card_last4=sumup_card_last4,
+        )
+    except BaseException:
+        verification_failed = True
+        raise
+    finally:
+        if svc.exchanges:
+            from app.services.sumup_exchange_log import (
+                persist as persist_exchanges,
+                persist_detached as persist_exchanges_detached,
+            )
+
+            records = svc.drain_exchanges()
+            if verification_failed:
+                await persist_exchanges_detached(records)
+            else:
+                await persist_exchanges(db, records)

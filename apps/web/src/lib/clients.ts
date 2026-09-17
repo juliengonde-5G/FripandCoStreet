@@ -224,6 +224,45 @@ export async function fetchClientHistory(
 // Suppression RGPD différée (L5)
 // ---------------------------------------------------------------------------
 
+/** Réglage `rgpd` (`GET /api/admin/settings/rgpd`) : le délai, en jours,
+ * entre la demande de suppression et son effet. Réglable de 1 à 90 jours
+ * côté serveur — l'écran ne doit donc jamais écrire « 30 jours » en dur. */
+export interface RgpdSettings {
+  deletion_delay_days: number;
+}
+
+/** Délai retenu quand le réglage n'a pas pu être lu. */
+export const DELETION_DELAY_DEFAULT_DAYS = 30;
+export const DELETION_DELAY_MIN_DAYS = 1;
+export const DELETION_DELAY_MAX_DAYS = 90;
+
+/**
+ * Lit le délai de suppression. Un backend qui ne connaît pas encore la
+ * clé (404 en déploiement partiel) ou une panne de lecture ne doivent pas
+ * priver le manager du bouton : on retombe sur le défaut du contrat.
+ */
+export async function fetchRgpdSettings(): Promise<RgpdSettings> {
+  try {
+    const data = await api.get<RgpdSettings>("/api/admin/settings/rgpd");
+    const days = Math.round(Number(data?.deletion_delay_days));
+    if (!Number.isFinite(days)) return { deletion_delay_days: DELETION_DELAY_DEFAULT_DAYS };
+    return {
+      deletion_delay_days: Math.min(Math.max(days, DELETION_DELAY_MIN_DAYS), DELETION_DELAY_MAX_DAYS),
+    };
+  } catch {
+    return { deletion_delay_days: DELETION_DELAY_DEFAULT_DAYS };
+  }
+}
+
+/** Date d'effet d'une demande posée maintenant — annoncée avant de
+ * confirmer ; après la réponse, c'est `deletion_scheduled_for` qui fait
+ * foi. */
+export function deletionEffectiveDate(delayDays: number, from: Date = new Date()): Date {
+  const date = new Date(from.getTime());
+  date.setDate(date.getDate() + delayDays);
+  return date;
+}
+
 /** Réponse des deux routes de suppression programmée. */
 export interface ClientDeletionResponse {
   client: Client;

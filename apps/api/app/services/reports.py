@@ -2,7 +2,7 @@
 # quotidien, hebdomadaire et mensuel.
 #
 # LECTURE SEULE de la chaine fiscale, comme `reporting.py` (dont ce module
-# reutilise les briques : `_net_by_day`, `_payments_split`, les arrondis et
+# reutilise les briques : `_payments_split`, les arrondis et
 # la borne de progression). Rien n'est ecrit, rien n'est signe — le SEUL
 # geste journalise est le telechargement du CSV (JET `export.downloaded`),
 # et il l'est par la route, pas ici.
@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Integer, case, cast, func, select
+from sqlalchemy import Date, Integer, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -41,6 +41,7 @@ from app.models.pos import (
     ZReport,
 )
 from app.services.cashier_service import UNIDENTIFIED_LABEL
+from app.services.csv_safety import neutralize_csv_row
 from app.services.fiscal import PosServiceError
 from app.services.reporting import (
     ZERO,
@@ -50,7 +51,6 @@ from app.services.reporting import (
     _money,
     _month_key,
     _month_target,
-    _net_by_day,
     _payments_split,
     _progress_pct,
 )
@@ -177,14 +177,39 @@ def previous_period(kind: str, first: date_cls, last: date_cls) -> tuple[date_cl
 # ---------------------------------------------------------------------------
 
 
-def _refunded_sale_ids():
-    """Sous-requete des ventes annulees (referencees par une annulation)."""
+def _refunded_sale_ids(start: datetime, end: datetime):
+    """Ventes annulees **par une annulation tombant dans la periode**.
+
+    Le bornage est le coeur de la regle d'annulation des rapports, et il
+    n'est pas un detail de requete.
+
+    Une annulation est rattachee a SA date propre : les montants d'une
+    vente du lundi remboursee le mardi comptent en positif lundi et en
+    negatif mardi. Si les COMPTEURS, eux, cherchaient l'annulation sans
+    borne de temps, le rapport du lundi retirerait cette vente de
+    `sales_count`, du panier moyen, de `by_hour` et des articles tout en
+    gardant ses 100 € dans `gross` et `net` : lundi afficherait 100 € de
+    chiffre, zero vente et aucun article vendu. Un rapport deja imprime
+    changerait en plus retroactivement le jour ou la cliente revient.
+
+    D'ou la regle, la meme pour tous les compteurs de la periode : **une
+    vente n'est « annulee » que si son annulation appartient a la meme
+    periode que la vente.**
+
+    - Rapport du lundi : 1 vente, l'article present, net 100 €.
+    - Rapport du mardi : 0 vente, 100 € d'annulations, net -100 €.
+    - Rapport de la semaine (les deux y sont) : 0 vente nette, aucun
+      article, net 0 € — la vente et son annulation se neutralisent
+      exactement, comme les montants.
+    """
     refunded = aliased(Transaction)
     return (
         select(refunded.original_transaction_id)
         .where(
             refunded.transaction_type == TransactionType.refund,
             refunded.original_transaction_id.is_not(None),
+            refunded.created_at >= start,
+            refunded.created_at < end,
         )
         .scalar_subquery()
     )
@@ -200,7 +225,7 @@ async def _totals(db: AsyncSession, start: datetime, end: datetime) -> dict[str,
       un panier, et le panier moyen se calcule dessus.
     """
     is_sale = Transaction.transaction_type == TransactionType.sale
-    is_cancelled = Transaction.id.in_(_refunded_sale_ids())
+    is_cancelled = Transaction.id.in_(_refunded_sale_ids(start, end))
 
     row = (
         await db.execute(
@@ -254,7 +279,7 @@ async def _by_hour(db: AsyncSession, start: datetime, end: datetime) -> list[dic
     13h et 14h se voit).
     """
     is_sale = Transaction.transaction_type == TransactionType.sale
-    is_cancelled = Transaction.id.in_(_refunded_sale_ids())
+    is_cancelled = Transaction.id.in_(_refunded_sale_ids(start, end))
     hour_col = cast(
         func.extract("hour", func.timezone("Europe/Paris", Transaction.created_at)),
         Integer,
@@ -288,6 +313,50 @@ async def _by_hour(db: AsyncSession, start: datetime, end: datetime) -> list[dic
     ]
 
 
+async def _by_day(
+    db: AsyncSession, start: datetime, end: datetime, first: date_cls, last: date_cls
+) -> list[dict[str, Any]]:
+    """Net et nombre de ventes par jour civil Paris — tous les jours, trous compris.
+
+    Volontairement LOCAL plutot que `reporting._net_by_day` : ce dernier
+    sert le tableau de bord d'accueil, dont la fenetre n'est pas celle d'un
+    rapport. Ici, « annulee » se juge sur la PERIODE DU RAPPORT
+    (`_refunded_sale_ids`), pas sur toute l'histoire de la boutique — ce
+    qui garantit que la somme des `sales_count` de la serie est exactement
+    le `sales_count` des totaux. Deux chiffres d'un meme ecran qui ne
+    s'additionnent pas, c'est un rapport qu'on cesse de lire.
+    """
+    is_sale = Transaction.transaction_type == TransactionType.sale
+    is_cancelled = Transaction.id.in_(_refunded_sale_ids(start, end))
+    day_col = cast(func.timezone("Europe/Paris", Transaction.created_at), Date).label("day")
+
+    rows = (
+        await db.execute(
+            select(
+                day_col,
+                func.coalesce(
+                    func.sum(
+                        case((is_sale, Transaction.total_ttc), else_=-Transaction.total_ttc)
+                    ),
+                    0,
+                ),
+                func.count().filter(is_sale & ~is_cancelled),
+            )
+            .where(Transaction.created_at >= start, Transaction.created_at < end)
+            .group_by(day_col)
+        )
+    ).all()
+
+    found = {day: (_money(net), int(count or 0)) for day, net, count in rows}
+    series = []
+    current = first
+    while current <= last:
+        net, count = found.get(current, (ZERO, 0))
+        series.append({"date": current, "net": net, "sales_count": count})
+        current += timedelta(days=1)
+    return series
+
+
 async def _items(db: AsyncSession, start: datetime, end: datetime) -> tuple[int, list[dict]]:
     """Nombre d'articles vendus et palmares des libelles.
 
@@ -299,7 +368,7 @@ async def _items(db: AsyncSession, start: datetime, end: datetime) -> tuple[int,
     aux espaces pres, sans jamais inventer de rapprochement plus malin.
     """
     is_sale = Transaction.transaction_type == TransactionType.sale
-    is_cancelled = Transaction.id.in_(_refunded_sale_ids())
+    is_cancelled = Transaction.id.in_(_refunded_sale_ids(start, end))
     scope = (
         (Transaction.created_at >= start),
         (Transaction.created_at < end),
@@ -539,20 +608,7 @@ async def build_report(db: AsyncSession, kind: str, *, day: date_cls) -> dict[st
         report["by_hour"] = await _by_hour(db, start, end)
         report["weather"] = await _weather(db, first)
     else:
-        per_day = await _net_by_day(db, start, end)
-        series = []
-        current = first
-        while current <= last:
-            row = per_day.get(current)
-            series.append(
-                {
-                    "date": current,
-                    "net": row["net"] if row else ZERO,
-                    "sales_count": row["sales_count"] if row else 0,
-                }
-            )
-            current += timedelta(days=1)
-        report["by_day"] = series
+        report["by_day"] = await _by_day(db, start, end, first, last)
 
     return report
 
@@ -681,56 +737,70 @@ def report_to_csv(report: dict[str, Any]) -> str:
     buffer = io.StringIO()
     # `\r\n` : les tableurs Windows (le parc de la boutique) restent le cas
     # le plus courant, et les autres s'en accommodent.
-    writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
+    raw_writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
+
+    def writerow(row: list[Any]) -> None:
+        """Ecrit une ligne en neutralisant chaque cellule (revue Codex #17).
+
+        Les libelles d'articles et les noms de vendeuses sont saisis
+        librement en caisse : un libelle `=1+1` serait interprete comme une
+        formule a l'ouverture du fichier dans un tableur. On passe donc
+        TOUTES les cellules par le neutraliseur, y compris les en-tetes —
+        pour n'avoir jamais a se demander lesquelles sont sures. Les
+        montants et les compteurs ne sont pas des chaines : ils traversent
+        intacts, et restent additionnables dans le tableur.
+        """
+        raw_writer.writerow(neutralize_csv_row(row))
+
     period = report["period"]
     totals = report["totals"]
 
-    writer.writerow(["Rapport", period["label"]])
-    writer.writerow(["Période", period["from"].isoformat(), period["to"].isoformat()])
-    writer.writerow([])
+    writerow(["Rapport", period["label"]])
+    writerow(["Période", period["from"].isoformat(), period["to"].isoformat()])
+    writerow([])
 
-    writer.writerow(["Totaux"])
-    writer.writerow(["Libellé", "Valeur"])
-    writer.writerow(["Ventes", totals["sales_count"]])
-    writer.writerow(["Annulations", totals["refunds_count"]])
-    writer.writerow(["Chiffre brut", _fr_amount(totals["gross"])])
-    writer.writerow(["Annulations (montant)", _fr_amount(totals["refunds"])])
-    writer.writerow(["Chiffre net", _fr_amount(totals["net"])])
-    writer.writerow(["Panier moyen", _fr_amount(totals["average_basket"])])
-    writer.writerow(["Articles", totals["items_count"]])
-    writer.writerow(["Espèces", _fr_amount(report["payments"]["cash"])])
-    writer.writerow(["Carte", _fr_amount(report["payments"]["card"])])
+    writerow(["Totaux"])
+    writerow(["Libellé", "Valeur"])
+    writerow(["Ventes", totals["sales_count"]])
+    writerow(["Annulations", totals["refunds_count"]])
+    writerow(["Chiffre brut", _fr_amount(totals["gross"])])
+    writerow(["Annulations (montant)", _fr_amount(totals["refunds"])])
+    writerow(["Chiffre net", _fr_amount(totals["net"])])
+    writerow(["Panier moyen", _fr_amount(totals["average_basket"])])
+    writerow(["Articles", totals["items_count"]])
+    writerow(["Espèces", _fr_amount(report["payments"]["cash"])])
+    writerow(["Carte", _fr_amount(report["payments"]["card"])])
     if report["target"]:
-        writer.writerow(["Objectif", _fr_amount(report["target"]["amount"])])
-        writer.writerow(["Progression (%)", str(report["target"]["progress_pct"]).replace(".", ",")])
-    writer.writerow(
+        writerow(["Objectif", _fr_amount(report["target"]["amount"])])
+        writerow(["Progression (%)", str(report["target"]["progress_pct"]).replace(".", ",")])
+    writerow(
         [
             "Période précédente (net)",
             _fr_amount(report["previous"]["net"]),
         ]
     )
-    writer.writerow([])
+    writerow([])
 
     if "by_hour" in report:
-        writer.writerow(["Par heure"])
-        writer.writerow(["Heure", "Chiffre net", "Ventes"])
+        writerow(["Par heure"])
+        writerow(["Heure", "Chiffre net", "Ventes"])
         for row in report["by_hour"]:
-            writer.writerow([f"{row['hour']:02d}", _fr_amount(row["net"]), row["sales_count"]])
+            writerow([f"{row['hour']:02d}", _fr_amount(row["net"]), row["sales_count"]])
     else:
-        writer.writerow(["Par jour"])
-        writer.writerow(["Jour", "Chiffre net", "Ventes"])
+        writerow(["Par jour"])
+        writerow(["Jour", "Chiffre net", "Ventes"])
         for row in report["by_day"]:
-            writer.writerow(
+            writerow(
                 [row["date"].isoformat(), _fr_amount(row["net"]), row["sales_count"]]
             )
-    writer.writerow([])
+    writerow([])
 
-    writer.writerow(["Par vendeuse"])
-    writer.writerow(
+    writerow(["Par vendeuse"])
+    writerow(
         ["Vendeuse", "Ventes", "Total ventes", "Annulations", "Total annulations", "Net"]
     )
     for row in report["by_cashier"]:
-        writer.writerow(
+        writerow(
             [
                 row["display_name"],
                 row["sales_count"],
@@ -740,12 +810,12 @@ def report_to_csv(report: dict[str, Any]) -> str:
                 _fr_amount(row["net_total"]),
             ]
         )
-    writer.writerow([])
+    writerow([])
 
-    writer.writerow(["Articles"])
-    writer.writerow(["Article", "Quantité", "Chiffre net"])
+    writerow(["Articles"])
+    writerow(["Article", "Quantité", "Chiffre net"])
     for row in report["top_items"]:
-        writer.writerow([row["label"], row["quantity"], _fr_amount(row["net"])])
+        writerow([row["label"], row["quantity"], _fr_amount(row["net"])])
 
     return buffer.getvalue()
 

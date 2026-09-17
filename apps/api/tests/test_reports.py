@@ -15,7 +15,7 @@
 # qui peut casser — le bornage des periodes, le remplissage des trous et la
 # comparaison a la periode precedente.
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -43,8 +43,6 @@ PIN_MANON = "5074"
 
 def _today() -> date:
     """Journee civile de la boutique (Paris), pas celle du serveur."""
-    from datetime import datetime
-
     return datetime.now(_PARIS).date()
 
 
@@ -341,6 +339,79 @@ async def test_previous_delta_pct_compares_to_the_day_before(dataset):
 
 
 # ---------------------------------------------------------------------------
+# Annulation hors periode (revue Codex #17)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_cancellation_outside_the_period_does_not_erase_the_sale(
+    client, auth_headers, open_drawer
+):
+    """Une vente remboursee PLUS TARD reste une vente dans son rapport.
+
+    `created_at` est signee et gelee : on ne peut pas antidater une vente
+    pour simuler « vendue lundi, remboursee mardi ». On exerce donc la
+    regle la ou elle vit — les bornes de la periode — en interrogeant les
+    agregats avec une fenetre qui contient la vente mais pas son
+    annulation, puis avec une fenetre qui contient les deux.
+
+    Sans le bornage, la premiere fenetre afficherait 100 € de chiffre, zero
+    vente et aucun article : un rapport qui se contredit lui-meme.
+    """
+    sale = await _sell_cash(client, auth_headers, "100.00", label="Trench")
+    refund = await _cancel(client, auth_headers, sale)
+
+    sold_at = datetime.fromisoformat(sale["created_at"])
+    refunded_at = datetime.fromisoformat(refund["created_at"])
+    assert refunded_at >= sold_at
+
+    from app.services.reports import _items, _totals
+
+    async with async_session() as db:
+        # Fenetre 1 : la vente y est, son annulation non.
+        before = await _totals(db, sold_at, refunded_at)
+        items_before, top_before = await _items(db, sold_at, refunded_at)
+        # Fenetre 2 : les deux y sont.
+        after = await _totals(db, sold_at, refunded_at + timedelta(seconds=1))
+        items_after, top_after = await _items(
+            db, sold_at, refunded_at + timedelta(seconds=1)
+        )
+
+    assert before["gross"] == Decimal("100.00")
+    assert before["refunds"] == Decimal("0.00")
+    assert before["net"] == Decimal("100.00")
+    assert before["sales_count"] == 1
+    assert before["average_basket"] == Decimal("100.00")
+    assert items_before == 1
+    assert [row["label"] for row in top_before] == ["trench"]
+
+    # La meme vente, vue depuis une periode qui contient aussi son
+    # annulation : elle et son annulation se neutralisent exactement.
+    assert after["gross"] == Decimal("100.00")
+    assert after["refunds"] == Decimal("100.00")
+    assert after["net"] == Decimal("0.00")
+    assert after["sales_count"] == 0
+    assert after["average_basket"] == Decimal("0.00")
+    assert items_after == 0
+    assert top_after == []
+
+
+async def test_day_series_sums_to_the_period_counters(dataset):
+    """Garde-fou de cohérence : la serie par jour et les totaux comptent
+    les memes ventes. Deux chiffres d'un meme ecran qui ne s'additionnent
+    pas, c'est un rapport qu'on cesse de lire."""
+    for kind in (WEEKLY, MONTHLY):
+        report = await _report(kind, _today())
+        assert sum(row["sales_count"] for row in report["by_day"]) == (
+            report["totals"]["sales_count"]
+        )
+
+    daily = await _report(DAILY, _today())
+    assert sum(row["sales_count"] for row in daily["by_hour"]) == (
+        daily["totals"]["sales_count"]
+    )
+
+
+# ---------------------------------------------------------------------------
 # Objectifs
 # ---------------------------------------------------------------------------
 
@@ -554,6 +625,42 @@ async def test_weekly_csv_has_a_day_section(client, auth_headers, dataset):
     text = r.content.decode("utf-8-sig")
     assert "Par jour" in text
     assert "Par heure" not in text
+
+
+def test_neutralize_csv_cell_only_touches_dangerous_text():
+    from decimal import Decimal as D
+
+    from app.services.csv_safety import neutralize_csv_cell
+
+    for dangerous in ("=1+1", "+3", "-Robe", "@x", "\tcache", "\r=1+1"):
+        assert neutralize_csv_cell(dangerous) == f"'{dangerous}"
+    # Texte ordinaire et valeurs numeriques intacts : prefixer un montant
+    # casserait l'addition dans le tableur, ce qu'on vient y faire.
+    for harmless in ("Robe", "Léa", "", "12,50"):
+        assert neutralize_csv_cell(harmless) == harmless
+    assert neutralize_csv_cell(3) == 3
+    assert neutralize_csv_cell(D("1.50")) == D("1.50")
+    assert neutralize_csv_cell(None) is None
+
+
+async def test_csv_neutralises_a_formula_typed_as_an_item_label(
+    client, auth_headers, open_drawer
+):
+    """Un libelle saisi en caisse ne doit pas devenir une formule chez la
+    personne qui ouvre le fichier — la boutique, son comptable."""
+    await _sell_cash(client, auth_headers, "5.00", label="=1+1")
+
+    today = _today().isoformat()
+    r = await client.get(f"/api/reports/daily?date={today}&format=csv", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    text = r.content.decode("utf-8-sig")
+
+    assert "'=1+1" in text
+    # Aucune cellule ne commence par `=` : c'est la seule chose qu'un
+    # tableur regarde.
+    for line in text.split("\r\n"):
+        for cell in line.split(";"):
+            assert not cell.startswith(("=", "@")), cell
 
 
 async def test_csv_download_is_journalled_without_its_content(client, auth_headers, dataset):

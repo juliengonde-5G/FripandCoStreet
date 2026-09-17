@@ -18,6 +18,14 @@ vendeuse, les articles les plus vendus et les clôtures Z de la période.
 décimales à la virgule, lisible tel quel dans un tableur. Le téléchargement
 est tracé dans le journal des événements (la période, jamais le contenu).
 
+**Une annulation compte à sa propre date.** Une vente du lundi remboursée le
+mardi reste une vente dans le rapport du lundi (et son article y figure) ;
+le mardi enregistre l'annulation, donc un net négatif. Sur une période qui
+contient les deux — la semaine, le mois — la vente et son annulation se
+neutralisent : elle ne compte plus ni dans le nombre de ventes, ni dans le
+panier moyen, ni dans les articles. Un rapport déjà imprimé ne change donc
+jamais parce qu'une cliente revient trois jours plus tard.
+
 Un rapport est une **lecture**. Il ne modifie ni une vente, ni une clôture,
 ni la chaîne fiscale : le recalcul part à chaque fois des transactions.
 
@@ -74,6 +82,11 @@ répartition des journées **à venir** : une journée déjà ouverte dans le
 cahier garde l'objectif qu'elle avait au premier affichage. C'est voulu —
 un objectif relevé en fin de mois ne doit pas réécrire l'histoire des jours
 déjà passés.
+
+Cas de l'ouverture d'une journée **avant** d'avoir saisi le moindre objectif :
+elle reste sans objectif jusqu'à ce qu'un objectif existe, puis le prend au
+premier affichage suivant — tant qu'elle n'est pas révolue. Une journée
+terminée sans objectif n'en reçoit jamais après coup.
 
 Une journée révolue se relit, elle ne se modifie plus : ni texte, ni
 signature. Le journal des événements retient qu'un texte a été modifié et

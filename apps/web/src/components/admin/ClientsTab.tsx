@@ -25,13 +25,16 @@ import ErrorNotice from "@/components/ui/ErrorNotice";
 import { api } from "@/lib/api";
 import { describeError, type DisplayableError } from "@/lib/apiError";
 import {
+  DELETION_DELAY_DEFAULT_DAYS,
   cancelClientDeletion,
   CLIENT_FILTERS,
   clientFilterParams,
+  deletionEffectiveDate,
   downloadNewsletterCsv,
   duplicateReasonLabel,
   fetchClients,
   fetchDuplicateGroups,
+  fetchRgpdSettings,
   mergeClients,
   requestClientDeletion,
   type ClientListFilter,
@@ -316,6 +319,19 @@ export default function ClientsTab() {
   // Bandeau affiché quand on arrive sur une fiche absorbée : on ouvre la
   // fiche conservée à sa place, en le disant.
   const [mergedNotice, setMergedNotice] = useState<string | null>(null);
+  // Délai de suppression RGPD (réglable de 1 à 90 jours) : lu une fois à
+  // l'ouverture de l'onglet, jamais écrit en dur dans les libellés.
+  const [deletionDelayDays, setDeletionDelayDays] = useState(DELETION_DELAY_DEFAULT_DAYS);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchRgpdSettings().then((rgpd) => {
+      if (!cancelled) setDeletionDelayDays(rgpd.deletion_delay_days);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const search = (q: string, listFilter: ClientListFilter = filter) => {
     setLoadingList(true);
@@ -490,6 +506,7 @@ export default function ClientsTab() {
           <ClientDetailCard
             key={selectedId}
             clientId={selectedId}
+            deletionDelayDays={deletionDelayDays}
             onChanged={() => {
               search(query);
               setDuplicatesKey((k) => k + 1);
@@ -509,10 +526,12 @@ export default function ClientsTab() {
 
 function ClientDetailCard({
   clientId,
+  deletionDelayDays,
   onChanged,
   onRedirect,
 }: {
   clientId: string;
+  deletionDelayDays: number;
   onChanged: () => void;
   onRedirect: (winnerId: string) => void;
 }) {
@@ -692,6 +711,7 @@ function ClientDetailCard({
 
           <RgpdCard
             client={client}
+            deletionDelayDays={deletionDelayDays}
             onChanged={() => {
               load();
               onChanged();
@@ -711,14 +731,28 @@ function ClientDetailCard({
  * d'effet, et on peut revenir en arrière — puis, en action secondaire, la
  * suppression **immédiate**, qui demande un motif et la saisie du mot
  * SUPPRIMER parce qu'elle ne se rattrape pas.
+ *
+ * Le délai est un réglage (1 à 90 jours) : il est annoncé dans le libellé
+ * du bouton et la date d'effet est calculée avant de confirmer. Une fois
+ * la demande enregistrée, c'est la date renvoyée par le serveur qui
+ * s'affiche, jamais celle qu'on avait calculée.
  */
-function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void }) {
+function RgpdCard({
+  client,
+  deletionDelayDays,
+  onChanged,
+}: {
+  client: Client;
+  deletionDelayDays: number;
+  onChanged: () => void;
+}) {
   const [exportJson, setExportJson] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<DisplayableError>(null);
 
   const [scheduleBusy, setScheduleBusy] = useState(false);
   const [scheduleError, setScheduleError] = useState<DisplayableError>(null);
+  const [scheduleConfirm, setScheduleConfirm] = useState(false);
 
   const [immediateOpen, setImmediateOpen] = useState(false);
   const [reason, setReason] = useState("");
@@ -728,6 +762,13 @@ function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void
 
   const clientId = client.id;
   const scheduledFor = client.deletion_scheduled_for ?? null;
+  const delayLabel = deletionDelayDays === 1 ? "1 jour" : `${deletionDelayDays} jours`;
+  // Date annoncée AVANT la demande ; une fois enregistrée, c'est la date
+  // renvoyée par le serveur (badge + rappel ci-dessous) qui s'affiche.
+  const effectiveDate = useMemo(
+    () => deletionEffectiveDate(deletionDelayDays),
+    [deletionDelayDays],
+  );
 
   const handleExport = async (): Promise<void> => {
     setExporting(true);
@@ -747,6 +788,7 @@ function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void
     setScheduleError(null);
     try {
       await requestClientDeletion(clientId);
+      setScheduleConfirm(false);
       onChanged();
     } catch (err) {
       setScheduleError(describeError(err, "Impossible de programmer la suppression."));
@@ -827,12 +869,39 @@ function RgpdCard({ client, onChanged }: { client: Client; onChanged: () => void
           ) : (
             <>
               <p className="text-sm text-fc-ink-soft">
-                La personne demande la suppression de ses données ? On la programme à 30 jours : elle reste
+                La personne demande la suppression de ses données ? On la programme à {delayLabel} : elle reste
                 cliente d&apos;ici là, et vous pouvez revenir en arrière si elle change d&apos;avis.
               </p>
-              <Button variant="primary" size="sm" onClick={() => void handleSchedule()} disabled={scheduleBusy}>
-                {scheduleBusy ? "Enregistrement…" : "Programmer la suppression (30 jours)"}
-              </Button>
+              {!scheduleConfirm ? (
+                <Button variant="primary" size="sm" onClick={() => setScheduleConfirm(true)}>
+                  Programmer la suppression ({delayLabel})
+                </Button>
+              ) : (
+                <div className="space-y-3 rounded-fc-lg border border-fc-line bg-fc-bg-alt p-4">
+                  <p className="text-sm text-fc-ink">
+                    Les coordonnées de cette fiche seront effacées le <strong>{formatDate(effectiveDate)}</strong>.
+                    Vous pourrez annuler jusque-là.
+                  </p>
+                  <div className="flex flex-wrap gap-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setScheduleConfirm(false)}
+                      disabled={scheduleBusy}
+                    >
+                      Annuler
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => void handleSchedule()}
+                      disabled={scheduleBusy}
+                    >
+                      {scheduleBusy ? "Enregistrement…" : "Confirmer la programmation"}
+                    </Button>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>

@@ -27,7 +27,7 @@ import { api, ApiError } from "@/lib/api";
 import { describeError, errorRef, errorReference, errorText, type DisplayableError } from "@/lib/apiError";
 import { formatCurrency } from "@/lib/format";
 import { retryFailedPayment, type FailedPayment } from "@/lib/payments";
-import type { CbCheckoutStatus, CbInitiateResponse, PaymentInput } from "@/lib/types";
+import type { CbCheckoutState, CbCheckoutStatus, CbInitiateResponse, PaymentInput } from "@/lib/types";
 
 import NumPadModal from "./NumPadModal";
 import PaymentMethodSelector, { type PosPaymentMethod } from "./PaymentMethodSelector";
@@ -62,6 +62,8 @@ type Step =
       kind: "card-pending";
       amount: number;
       status: PaymentStatus;
+      /** Libellé imposé, quand le bandeau par défaut ne dit pas l'essentiel. */
+      label?: string;
       detail?: string;
       /** Référence de l'échec (PR12 N5) : posée pour une panne serveur ou
        * réseau seulement, jamais pour un refus du terminal. */
@@ -79,6 +81,18 @@ interface CardRecovery {
   maxRetries: FailedPayment["max_retries"] | null;
   /** Plus aucun réessai possible (409 `retries_exhausted`). */
   exhausted: boolean;
+}
+
+/** Réponse d'un réessai, côté file (K3) comme côté route historique :
+ * un nouvel encaissement `pending`, ou — si le serveur a réconcilié — le
+ * `checkout_id` d'origine déjà `paid`. */
+interface CardRetryResult {
+  checkout_id: string;
+  status?: CbCheckoutState;
+  retry_count?: number;
+  reconciled?: boolean;
+  card_brand?: string;
+  last4?: string;
 }
 
 const POLL_MS = 1500;
@@ -141,6 +155,30 @@ export default function MultiStepPaymentWizard({
 
   // -- CB ------------------------------------------------------------------
 
+  /** Paiement accepté : bandeau vert un court instant (le vendeur voit le
+   * passage au vert), puis le tender est ajouté au panier avec le
+   * `checkout_id` qui a effectivement été payé. Aucun polling au-delà. */
+  const settleCardPayment = (
+    amount: number,
+    checkoutId: string,
+    banner?: { label?: string; detail?: string },
+  ): Promise<void> => {
+    stoppedRef.current = true;
+    // Le serveur a soldé la ligne de file (K3) : plus rien à relancer.
+    queuedCardRef.current = null;
+    checkoutIdRef.current = checkoutId;
+    setStep({ kind: "card-pending", amount, status: "paid", ...banner });
+    const tender: Tendered = { method: "card", amount, checkout_id: checkoutId };
+    return sleep(700).then(() => {
+      setTenders((prev) => {
+        const next = [...prev, tender];
+        const cover = coverage(next, totalTtc);
+        setStep(cover >= totalTtc - 0.001 ? { kind: "confirm" } : { kind: "select" });
+        return next;
+      });
+    });
+  };
+
   const pollLoop = async (amount: number): Promise<void> => {
     stoppedRef.current = false;
     while (!stoppedRef.current) {
@@ -150,22 +188,7 @@ export default function MultiStepPaymentWizard({
         const data = await api.get<CbCheckoutStatus>(`/api/pos/payments/cb/${checkoutIdRef.current}/status`);
         if (stoppedRef.current) return;
         if (data.status === "paid") {
-          stoppedRef.current = true;
-          // Paiement accepté : le serveur solde la ligne de file (K3), la
-          // caisse n'a plus rien à relancer pour ce panier.
-          queuedCardRef.current = null;
-          // Montre le bandeau "Paiement validé" un court instant avant
-          // d'enchaîner sur la confirmation — le vendeur voit le passage à
-          // vert avant que l'écran change.
-          setStep({ kind: "card-pending", amount, status: "paid" });
-          const tender: Tendered = { method: "card", amount, checkout_id: checkoutIdRef.current };
-          await sleep(700);
-          setTenders((prev) => {
-            const next = [...prev, tender];
-            const cover = coverage(next, totalTtc);
-            setStep(cover >= totalTtc - 0.001 ? { kind: "confirm" } : { kind: "select" });
-            return next;
-          });
+          await settleCardPayment(amount, checkoutIdRef.current, { detail: cardSummary(data) });
           return;
         }
         if (data.status === "failed") {
@@ -225,15 +248,25 @@ export default function MultiStepPaymentWizard({
 
   /** Relance commune : on repasse en « en attente », on appelle le
    * serveur, puis on reprend le polling existant sur le nouvel
-   * encaissement. */
+   * encaissement — sauf si le serveur répond que l'encaissement d'origine
+   * était déjà payé (réconciliation) : on enchaîne alors directement sur
+   * la vente, avec le `checkout_id` d'origine, sans rien repousser sur le
+   * terminal et sans débiter la cliente une seconde fois. */
   const runCardRetry = async (
     amount: number,
     previous: CardRecovery | null,
-    call: () => Promise<{ checkout_id: string; retry_count?: number }>,
+    call: () => Promise<CardRetryResult>,
   ): Promise<void> => {
     setStep({ kind: "card-pending", amount, status: "pending" });
     try {
       const data = await call();
+      if (data.status === "paid") {
+        await settleCardPayment(amount, data.checkout_id, {
+          label: data.reconciled ? "Ce paiement était déjà passé sur le terminal" : undefined,
+          detail: cardSummary(data),
+        });
+        return;
+      }
       checkoutIdRef.current = data.checkout_id;
       if (previous?.failedPaymentId) {
         queuedCardRef.current = {
@@ -414,7 +447,7 @@ export default function MultiStepPaymentWizard({
           <div className="space-y-3">
             <PaymentStatusBanner
               status={step.status}
-              label={step.recovery ? (step.recovery.exhausted ? EXHAUSTED_LABEL : RECOVERABLE_LABEL) : undefined}
+              label={step.label ?? (step.recovery ? (step.recovery.exhausted ? EXHAUSTED_LABEL : RECOVERABLE_LABEL) : undefined)}
               detail={step.recovery ? recoveryDetail(step.recovery, step.detail) : step.detail}
               reference={step.reference}
               actionLabel={step.status === "pending" ? "Annuler" : undefined}
@@ -520,6 +553,12 @@ export default function MultiStepPaymentWizard({
       </div>
     </Modal>
   );
+}
+
+/** « VISA •••• 4242 » — ce que le terminal a renvoyé, quand il le renvoie. */
+function cardSummary(data: { card_brand?: string; last4?: string }): string | undefined {
+  const parts = [data.card_brand, data.last4 ? `•••• ${data.last4}` : null].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
 /** Un réessai n'est proposé que si la file en accepte encore un. */

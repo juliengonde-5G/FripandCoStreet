@@ -23,6 +23,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cahier_day import CahierDay
@@ -149,12 +150,26 @@ async def effective_daily_target_for(db: AsyncSession, day: date_cls) -> Decimal
     (ce serait figer un objectif par le simple fait de consulter un
     rapport). Il suit alors l'objectif courant, et se figera a sa premiere
     lecture dans le cahier.
+
+    Cas particulier d'une ligne EXISTANTE dont l'objectif est reste a NULL —
+    la journee a ete ouverte dans le cahier avant qu'aucun objectif ne soit
+    saisi :
+      - journee revolue : `None`. Elle s'est terminee sans objectif, et on
+        ne lui en invente pas un apres coup ; le cahier n'en montre aucun,
+        le rapport non plus ;
+      - journee en cours ou a venir : l'objectif COURANT, exactement celui
+        que le cahier figera (FIGEAGE TARDIF) a sa prochaine lecture. Poser
+        l'objectif du mois a 10 h doit se voir le jour meme sur les deux
+        ecrans, pas seulement le lendemain.
     """
     row = (
         await db.execute(select(CahierDay).where(CahierDay.day == day))
     ).scalar_one_or_none()
-    if row is not None and row.frozen_daily_target is not None:
-        return _money(row.frozen_daily_target)
+    if row is not None:
+        if row.frozen_daily_target is not None:
+            return _money(row.frozen_daily_target)
+        if day < paris_today():
+            return None
     return await daily_target_for(db, day)
 
 
@@ -351,6 +366,39 @@ async def _signature_username(db: AsyncSession, user_id) -> str | None:
     ).scalar_one_or_none()
 
 
+async def _freeze_target_if_needed(
+    db: AsyncSession,
+    row: CahierDay,
+    day: date_cls,
+    today: date_cls,
+    targets: dict[str, Any],
+    opens: list[bool],
+) -> Decimal | None:
+    """Objectif opposable de la journee, fige au plus tard a cette lecture.
+
+    Une journee ouverte dans le cahier AVANT qu'un objectif n'existe garde
+    une ligne a NULL. Sans figeage tardif, elle n'en aurait jamais : le
+    manager saisit son objectif du mois a 10 h, et la journee en cours reste
+    orpheline pour toujours alors que le mois, lui, compte dessus. On la
+    fige donc des que l'objectif devient calculable — tant que la journee
+    n'est pas revolue.
+
+    Une journee PASSEE n'est jamais rattrapee : on ne demande pas apres coup
+    un chiffre a une journee deja faite.
+    """
+    if row.frozen_daily_target is not None:
+        return _money(row.frozen_daily_target)
+    if day < today:
+        return None
+
+    target = compute_daily_target(day, targets, opens)
+    if target is None:
+        return None
+    row.frozen_daily_target = target
+    await db.flush()
+    return target
+
+
 async def read_day(
     db: AsyncSession, day: date_cls, *, now: datetime | None = None
 ) -> dict[str, Any]:
@@ -385,8 +433,7 @@ async def read_day(
     month_realized = _money(sum((entry["net"] for entry in per_day.values()), ZERO))
     monthly_target = _month_target(targets, _month_key(day))
 
-    frozen = row.frozen_daily_target
-    daily_target = Decimal(str(frozen)) if frozen is not None else None
+    daily_target = await _freeze_target_if_needed(db, row, day, today, targets, opens)
 
     by_hour = await _net_by_hour(db, *_paris_bounds(day, day + timedelta(days=1)))
 
@@ -582,17 +629,29 @@ async def sign(
 
     Une signature ne se reprend pas (`already_signed`) : on ne signe pas deux
     fois la meme journee, et on ne reecrit pas la signature de quelqu'un
-    d'autre.
+    d'autre. Ce refus est pose EN BASE et non en memoire : l'ecriture est un
+    `UPDATE ... WHERE <colonne> IS NULL`, et c'est le nombre de lignes
+    touchees qui tranche. Deux tablettes qui signent la meme seconde
+    passeraient sinon toutes les deux le controle applicatif, et la seconde
+    effacerait la premiere — une signature perdue sans que personne ne le
+    sache.
     """
     reference_now = datetime.now(_PARIS) if now is None else now
     _refuse_past_day(day, paris_today(now))
     row = await get_or_create_row(db, day, now=now)
 
+    table = CahierDay.__table__
     if role == "manager":
         if row.manager_signed_at is not None:
             raise _already_signed()
-        row.manager_signed_at = reference_now
-        row.manager_signed_by_user_id = user.id
+        statement = (
+            sa_update(table)
+            .where(table.c.day == day, table.c.manager_signed_at.is_(None))
+            .values(
+                manager_signed_at=reference_now,
+                manager_signed_by_user_id=user.id,
+            )
+        )
     else:
         if row.team_signed_at is not None:
             raise _already_signed()
@@ -605,11 +664,25 @@ async def sign(
                 code="name_required",
                 status_code=422,
             )
-        row.team_signed_at = reference_now
-        row.team_signed_by_name = signer[:60]
-        row.team_signed_by_cashier_id = cashier.id if cashier is not None else None
+        statement = (
+            sa_update(table)
+            .where(table.c.day == day, table.c.team_signed_at.is_(None))
+            .values(
+                team_signed_at=reference_now,
+                team_signed_by_name=signer[:60],
+                team_signed_by_cashier_id=cashier.id if cashier is not None else None,
+            )
+        )
 
-    await db.flush()
+    result = await db.execute(statement)
+    if result.rowcount == 0:
+        # Quelqu'un a signe entre notre lecture et notre ecriture : la ligne
+        # relue porte SA signature, pas la notre.
+        await db.refresh(row)
+        raise _already_signed()
+    # La ligne a ete modifiee par un UPDATE direct : l'objet charge en
+    # session ne le sait pas encore, et `read_day` le relirait tel quel.
+    await db.refresh(row)
     # Le JET retient QUI a signe QUOI et QUAND par la seule identite
     # technique : ni le nom saisi, ni le message du jour n'y figurent.
     await JournalService(db).record(

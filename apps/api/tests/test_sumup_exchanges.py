@@ -21,8 +21,12 @@ from app.core.database import async_session
 from app.models.jet import JournalEvent
 from app.models.payment_attempt import PaymentAttempt, PaymentAttemptStatus
 from app.models.sumup_exchange import SumUpExchange
-from app.services.sumup_exchange_log import persist, purge
-from app.services.sumup_service import MAX_RESPONSE_PAYLOAD_BYTES, SumUpService
+from app.services.sumup_exchange_log import persist, persist_detached, purge
+from app.services.sumup_service import (
+    MAX_RESPONSE_PAYLOAD_BYTES,
+    ExchangeRecord,
+    SumUpService,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -496,3 +500,259 @@ async def test_payment_failures_on_a_known_dataset(client, auth_headers):
         "exhausted": 0,
         "abandoned": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# K1 — les echanges d'une operation RATEE survivent au rollback
+# (revue Codex PR9 #15, P2 n° 1 et n° 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_persist_detached_survives_a_rollback_of_the_caller():
+    """Une session independante : c'est tout l'interet de `persist_detached`."""
+    svc = _service(_ok_handler)
+    await svc.get_transaction(transaction_id="txn-1")
+
+    async with async_session() as db:
+        # L'appelant ecrit quelque chose puis renonce — comme le fait
+        # `get_db` quand une route leve.
+        db.add(
+            PaymentAttempt(
+                client_uuid=uuid.uuid4(),
+                amount=Decimal("10.00"),
+                status=PaymentAttemptStatus.failed,
+                checkout_id="checkout-rollback",
+            )
+        )
+        written = await persist_detached(svc.exchanges)
+        await db.rollback()
+
+    assert written == 1
+    async with async_session() as db:
+        # L'essai de paiement a bien disparu avec le rollback…
+        assert (
+            await db.execute(select(func.count(PaymentAttempt.id)))
+        ).scalar_one() == 0
+        # …mais pas la trace de l'échange, écrite hors de cette transaction.
+        assert (await db.execute(select(func.count(SumUpExchange.id)))).scalar_one() == 1
+
+
+async def test_failed_sumup_refund_still_journals_its_exchange(
+    client, auth_headers, open_drawer, monkeypatch
+):
+    """Le remboursement refusé est justement celui qu'on ira relire.
+
+    L'annulation lève `sumup_refund_failed` (502) et `get_db` annule la
+    transaction : sans session indépendante, l'échange disparaîtrait au
+    moment précis où il devient utile.
+    """
+    from types import SimpleNamespace
+
+    from app.services import refund as refund_mod
+
+    async def _fake_verify(db, tender, client_uuid):
+        return SimpleNamespace(
+            sumup_checkout_id=tender.checkout_id,
+            sumup_transaction_id="TXN-JOURNAL",
+            sumup_transaction_code="CODE-JOURNAL",
+            sumup_auth_code="000000",
+            sumup_card_brand="VISA",
+            sumup_card_last4="0000",
+        )
+
+    monkeypatch.setattr("app.services.pos.verify_card_tender", _fake_verify)
+
+    sale = await client.post(
+        "/api/pos/transactions",
+        json={
+            "client_uuid": str(uuid.uuid4()),
+            "items": [{"label": "Manteau", "unit_price": "60.00", "quantity": 1}],
+            "payments": [
+                {"method": "card", "amount": "60.00", "checkout_id": "chk_journal_fail"}
+            ],
+        },
+        headers=auth_headers,
+    )
+    assert sale.status_code == 201, sale.text
+
+    async def _fake_refund_fail(sumup_transaction_id, amount):
+        # Le vrai `refund_transaction` déposerait son échange dans le sas ;
+        # on reproduit ce geste pour exercer le chemin de persistance.
+        sink = refund_mod._refund_exchanges.get()
+        if sink is not None:
+            sink.append(
+                ExchangeRecord(
+                    operation="refund",
+                    method="POST",
+                    url_path=f"/v1.0/merchants/MTEST/payments/{sumup_transaction_id}/refunds",
+                    response_status=400,
+                    is_error=True,
+                    error_type="http_4xx",
+                    error_message="remboursement refusé",
+                )
+            )
+        return {"ok": False, "status": "http_400", "message": "remboursement refusé"}
+
+    monkeypatch.setattr("app.services.refund.refund_card_payment", _fake_refund_fail)
+
+    cancelled = await client.post(
+        f"/api/pos/transactions/{sale.json()['id']}/cancel",
+        json={"reason": "sumup indisponible"},
+        headers=auth_headers,
+    )
+    assert cancelled.status_code == 502
+    assert cancelled.json()["code"] == "sumup_refund_failed"
+
+    async with async_session() as db:
+        rows = (
+            await db.execute(select(SumUpExchange).where(SumUpExchange.operation == "refund"))
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].is_error is True
+    assert rows[0].error_type == "http_4xx"
+
+
+async def test_card_verification_is_journaled_on_refusal_and_on_success(monkeypatch):
+    """`verify_card_tender` journalise ses relectures dans les deux sorties."""
+    from app.services.sumup_verify import (
+        CardNotConfirmed,
+        CardTenderInput,
+        verify_card_tender,
+    )
+
+    def _transport(status: str, amount: float):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/transactions"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {
+                                "id": "txn-verif",
+                                "status": status,
+                                "amount": amount,
+                                "transaction_code": "CODE-V",
+                                "auth_code": "123456",
+                                "card": {"type": "VISA", "last_4_digits": "4242"},
+                            }
+                        ]
+                    },
+                )
+            return httpx.Response(404, json={})
+
+        return handler
+
+    def _configure(handler):
+        original_init = SumUpService.__init__
+
+        def patched_init(self):
+            original_init(self)
+            self.api_key = LEAKED_API_KEY
+            self.merchant_code = "MTEST"
+            self.reader_id = "reader-1"
+            self._transport = httpx.MockTransport(handler)
+
+        monkeypatch.setattr(SumUpService, "__init__", patched_init)
+
+    async def _seed(checkout_id: str) -> uuid.UUID:
+        client_uuid = uuid.uuid4()
+        async with async_session() as db:
+            db.add(
+                PaymentAttempt(
+                    client_uuid=client_uuid,
+                    amount=Decimal("10.00"),
+                    status=PaymentAttemptStatus.pending,
+                    checkout_id=checkout_id,
+                    client_transaction_id=checkout_id,
+                )
+            )
+            await db.commit()
+        return client_uuid
+
+    # 1. Refus : la vente est rejetée, la session de l'appelant est annulée…
+    _configure(_transport("FAILED", 10.0))
+    refused_uuid = await _seed("chk-verif-ko")
+    async with async_session() as db:
+        with pytest.raises(CardNotConfirmed):
+            await verify_card_tender(
+                db, CardTenderInput(checkout_id="chk-verif-ko", amount=Decimal("10.00")), refused_uuid
+            )
+        await db.rollback()
+
+    async with async_session() as db:
+        refused_rows = (
+            await db.execute(
+                select(SumUpExchange).where(
+                    SumUpExchange.operation == "reader_checkout_status"
+                )
+            )
+        ).scalars().all()
+    # …mais l'échange qui explique le refus, lui, est bien là.
+    assert len(refused_rows) == 1
+    assert refused_rows[0].checkout_id == "chk-verif-ko"
+
+    # 2. Succès : même journalisation, cette fois dans la session commitée.
+    _configure(_transport("SUCCESSFUL", 10.0))
+    paid_uuid = await _seed("chk-verif-ok")
+    async with async_session() as db:
+        verified = await verify_card_tender(
+            db, CardTenderInput(checkout_id="chk-verif-ok", amount=Decimal("10.00")), paid_uuid
+        )
+        await db.commit()
+    assert verified.sumup_transaction_id == "txn-verif"
+
+    async with async_session() as db:
+        paid_rows = (
+            await db.execute(
+                select(SumUpExchange).where(SumUpExchange.checkout_id == "chk-verif-ok")
+            )
+        ).scalars().all()
+    assert paid_rows, "la relecture d'un paiement accepté doit aussi être journalisée"
+
+
+# ---------------------------------------------------------------------------
+# K1 — la retention s'applique meme sans sauvegarde nocturne
+# (revue Codex PR9 #15, P2 n° 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_nightly_purge_runs_even_when_backup_is_disabled():
+    """Désactiver la sauvegarde ne doit pas geler la rétention.
+
+    Sinon `sumup_exchanges` grossit indéfiniment sans que personne ne s'en
+    aperçoive — le réglage porte sur la sauvegarde, pas sur le ménage.
+    """
+    from app.jobs import run_nightly_database_backup
+    from app.services.settings_service import SettingsService
+
+    async with async_session() as db:
+        await SettingsService(db).set(
+            "backup",
+            {"retention_days": 60, "nightly_enabled": False, "alert_email": ""},
+            user_id=None,
+        )
+        db.add(
+            SumUpExchange(
+                operation="ping_reader",
+                method="GET",
+                url_path="/v0.1/merchants/MTEST/readers/reader-1",
+                created_at=datetime.now(timezone.utc) - timedelta(days=400),
+            )
+        )
+        db.add(
+            SumUpExchange(
+                operation="ping_reader",
+                method="GET",
+                url_path="/v0.1/merchants/MTEST/readers/reader-1",
+            )
+        )
+        await db.commit()
+
+    await run_nightly_database_backup()
+
+    async with async_session() as db:
+        remaining = (
+            await db.execute(select(SumUpExchange.operation, SumUpExchange.created_at))
+        ).all()
+    # Seule la ligne de 400 jours est partie (rétention par défaut : 90 j).
+    assert len(remaining) == 1
