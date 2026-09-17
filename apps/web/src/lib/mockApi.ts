@@ -601,6 +601,9 @@ let settings: {
   hardware: HardwareSettings;
   accounting: AccountingSettings;
   targets: TargetsSettings;
+  // PR10 (L5) — délai, en jours, entre la demande de suppression RGPD et
+  // son effet. Réglable de 1 à 90 jours côté serveur.
+  rgpd: { deletion_delay_days: number };
 } = {
   // PR8 (J2) — identification facultative par défaut, comme le contrat :
   // la caisse d'une boutique qui tourne seule ne doit pas se bloquer du
@@ -655,6 +658,7 @@ let settings: {
   // départ : le tableau de bord doit pouvoir être vu dans son état « aucun
   // objectif défini » sans manipulation préalable.
   targets: { daily: "0.00", monthly: {} },
+  rgpd: { deletion_delay_days: 30 },
 };
 
 function reset(): void {
@@ -1796,7 +1800,9 @@ function seedPr10AdminDemo(): void {
   // « Annuler la suppression programmée » sont visibles d'emblée.
   const pending = clients.find((c) => c.email === "karim.benali@exemple.fr") ?? emailTwin;
   pending.deletion_requested_at = olderIso(4);
-  pending.deletion_scheduled_for = new Date(Date.now() + 26 * 24 * 60 * 60 * 1000).toISOString();
+  pending.deletion_scheduled_for = new Date(
+    Date.now() + Math.max(1, settings.rgpd.deletion_delay_days - 4) * 24 * 60 * 60 * 1000,
+  ).toISOString();
 }
 
 /** Groupes de fiches qui se ressemblent (L2) : e-mail, puis téléphone,
@@ -2531,8 +2537,8 @@ export async function mockFetchAPI<T = unknown>(
   }
 
   // --- Administration ---------------------------------------------------
-  if ((m = path.match(/^\/api\/admin\/settings\/(pos|shop|fiscal|receipt|hardware|accounting|targets)$/))) {
-    const key = m[1] as "pos" | "shop" | "fiscal" | "receipt" | "hardware" | "accounting" | "targets";
+  if ((m = path.match(/^\/api\/admin\/settings\/(pos|shop|fiscal|receipt|hardware|accounting|targets|rgpd)$/))) {
+    const key = m[1] as "pos" | "shop" | "fiscal" | "receipt" | "hardware" | "accounting" | "targets" | "rgpd";
     if (method === "GET") return settings[key] as unknown as T;
     if (method === "PUT") {
       const body = parseBody<Record<string, unknown>>(options);
@@ -2544,6 +2550,13 @@ export async function mockFetchAPI<T = unknown>(
       }
       if (key === "fiscal" && typeof body.tva_rate === "string" && !(TVA_RATES as readonly string[]).includes(body.tva_rate)) {
         fail(422, "Taux de TVA non autorisé.", "invalid_tva_rate");
+      }
+      if (key === "rgpd") {
+        const days = Math.round(Number(body.deletion_delay_days));
+        if (!Number.isFinite(days) || days < 1 || days > 90) {
+          fail(422, "Le délai de suppression doit être compris entre 1 et 90 jours.", "invalid_setting");
+        }
+        body.deletion_delay_days = days;
       }
       if (key === "accounting") {
         // Validation F1 réconciliée avec `AccountingSettingsIn`
@@ -3388,7 +3401,7 @@ export async function mockFetchAPI<T = unknown>(
     if (!client) fail(404, "Fiche introuvable.", "not_found");
     if (!isActiveClientMock(client!)) fail(409, "Cette fiche n'est plus utilisable.", "client_inactive");
     if (client!.deletion_scheduled_for) fail(409, "Une suppression est déjà programmée.", "already_requested");
-    const delayDays = 30;
+    const delayDays = settings.rgpd.deletion_delay_days;
     client!.deletion_requested_at = nowIso();
     client!.deletion_scheduled_for = new Date(Date.now() + delayDays * 24 * 60 * 60 * 1000).toISOString();
     logJet("client.deletion_requested", {
