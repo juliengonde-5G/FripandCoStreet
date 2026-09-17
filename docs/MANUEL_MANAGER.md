@@ -18,6 +18,14 @@ vendeuse, les articles les plus vendus et les clôtures Z de la période.
 décimales à la virgule, lisible tel quel dans un tableur. Le téléchargement
 est tracé dans le journal des événements (la période, jamais le contenu).
 
+**Une annulation compte à sa propre date.** Une vente du lundi remboursée le
+mardi reste une vente dans le rapport du lundi (et son article y figure) ;
+le mardi enregistre l'annulation, donc un net négatif. Sur une période qui
+contient les deux — la semaine, le mois — la vente et son annulation se
+neutralisent : elle ne compte plus ni dans le nombre de ventes, ni dans le
+panier moyen, ni dans les articles. Un rapport déjà imprimé ne change donc
+jamais parce qu'une cliente revient trois jours plus tard.
+
 Un rapport est une **lecture**. Il ne modifie ni une vente, ni une clôture,
 ni la chaîne fiscale : le recalcul part à chaque fois des transactions.
 
