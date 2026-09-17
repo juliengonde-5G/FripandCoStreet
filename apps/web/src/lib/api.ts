@@ -7,16 +7,54 @@
  * l'API locale (http://localhost:8000 par défaut).
  */
 
-import { ApiError, extractErrorCode, extractErrorDetail } from "./apiError";
+import { ApiError, NetworkError, extractErrorCode, extractErrorDetail, extractRequestId } from "./apiError";
 import { mockFetchAPI, mockFetchBytes, mockFetchBytesWithHeaders, isMockEnabled } from "./mockApi";
 
-export { ApiError };
+export { ApiError, NetworkError };
+export { describeError, errorReference } from "./apiError";
+export type { ErrorDetails } from "./apiError";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 // Timeout par requête (ms). Assez long pour ne pas couper une requête
 // lente, assez court pour ne pas laisser l'UI tourner indéfiniment.
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** Longueur de l'identifiant de requête (PR12 N5). Seize caractères : assez
+ * pour ne jamais collisionner sur une journée de caisse, assez court pour
+ * être recopié à la main ou dicté au téléphone. */
+const REQUEST_ID_LENGTH = 16;
+
+/**
+ * Identifiant de requête envoyé en `X-Request-ID` sur chaque appel (N5).
+ * Le serveur le reprend tel quel (sinon il en génère un), le renvoie sur
+ * toutes ses réponses et l'écrit dans ses logs : une erreur vue au
+ * comptoir se retrouve donc côté serveur sans chercher.
+ *
+ * `crypto.randomUUID` n'existe qu'en contexte sécurisé (HTTPS ou
+ * localhost) ; sur une tablette servie en HTTP clair, ou dans un
+ * navigateur ancien, on retombe sur un générateur simple. L'identifiant
+ * n'a aucune valeur de sécurité — seulement d'unicité raisonnable.
+ */
+export function newRequestId(): string {
+  const c = typeof globalThis !== "undefined" ? globalThis.crypto : undefined;
+  if (c && typeof c.randomUUID === "function") {
+    return c.randomUUID().replace(/-/g, "").slice(0, REQUEST_ID_LENGTH);
+  }
+  let out = "";
+  while (out.length < REQUEST_ID_LENGTH) {
+    out += Math.random().toString(16).slice(2);
+  }
+  return out.slice(0, REQUEST_ID_LENGTH);
+}
+
+/** Identifiant renvoyé par le serveur, ou à défaut celui qu'on a envoyé :
+ * l'en-tête peut être masqué par un proxy ou une politique CORS, la
+ * référence affichée reste alors valable car le serveur journalise
+ * l'identifiant entrant. */
+function responseRequestId(res: Response, sent: string, body?: unknown): string {
+  return res.headers.get("X-Request-ID") ?? extractRequestId(body) ?? sent;
+}
 
 // Endpoints où un 401 est une réponse métier normale (ex. mauvais mot de
 // passe) : l'appelant gère l'erreur lui-même, on NE DOIT PAS effacer le
@@ -67,6 +105,8 @@ export async function fetchAPI<T = unknown>(
     headers["Content-Type"] = "application/json";
   }
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const requestId = newRequestId();
+  headers["X-Request-ID"] = requestId;
 
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -80,10 +120,13 @@ export async function fetchAPI<T = unknown>(
       headers: { ...headers, ...options?.headers },
     });
   } catch (err) {
+    // Pas de réponse : on garde le message d'origine (les écrans ont leur
+    // propre repli) mais on attache l'identifiant envoyé, seule trace
+    // commune avec le serveur (N5).
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+      throw new NetworkError(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`, requestId, { cause: err });
     }
-    throw err;
+    throw new NetworkError(err instanceof Error ? err.message : "Connexion impossible", requestId, { cause: err });
   } finally {
     clearTimeout(timer);
   }
@@ -108,6 +151,7 @@ export async function fetchAPI<T = unknown>(
     const detail = extractErrorDetail(data);
     const code = extractErrorCode(data);
     const error = new ApiError(res.status, detail, code);
+    error.requestId = responseRequestId(res, requestId, data);
     // Corps brut conservé pour les erreurs qui portent des champs de reprise
     // en plus de `detail`/`code` (PR9 : `recoverable`, `failed_payment_id`).
     error.body = data;
@@ -138,6 +182,8 @@ export async function fetchBytes(endpoint: string, options?: FetchAPIOptions): P
   const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const requestId = newRequestId();
+  headers["X-Request-ID"] = requestId;
 
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -151,10 +197,13 @@ export async function fetchBytes(endpoint: string, options?: FetchAPIOptions): P
       headers: { ...headers, ...options?.headers },
     });
   } catch (err) {
+    // Pas de réponse : on garde le message d'origine (les écrans ont leur
+    // propre repli) mais on attache l'identifiant envoyé, seule trace
+    // commune avec le serveur (N5).
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+      throw new NetworkError(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`, requestId, { cause: err });
     }
-    throw err;
+    throw new NetworkError(err instanceof Error ? err.message : "Connexion impossible", requestId, { cause: err });
   } finally {
     clearTimeout(timer);
   }
@@ -168,7 +217,9 @@ export async function fetchBytes(endpoint: string, options?: FetchAPIOptions): P
     const data = contentType.includes("application/json")
       ? await res.json().catch(() => null)
       : await res.text().catch(() => null);
-    throw new ApiError(res.status, extractErrorDetail(data), extractErrorCode(data));
+    const error = new ApiError(res.status, extractErrorDetail(data), extractErrorCode(data));
+    error.requestId = responseRequestId(res, requestId, data);
+    throw error;
   }
 
   return new Uint8Array(await res.arrayBuffer());
@@ -201,6 +252,8 @@ export async function fetchBytesWithHeaders(
   const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const requestId = newRequestId();
+  headers["X-Request-ID"] = requestId;
 
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -214,10 +267,13 @@ export async function fetchBytesWithHeaders(
       headers: { ...headers, ...options?.headers },
     });
   } catch (err) {
+    // Pas de réponse : on garde le message d'origine (les écrans ont leur
+    // propre repli) mais on attache l'identifiant envoyé, seule trace
+    // commune avec le serveur (N5).
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`);
+      throw new NetworkError(`La requête a expiré après ${Math.round(timeoutMs / 1000)}s`, requestId, { cause: err });
     }
-    throw err;
+    throw new NetworkError(err instanceof Error ? err.message : "Connexion impossible", requestId, { cause: err });
   } finally {
     clearTimeout(timer);
   }
@@ -231,7 +287,9 @@ export async function fetchBytesWithHeaders(
     const data = contentType.includes("application/json")
       ? await res.json().catch(() => null)
       : await res.text().catch(() => null);
-    throw new ApiError(res.status, extractErrorDetail(data), extractErrorCode(data));
+    const error = new ApiError(res.status, extractErrorDetail(data), extractErrorCode(data));
+    error.requestId = responseRequestId(res, requestId, data);
+    throw error;
   }
 
   const responseHeaders: Record<string, string> = {};

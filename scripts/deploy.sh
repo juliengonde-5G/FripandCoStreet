@@ -7,6 +7,9 @@
 #   ./scripts/deploy.sh --pull     Idem, après `git fetch` + reset sur origin/$DEPLOY_BRANCH
 #   ./scripts/deploy.sh --rollback Revenir au commit du déploiement précédent (implique --pull)
 #
+# Se termine par les tests de fumée (scripts/smoke_prod.sh) : un contrôle en
+# échec sort en 1 sans défaire le déploiement (rollback manuel suggéré).
+#
 # Pré-requis serveur : Docker Engine 24+ avec Compose v2, un fichier .env
 # rempli (cp .env.example .env), le reverse-proxy du VPS rattaché au réseau
 # `fripco-network` avec le bloc `app.lloomi.fr` (docker/Caddyfile.fragment).
@@ -24,6 +27,9 @@ COMPOSE_FILE="$PROJECT_DIR/docker/docker-compose.prod.yml"
 ENV_FILE="$PROJECT_DIR/.env"
 ROLLBACK_FILE="$PROJECT_DIR/.deploy_rollback"
 NETWORK_NAME="fripco-network"
+# URL testée par les tests de fumée (étape 6/6) — surchargeable pour un VPS
+# servi sous un autre nom ou pour une mise au point locale.
+SMOKE_URL="${FRIPCO_SMOKE_URL:-https://app.lloomi.fr}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[✓]${NC} $*"; }
@@ -40,7 +46,7 @@ for arg in "$@"; do
     --rollback)  ROLLBACK=true; PULL=true ;;
     --branch=*)  DEPLOY_BRANCH="${arg#--branch=}"; PULL=true ;;
     --help|-h)
-      sed -n '2,16p' "$_SELF"; exit 0 ;;
+      sed -n '2,19p' "$_SELF"; exit 0 ;;
     *) err "Option inconnue : $arg"; exit 2 ;;
   esac
 done
@@ -64,7 +70,7 @@ echo "  Frip & Co Street — Déploiement production"
 echo "============================================"
 
 # ------------------------------------------------------------ 0. vérifications
-step "0/5" "Vérification de l'environnement…"
+step "0/6" "Vérification de l'environnement…"
 [ -f "$ENV_FILE" ] || { err "Fichier .env manquant (cp .env.example .env)"; exit 1; }
 if grep -vE '^[[:space:]]*#' "$ENV_FILE" | grep -q "CHANGER_MOI"; then
   err "Le fichier .env contient encore des valeurs CHANGER_MOI :"
@@ -87,18 +93,18 @@ if $ROLLBACK; then
   [ -f "$ROLLBACK_FILE" ] || { err "Aucun déploiement précédent enregistré"; exit 1; }
   PREV=$(cat "$ROLLBACK_FILE"); warn "Rollback vers $PREV"; git checkout "$PREV"
 elif $PULL; then
-  step "1/5" "Récupération du code (branche $DEPLOY_BRANCH)…"
+  step "1/6" "Récupération du code (branche $DEPLOY_BRANCH)…"
   echo "$CURRENT_COMMIT" > "$ROLLBACK_FILE"
   git fetch origin "$DEPLOY_BRANCH" && git reset --hard "origin/$DEPLOY_BRANCH"
 else
-  step "1/5" "Code local utilisé tel quel ($CURRENT_COMMIT) — pas de git pull (--pull pour l'activer)"
+  step "1/6" "Code local utilisé tel quel ($CURRENT_COMMIT) — pas de git pull (--pull pour l'activer)"
   echo "$CURRENT_COMMIT" > "$ROLLBACK_FILE"
 fi
 NEW_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 log "Commit déployé : $NEW_COMMIT"
 
 # ------------------------------------------------------------ 2. réseau + build
-step "2/5" "Réseau $NETWORK_NAME + build des images…"
+step "2/6" "Réseau $NETWORK_NAME + build des images…"
 if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
   docker network create "$NETWORK_NAME" >/dev/null
   log "Réseau $NETWORK_NAME créé (le reverse-proxy doit s'y rattacher, voir docs/DEPLOIEMENT.md)"
@@ -109,7 +115,7 @@ compose build
 log "Images construites (sha=$FRIPCO_BUILD_SHA)"
 
 # ------------------------------------------------------------ 3. base + migrations
-step "3/5" "Base de données et migrations Alembic…"
+step "3/6" "Base de données et migrations Alembic…"
 compose up -d db
 DB_OK=false
 for _ in $(seq 1 20); do
@@ -127,7 +133,7 @@ else
 fi
 
 # ------------------------------------------------------------ 4. démarrage
-step "4/5" "Démarrage des conteneurs…"
+step "4/6" "Démarrage des conteneurs…"
 compose up -d --remove-orphans
 API_OK=false
 for _ in $(seq 1 40); do
@@ -138,7 +144,7 @@ $API_OK || { err "API : timeout"; docker logs fripco-api --tail 30; warn "Rollba
 log "API : OK"
 
 # ------------------------------------------------------------ 5. état final
-step "5/5" "État final"
+step "5/6" "État final"
 compose ps
 echo ""
 if [ -z "$(docker exec fripco-db psql -U "$(read_env_value POSTGRES_USER)" -d "$(read_env_value POSTGRES_DB)" -Atc 'SELECT 1 FROM users LIMIT 1' 2>/dev/null)" ]; then
@@ -146,3 +152,17 @@ if [ -z "$(docker exec fripco-db psql -U "$(read_env_value POSTGRES_USER)" -d "$
   echo "    docker exec -it fripco-api python scripts/create_manager.py --username <nom> --email <email>"
 fi
 log "Déploiement terminé — https://app.lloomi.fr"
+
+# ------------------------------------------------------------ 6. tests de fumée
+# Lancés APRÈS le message de fin : le déploiement a bien eu lieu, ces
+# contrôles disent seulement si ce qui tourne maintenant se comporte
+# correctement. Aucun rollback automatique — défaire un déploiement sans
+# qu'un humain ait lu la raison ferait plus de dégâts que le problème.
+step "6/6" "Tests de fumée…"
+if "$SCRIPT_DIR/smoke_prod.sh" "$SMOKE_URL"; then
+  log "Tests de fumée : OK"
+else
+  err "Tests de fumée en échec — l'application est déployée mais ne répond pas comme attendu."
+  warn "Rollback : ./scripts/deploy.sh --rollback"
+  exit 1
+fi

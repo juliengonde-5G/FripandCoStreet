@@ -21,8 +21,10 @@
  */
 import React, { useEffect, useRef, useState } from "react";
 
+import ErrorReference from "@/components/ui/ErrorReference";
 import Modal from "@/components/ui/Modal";
 import { api, ApiError } from "@/lib/api";
+import { describeError, errorRef, errorReference, errorText, type DisplayableError } from "@/lib/apiError";
 import { formatCurrency } from "@/lib/format";
 import { retryFailedPayment, type FailedPayment } from "@/lib/payments";
 import type { CbCheckoutState, CbCheckoutStatus, CbInitiateResponse, PaymentInput } from "@/lib/types";
@@ -63,6 +65,9 @@ type Step =
       /** Libellé imposé, quand le bandeau par défaut ne dit pas l'essentiel. */
       label?: string;
       detail?: string;
+      /** Référence de l'échec (PR12 N5) : posée pour une panne serveur ou
+       * réseau seulement, jamais pour un refus du terminal. */
+      reference?: string;
       /** Échec récupérable : l'encaissement est en file, on peut le relancer. */
       recovery?: CardRecovery;
     }
@@ -107,7 +112,7 @@ export default function MultiStepPaymentWizard({
   const [tenders, setTenders] = useState<Tendered[]>([]);
   const [step, setStep] = useState<Step>({ kind: "select" });
   const [committing, setCommitting] = useState(false);
-  const [commitError, setCommitError] = useState<string | null>(null);
+  const [commitError, setCommitError] = useState<DisplayableError>(null);
 
   const checkoutIdRef = useRef<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -211,12 +216,13 @@ export default function MultiStepPaymentWizard({
    * ne répète pas l'identifiant de la ligne en file. */
   const failureStep = (amount: number, err: unknown, previous: CardRecovery | null): Step => {
     const detail = err instanceof ApiError ? err.detail : "Impossible de joindre le terminal de paiement.";
+    const reference = errorReference(err);
     const recovery = readCardRecovery(err, previous);
     if (recovery) {
       queuedCardRef.current = recovery.failedPaymentId ? { ...recovery, amount } : null;
-      return { kind: "card-pending", amount, status: "failed", detail, recovery };
+      return { kind: "card-pending", amount, status: "failed", detail, reference, recovery };
     }
-    return { kind: "card-pending", amount, status: "failed", detail };
+    return { kind: "card-pending", amount, status: "failed", detail, reference };
   };
 
   const startCardCheckout = async (amount: number): Promise<void> => {
@@ -370,7 +376,7 @@ export default function MultiStepPaymentWizard({
       await onCommit(payments);
       handleClose();
     } catch (err) {
-      setCommitError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement de la vente.");
+      setCommitError(describeError(err, "Échec de l'enregistrement de la vente."));
     } finally {
       setCommitting(false);
     }
@@ -443,6 +449,7 @@ export default function MultiStepPaymentWizard({
               status={step.status}
               label={step.label ?? (step.recovery ? (step.recovery.exhausted ? EXHAUSTED_LABEL : RECOVERABLE_LABEL) : undefined)}
               detail={step.recovery ? recoveryDetail(step.recovery, step.detail) : step.detail}
+              reference={step.reference}
               actionLabel={step.status === "pending" ? "Annuler" : undefined}
               onAction={step.status === "pending" ? () => void handleCancelCard() : undefined}
               secondaryActionLabel={
@@ -494,9 +501,10 @@ export default function MultiStepPaymentWizard({
 
         {step.kind === "confirm" && (
           <div className="space-y-3">
-            {commitError && (
+            {errorText(commitError) && (
               <div role="alert" className="rounded-fc-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-                {commitError}
+                {errorText(commitError)}
+                <ErrorReference reference={errorRef(commitError)} />
               </div>
             )}
             <div className="rounded-fc-lg border border-fc-line bg-fc-surface">

@@ -28,7 +28,8 @@ import React, { useCallback, useEffect, useState } from "react";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
-import { ApiError } from "@/lib/api";
+import ErrorNotice from "@/components/ui/ErrorNotice";
+import { describeError, type DisplayableError, type ErrorDetails } from "@/lib/apiError";
 import { formatCurrency, formatDateTime, formatRelativeTime } from "@/lib/format";
 import {
   ABANDON_REASON_MAX_LENGTH,
@@ -52,15 +53,6 @@ import {
 // Éléments communs
 // ---------------------------------------------------------------------------
 
-function ErrorNotice({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
-      {message}
-    </div>
-  );
-}
-
 function causeLabel(errorType: FailedPaymentErrorType | SumupErrorType | null): string {
   if (!errorType) return "Cause inconnue";
   return ERROR_TYPE_LABELS[errorType] ?? errorType;
@@ -70,9 +62,10 @@ function operationLabel(operation: SumupOperation): string {
   return OPERATION_LABELS[operation] ?? operation;
 }
 
-/** Erreur d'appel → message affichable, sans jamais « [object Object] ». */
-function messageOf(err: unknown, fallback: string): string {
-  return err instanceof ApiError ? err.detail : fallback;
+/** Erreur d'appel → message affichable, sans jamais « [object Object] »,
+ * et sa référence quand la panne vient du serveur ou du réseau (N5). */
+function messageOf(err: unknown, fallback: string): ErrorDetails {
+  return describeError(err, fallback);
 }
 
 function StatLine({ label, value }: { label: string; value: React.ReactNode }) {
@@ -105,10 +98,10 @@ export default function PaymentsTab() {
 function PendingFailuresCard() {
   const [list, setList] = useState<FailedPayment[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<DisplayableError>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const [abandonId, setAbandonId] = useState<string | null>(null);
@@ -264,7 +257,7 @@ function FailuresAnalysisCard() {
   const [days, setDays] = useState<number>(PERIODS[0]);
   const [report, setReport] = useState<PaymentFailuresReport | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -425,13 +418,13 @@ function ExchangeLogCard() {
   const [exchanges, setExchanges] = useState<SumupExchange[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [purging, setPurging] = useState(false);
-  const [purgeError, setPurgeError] = useState<string | null>(null);
+  const [purgeError, setPurgeError] = useState<DisplayableError>(null);
   const [purgeNotice, setPurgeNotice] = useState<string | null>(null);
 
   const load = useCallback(

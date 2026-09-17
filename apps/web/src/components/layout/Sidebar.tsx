@@ -47,6 +47,7 @@ type IconName =
   | "accounting"
   | "archive"
   | "backup"
+  | "activity"
   | "logout"
   | "chevron-left"
   | "chevron-right"
@@ -148,6 +149,12 @@ const ICON_PATHS: Record<IconName, React.ReactNode> = {
       <path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
     </>
   ),
+  // Courbe de suivi — l'écran de supervision (PR12, N2).
+  activity: (
+    <>
+      <path d="M3 12h4l3 8 4-16 3 8h4" />
+    </>
+  ),
   logout: (
     <>
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -241,6 +248,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/admin?tab=accounting", label: "Comptabilité", icon: "accounting", matchQuery: { tab: "accounting" } },
       { href: "/admin?tab=fiscal", label: "Archives fiscales", icon: "archive", matchQuery: { tab: "fiscal" } },
       { href: "/admin?tab=backups", label: "Sauvegardes", icon: "backup", matchQuery: { tab: "backups" } },
+      { href: "/admin?tab=monitoring", label: "Supervision", icon: "activity", matchQuery: { tab: "monitoring" } },
     ],
   },
 ];

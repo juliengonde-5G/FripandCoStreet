@@ -21,6 +21,15 @@ export class ApiError extends Error {
    * traité comme une donnée inconnue : on ne suppose jamais sa forme.
    */
   body?: unknown;
+  /**
+   * Identifiant de la requête (PR12 N5) — en-tête `X-Request-ID` de la
+   * réponse, ou champ `request_id` du corps quand la frontière 500 du
+   * serveur le renvoie. Sert à corréler ce que voit la vendeuse avec la
+   * ligne de log du serveur ; affiché par `ErrorReference`, et seulement
+   * pour une 5xx ou une panne réseau (une 4xx métier se suffit à
+   * elle-même).
+   */
+  requestId?: string;
 
   constructor(status: number, detail: string, code?: string) {
     super(detail);
@@ -88,4 +97,88 @@ export function extractErrorCode(data: unknown): string | undefined {
   if (!data || typeof data !== "object") return undefined;
   const code = (data as Record<string, unknown>).code;
   return typeof code === "string" && code.length > 0 ? code : undefined;
+}
+
+/**
+ * Identifiant de requête porté par un corps d'erreur JSON (PR12 N5) —
+ * la frontière 500 du serveur renvoie `{detail, request_id, error_type}`.
+ * Sert de repli quand l'en-tête `X-Request-ID` n'a pas pu être lu (CORS
+ * restrictif, proxy qui l'efface). Toujours traité comme une donnée
+ * inconnue : on ne suppose jamais la forme du corps.
+ */
+export function extractRequestId(data: unknown): string | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const value = (data as Record<string, unknown>).request_id;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Panne de transport (PR12 N5) — la requête n'a jamais eu de réponse :
+ * réseau coupé, serveur injoignable, délai dépassé. Distincte d'une
+ * `ApiError` (qui, elle, porte un statut renvoyé par le serveur) pour ne
+ * rien changer aux écrans : ils testent `err instanceof ApiError` et
+ * gardent donc leur propre message de repli, en français et contextuel.
+ * Elle porte seulement, en plus, l'identifiant de requête qu'on avait
+ * envoyé — le serveur l'a peut-être journalisé avant de lâcher.
+ */
+export class NetworkError extends Error {
+  requestId?: string;
+
+  constructor(message: string, requestId?: string, options?: { cause?: unknown }) {
+    super(message);
+    this.name = "NetworkError";
+    this.requestId = requestId;
+    if (options && "cause" in options) {
+      (this as { cause?: unknown }).cause = options.cause;
+    }
+  }
+}
+
+/**
+ * Référence à montrer à la vendeuse (N5), ou `undefined` quand il n'y a
+ * rien à montrer. On ne l'affiche que quand elle sert à quelque chose :
+ * une panne du serveur (5xx) ou du réseau, c'est-à-dire les cas où il
+ * faudra aller voir les logs. Une erreur métier (4xx) dit déjà tout dans
+ * son message — l'encombrer d'un code technique ne ferait qu'inquiéter.
+ */
+export function errorReference(err: unknown): string | undefined {
+  if (err instanceof NetworkError) return err.requestId;
+  if (err instanceof ApiError && err.status >= 500) return err.requestId;
+  return undefined;
+}
+
+/** Une erreur prête à afficher : le message et, le cas échéant, la
+ * référence (N5). `fallback` est le message maison de l'écran, utilisé
+ * dès que l'erreur n'est pas une réponse du serveur. */
+export interface ErrorDetails {
+  message: string;
+  reference?: string;
+}
+
+export function describeError(err: unknown, fallback: string): ErrorDetails {
+  const reference = errorReference(err);
+  const message = err instanceof ApiError ? err.detail : fallback;
+  return reference ? { message, reference } : { message };
+}
+
+/** Même chose, avec un message imposé par l'écran : certaines erreurs
+ * métier sont reformulées en langage de boutique (« une sauvegarde est
+ * déjà en cours… »), sans pour autant perdre la référence d'une panne. */
+export function describeErrorAs(err: unknown, message: string): ErrorDetails {
+  const reference = errorReference(err);
+  return reference ? { message, reference } : { message };
+}
+
+/** Message d'une erreur affichable, qu'elle soit déjà décrite ou simple
+ * chaîne — les écrans mélangent les deux formes. */
+export type DisplayableError = string | ErrorDetails | null | undefined;
+
+export function errorText(value: DisplayableError): string | null {
+  if (!value) return null;
+  return typeof value === "string" ? value : value.message;
+}
+
+export function errorRef(value: DisplayableError): string | undefined {
+  if (!value || typeof value === "string") return undefined;
+  return value.reference;
 }

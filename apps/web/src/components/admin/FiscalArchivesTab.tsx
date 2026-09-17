@@ -13,7 +13,9 @@ import React, { useEffect, useState } from "react";
 
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
+import ErrorNotice from "@/components/ui/ErrorNotice";
 import { api, ApiError } from "@/lib/api";
+import { describeError, describeErrorAs, type DisplayableError } from "@/lib/apiError";
 import { copyToClipboard, downloadFile, shortHash } from "@/lib/download";
 import { formatCurrency, formatDateTime } from "@/lib/format";
 import {
@@ -27,15 +29,6 @@ import {
   type FiscalIntegrityResponse,
 } from "@/lib/types";
 
-function ErrorNotice({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
-      {message}
-    </div>
-  );
-}
-
 const selectClass =
   "w-full min-h-touch px-4 py-2.5 rounded-fc border border-fc-line bg-fc-surface text-fc-ink focus:outline-none focus:ring-2 focus:ring-fc-primary focus:border-fc-primary";
 
@@ -45,7 +38,7 @@ const dateInputClass =
 export default function FiscalArchivesTab() {
   const [closures, setClosures] = useState<FiscalClosure[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const load = () => {
     setLoading(true);
@@ -53,7 +46,7 @@ export default function FiscalArchivesTab() {
     api
       .get<FiscalClosureListResponse>("/api/admin/fiscal-closures")
       .then((data) => setClosures(data.closures))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les archives fiscales."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les archives fiscales.")))
       .finally(() => setLoading(false));
   };
 
@@ -80,10 +73,10 @@ function FiscalClosuresListCard({
 }: {
   closures: FiscalClosure[];
   loading: boolean;
-  error: string | null;
+  error: DisplayableError;
 }) {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<DisplayableError>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const handleDownload = async (closure: FiscalClosure): Promise<void> => {
@@ -92,7 +85,7 @@ function FiscalClosuresListCard({
     try {
       await downloadFile(`/api/admin/fiscal-closures/${closure.id}/archive`, `archive_cloture_${closure.sequence_number}.json.gz`);
     } catch (err) {
-      setDownloadError(err instanceof ApiError ? err.detail : "Échec du téléchargement de l'archive.");
+      setDownloadError(describeError(err, "Échec du téléchargement de l'archive."));
     } finally {
       setDownloadingId(null);
     }
@@ -205,7 +198,7 @@ function CreateClosureCard({ onCreated }: { onCreated: () => void }) {
 
   const [confirmStep, setConfirmStep] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const period =
@@ -233,7 +226,11 @@ function CreateClosureCard({ onCreated }: { onCreated: () => void }) {
       setConfirmStep(false);
       onCreated();
     } catch (err) {
-      setError(err instanceof ApiError ? closureErrorMessage(err) : "Échec de la clôture.");
+      setError(
+        err instanceof ApiError
+          ? describeErrorAs(err, closureErrorMessage(err))
+          : describeError(err, "Échec de la clôture."),
+      );
     } finally {
       setCreating(false);
     }
@@ -376,7 +373,7 @@ function IntegrityCheckCard() {
   const [closuresResult, setClosuresResult] = useState<ClosuresIntegrityResponse | null>(null);
   const [fullResult, setFullResult] = useState<FiscalIntegrityResponse | null>(null);
   const [checking, setChecking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   const handleCheck = async (): Promise<void> => {
     setChecking(true);
@@ -389,7 +386,7 @@ function IntegrityCheckCard() {
       setClosuresResult(closures);
       setFullResult(full);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec du contrôle d'intégrité.");
+      setError(describeError(err, "Échec du contrôle d'intégrité."));
     } finally {
       setChecking(false);
     }
@@ -425,7 +422,7 @@ function FiscalExportCard() {
   const [to, setTo] = useState("");
   const [format, setFormat] = useState<FiscalExportFormat>("json");
   const [generating, setGenerating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [hash, setHash] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -442,11 +439,13 @@ function FiscalExportCard() {
       const { headers } = await downloadFile(`/api/admin/fiscal-export?${qs.toString()}`, filename);
       setHash(headers["x-export-sha256"] ?? null);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : "Échec de la génération de l'export fiscal.";
       setError(
         err instanceof ApiError && err.code === "chain_invalid"
-          ? "La chaîne de sécurité est rompue sur cette période : contactez le support avant de générer l'export."
-          : detail,
+          ? describeErrorAs(
+              err,
+              "La chaîne de sécurité est rompue sur cette période : contactez le support avant de générer l'export.",
+            )
+          : describeError(err, "Échec de la génération de l'export fiscal."),
       );
     } finally {
       setGenerating(false);

@@ -20,7 +20,9 @@ import React, { useEffect, useState } from "react";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import Input from "@/components/ui/Input";
-import { api, ApiError } from "@/lib/api";
+import ErrorNotice from "@/components/ui/ErrorNotice";
+import { api } from "@/lib/api";
+import { describeError, type DisplayableError } from "@/lib/apiError";
 import { PIN_LENGTH, digitsOnly, isPinComplete } from "@/lib/cashier";
 import type {
   AdminCashier,
@@ -28,15 +30,6 @@ import type {
   AdminCashierResponse,
   PosSettings,
 } from "@/lib/types";
-
-function ErrorNotice({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div role="alert" className="rounded-fc bg-fc-danger-soft border border-fc-danger/30 px-3 py-2 text-sm text-fc-danger">
-      {message}
-    </div>
-  );
-}
 
 /** Message d'aide commun aux deux saisies de code — même règle que le
  * serveur (J3), rappelée avant l'envoi plutôt qu'après un 422. */
@@ -51,7 +44,7 @@ function pinLocalError(pin: string, confirmation: string): string | null {
 export default function CashiersTab() {
   const [cashiers, setCashiers] = useState<AdminCashier[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   // Pas de `setLoading(true)` sur un rafraîchissement : la liste reste à
   // l'écran pendant la relecture. Sans cela, chaque enregistrement
@@ -64,7 +57,7 @@ export default function CashiersTab() {
         setCashiers(data.cashiers ?? []);
         setError(null);
       })
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Impossible de charger les vendeuses."))
+      .catch((err) => setError(describeError(err, "Impossible de charger les vendeuses.")))
       .finally(() => setLoading(false));
   };
 
@@ -109,13 +102,13 @@ function PosSettingsCard() {
   const [required, setRequired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
 
   useEffect(() => {
     api
       .get<PosSettings>("/api/admin/settings/pos")
       .then((data) => setRequired(!!data.cashier_required))
-      .catch((err) => setError(err instanceof ApiError ? err.detail : "Réglage indisponible."))
+      .catch((err) => setError(describeError(err, "Réglage indisponible.")))
       .finally(() => setLoading(false));
   }, []);
 
@@ -130,7 +123,7 @@ function PosSettingsCard() {
       setRequired(!!data.cashier_required);
     } catch (err) {
       setRequired(!next);
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }
@@ -167,7 +160,7 @@ function PosSettingsCard() {
 
 function CashierRow({ cashier, onChanged }: { cashier: AdminCashier; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [pinOpen, setPinOpen] = useState(false);
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
@@ -180,7 +173,7 @@ function CashierRow({ cashier, onChanged }: { cashier: AdminCashier; onChanged: 
       await api.put<AdminCashierResponse>(`/api/admin/cashiers/${cashier.id}`, { active });
       onChanged();
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setBusy(false);
     }
@@ -203,7 +196,7 @@ function CashierRow({ cashier, onChanged }: { cashier: AdminCashier; onChanged: 
       setTimeout(() => setPinSaved(false), 2500);
       onChanged();
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement du code.");
+      setError(describeError(err, "Échec de l'enregistrement du code."));
     } finally {
       setBusy(false);
     }
@@ -302,7 +295,7 @@ function NewCashierCard({ onCreated }: { onCreated: () => void }) {
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayableError>(null);
   const [created, setCreated] = useState<string | null>(null);
 
   const submit = async (): Promise<void> => {
@@ -330,7 +323,7 @@ function NewCashierCard({ onCreated }: { onCreated: () => void }) {
       setTimeout(() => setCreated(null), 2500);
       onCreated();
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : "Échec de l'enregistrement.");
+      setError(describeError(err, "Échec de l'enregistrement."));
     } finally {
       setSaving(false);
     }

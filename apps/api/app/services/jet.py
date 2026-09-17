@@ -188,6 +188,15 @@ EVENT_CLIENT_DELETION_CANCELLED = "client.deletion_cancelled"
 EVENT_CAHIER_TEXT_UPDATED = "cahier.text_updated"
 EVENT_CAHIER_SIGNED = "cahier.signed"
 
+# PR12 — remise a zero pre-ouverture (docs/ARCHITECTURE_PR12.md, N3).
+# PREMIER evenement de la nouvelle chaine : le journal vient d'etre vide, cet
+# evenement est donc chaine sur le genesis "0". Payload : horodatage, auteur
+# ("script" — l'operation se lance en ligne de commande, sans session HTTP,
+# donc sans user_id), COMPTAGES des tables videes et identifiant de la
+# sauvegarde faite juste avant. Des nombres et des identifiants, jamais un
+# nom ni une adresse : le JET est immuable (meme regle que `client.merged`).
+EVENT_SYSTEM_GO_LIVE_RESET = "system.go_live_reset"
+
 
 class JournalService:
     """Ecrit et verifie la chaine d'evenements techniques (JET)."""

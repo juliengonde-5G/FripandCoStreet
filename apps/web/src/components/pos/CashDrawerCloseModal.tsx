@@ -9,7 +9,9 @@
  */
 import React, { useId, useState } from "react";
 
+import ErrorReference from "@/components/ui/ErrorReference";
 import NumPad from "@/components/ui/NumPad";
+import { describeError, errorRef, errorText, type DisplayableError } from "@/lib/apiError";
 import { formatCurrency } from "@/lib/format";
 import { useDialogA11y } from "@/lib/useDialogA11y";
 
@@ -43,7 +45,7 @@ export default function CashDrawerCloseModal({
   const [closingNote, setClosingNote] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
   const [zNumber, setZNumber] = useState<number | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<DisplayableError>(null);
 
   const counted = detailMode ? totalFromBreakdown(breakdown) : quickAmount;
   const discrepancy = counted - expectedAmount;
@@ -90,7 +92,7 @@ export default function CashDrawerCloseModal({
       if (result && "report_number" in result) setZNumber(result.report_number);
       setPhase("done");
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Erreur inconnue");
+      setSubmitError(describeError(err, err instanceof Error ? err.message : "Erreur inconnue"));
     } finally {
       setSubmitting(false);
     }
@@ -227,13 +229,14 @@ export default function CashDrawerCloseModal({
                 </section>
               )}
 
-              {submitError && (
+              {errorText(submitError) && (
                 <section role="alert" className="rounded-fc-lg bg-fc-danger-soft border border-fc-danger/30 p-4">
                   <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-fc-danger">
                     <span aria-hidden>⚠</span>
                     Échec de la clôture
                   </div>
-                  <p className="text-xs text-fc-danger">{submitError}</p>
+                  <p className="text-xs text-fc-danger">{errorText(submitError)}</p>
+                  <ErrorReference reference={errorRef(submitError)} className="text-fc-danger" />
                 </section>
               )}
 

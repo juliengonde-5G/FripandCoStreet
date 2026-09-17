@@ -78,6 +78,12 @@ import type {
 } from "./types";
 import type { BytesWithHeaders, FetchAPIOptions } from "./api";
 import type { FailedPayment, PaymentFailuresReport, SumupExchange, SumupOperation } from "./payments";
+import type {
+  HardwareCompatibilityItem,
+  Monitoring,
+  MonitoringIntegrity,
+  MonitoringRecentError,
+} from "./monitoring";
 
 /** Version de la politique de consentement (E8) — même constante que le
  * backend (`CONSENT_POLICY_VERSION`), horodate chaque ligne du journal. */
@@ -738,6 +744,7 @@ function reset(): void {
   seedPr10AdminDemo();
   cahierDays = new Map();
   seedPr11Cahier();
+  seedPr12Journal();
   // `backupConfig` n'est pas remis à zéro, comme `settings` — un réglage
   // édité par la personne reste après un reset (état applicatif, pas une
   // donnée transactionnelle du jeu de démo).
@@ -1465,6 +1472,183 @@ function createAccountingExportForZ(z: ZReport): AccountingExportDetail {
   accountingExports.unshift(exportRecord);
   logJet("accounting.export_created", { z_number: z.report_number, total_debit: totalDebit, total_credit: totalCredit });
   return exportRecord;
+}
+
+// ---------------------------------------------------------------------------
+// PR12 — journal comptable consultable (docs/ARCHITECTURE_PR12.md §1, N1)
+//
+// Le journal se lit toujours sur deux sources : l'écriture ENREGISTRÉE d'un
+// Z (`source: "export"`) et, quand un Z n'en a pas encore, un calcul à la
+// volée (`source: "computed"`, le Z est alors listé dans
+// `z_without_export`). Le jeu de démo contient donc exactement ces deux
+// cas — une clôture avec son écriture, une clôture sans — pour qu'on voie
+// l'avertissement et la mention « recalculé » sans rien manipuler. Les
+// deux jeux de lignes sont équilibrés : un déséquilibre visible vient
+// alors d'un filtre de compte (ne garder que les 5, par exemple), pas d'un
+// artifice.
+// ---------------------------------------------------------------------------
+
+/** Une ligne du journal, telle que la renvoie le contrat N1 : montants en
+ * chaînes à deux décimales. */
+interface MockJournalLine {
+  date: string;
+  z_report_number: number;
+  z_report_id: string;
+  account_number: string;
+  account_label: string;
+  label: string;
+  debit: string;
+  credit: string;
+  source: "export" | "computed";
+}
+
+let journalDemoLines: MockJournalLine[] = [];
+
+// Montants en chaînes à deux décimales : `money()` (aide commune du mock).
+
+/** Quatre lignes équilibrées pour un Z : encaissements au débit, ventes HT
+ * et TVA au crédit — même structure que `createAccountingExportForZ`. */
+function demoJournalLinesForZ(
+  date: string,
+  zNumber: number,
+  source: "export" | "computed",
+  amounts: { cash: number; card: number; ht: number; tva: number },
+): MockJournalLine[] {
+  const cfg = settings.accounting;
+  const piece = `Z${String(zNumber).padStart(4, "0")}`;
+  const zId = `demo-journal-z${zNumber}`;
+  const line = (
+    account_number: string,
+    account_label: string,
+    label: string,
+    debit: number,
+    credit: number,
+  ): MockJournalLine => ({
+    date,
+    z_report_number: zNumber,
+    z_report_id: zId,
+    account_number,
+    account_label,
+    label,
+    debit: money(debit),
+    credit: money(credit),
+    source,
+  });
+  return [
+    line(cfg.account_cash, cfg.label_cash, `${cfg.label_cash} — ${piece}`, amounts.cash, 0),
+    line(cfg.account_card, cfg.label_card, `${cfg.label_card} — ${piece}`, amounts.card, 0),
+    line(cfg.account_sales, cfg.label_sales, `${cfg.label_sales} — ${piece}`, 0, amounts.ht),
+    line(cfg.account_tva, cfg.label_tva, `${cfg.label_tva} — ${piece}`, 0, amounts.tva),
+  ];
+}
+
+/** Deux clôtures de démo dans le mois courant. Les numéros (12 et 13)
+ * laissent la place aux Z réellement clôturés pendant la démonstration,
+ * qui repartent de 1 et viennent s'ajouter au journal. */
+function seedPr12Journal(): void {
+  const today = new Date();
+  const day = (n: number): string =>
+    `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(n).padStart(2, "0")}`;
+  const secondDay = Math.max(1, today.getDate() - 1);
+  journalDemoLines = [
+    ...demoJournalLinesForZ(day(Math.max(1, today.getDate() - 2)), 12, "export", {
+      cash: 120,
+      card: 180,
+      ht: 250,
+      tva: 50,
+    }),
+    ...demoJournalLinesForZ(day(secondDay), 13, "computed", { cash: 60, card: 84, ht: 120, tva: 24 }),
+  ];
+}
+
+/** Lignes issues des écritures réellement enregistrées pendant la
+ * démonstration (une clôture de caisse en crée une). */
+function journalLinesFromExports(): MockJournalLine[] {
+  return accountingExports.flatMap((exp) =>
+    exp.lines.map((l) => ({
+      date: exp.export_date,
+      z_report_number: exp.z_number,
+      z_report_id: exp.z_report_id,
+      account_number: l.account_number,
+      account_label: l.account_label,
+      label: l.label,
+      debit: money(l.debit),
+      credit: money(l.credit),
+      source: "export" as const,
+    })),
+  );
+}
+
+/** Format ISO strict « AAAA-MM-JJ » et date réelle (pas de 31 février). */
+function isIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
+
+/** Réponse de `GET /api/admin/accounting/journal` (N1) : tri date, puis n°
+ * de Z, puis n° de compte ; totaux et cumuls par compte calculés sur les
+ * lignes RENVOYÉES (un filtre de compte peut donc déséquilibrer le pied,
+ * c'est voulu) ; `z_without_export` reste calculé sur la période entière,
+ * pour que l'avertissement ne disparaisse pas dès qu'on filtre. */
+function buildJournalResponse(
+  from: string,
+  to: string,
+  accountPrefix: string,
+  zFilter: string,
+): Record<string, unknown> {
+  // Ordre des filtres calqué sur le backend : la période, puis le n° de Z
+  // (qui restreint aussi `z_without_export`), et seulement ensuite le
+  // préfixe de compte (qui, lui, n'enlève jamais l'avertissement).
+  const inPeriod = [...journalDemoLines, ...journalLinesFromExports()]
+    .filter((l) => l.date >= from && l.date <= to)
+    .filter((l) => (zFilter ? String(l.z_report_number) === zFilter : true));
+  const zWithoutExport = [...new Set(inPeriod.filter((l) => l.source === "computed").map((l) => l.z_report_number))].sort(
+    (a, b) => a - b,
+  );
+  const lines = inPeriod
+    .filter((l) => (accountPrefix ? l.account_number.startsWith(accountPrefix) : true))
+    .sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) ||
+        a.z_report_number - b.z_report_number ||
+        a.account_number.localeCompare(b.account_number),
+    );
+
+  const totalDebit = round2(lines.reduce((sum, l) => sum + Number(l.debit), 0));
+  const totalCredit = round2(lines.reduce((sum, l) => sum + Number(l.credit), 0));
+
+  const byAccount = new Map<string, { account_number: string; account_label: string; debit: number; credit: number }>();
+  for (const l of lines) {
+    const entry = byAccount.get(l.account_number) ?? {
+      account_number: l.account_number,
+      account_label: l.account_label,
+      debit: 0,
+      credit: 0,
+    };
+    entry.debit = round2(entry.debit + Number(l.debit));
+    entry.credit = round2(entry.credit + Number(l.credit));
+    byAccount.set(l.account_number, entry);
+  }
+
+  return {
+    period: { from, to },
+    lines,
+    totals: {
+      debit: money(totalDebit),
+      credit: money(totalCredit),
+      balanced: Math.abs(round2(totalDebit - totalCredit)) < 0.01,
+    },
+    accounts: [...byAccount.values()]
+      .sort((a, b) => a.account_number.localeCompare(b.account_number))
+      .map((a) => ({
+        account_number: a.account_number,
+        account_label: a.account_label,
+        debit: money(a.debit),
+        credit: money(a.credit),
+      })),
+    z_without_export: zWithoutExport,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2664,6 +2848,225 @@ function decorateSettings(key: string, value: unknown): unknown {
   return value;
 }
 
+// ---------------------------------------------------------------------------
+// PR12 — supervision/matériel (docs/ARCHITECTURE_PR12.md §1, N2/N4/N5)
+//
+// Trois routes de lecture simulées : la photographie technique, son
+// recalcul d'intégrité, et la liste du matériel compatible. Plus un
+// interrupteur de panne, qui existe pour montrer la « Référence : … »
+// d'une erreur serveur sans casser quoi que ce soit de réel : on pose
+// `localStorage.fripco_demo_500` sur un préfixe de chemin (par exemple
+// `/api/pos/transactions`) et toute requête qui commence par ce préfixe
+// répond 500, avec une référence qui atterrit aussitôt dans la liste des
+// dernières erreurs de la supervision.
+// ---------------------------------------------------------------------------
+
+const DEMO_FAILURE_KEY = "fripco_demo_500";
+
+/** Erreurs récentes du mode démo : une panne d'hier + celles que
+ * l'interrupteur ci-dessus provoque pendant la démonstration. */
+const monitoringRecentErrors: MonitoringRecentError[] = [
+  {
+    at: new Date(Date.now() - 38 * 60_000).toISOString(),
+    request_id: "3f9c21ab7d0e4b16",
+    method: "POST",
+    path: "/api/pos/payments/cb/initiate",
+    status: 500,
+    error_type: "TimeoutError",
+  },
+];
+
+/** Intégrités : `null` tant que personne n'a cliqué « Vérifier
+ * maintenant » — comme le vrai serveur, qui ne relit pas les chaînes à
+ * l'ouverture de la page. */
+let monitoringIntegrity: MonitoringIntegrity | null = null;
+
+/** Lit l'interrupteur : `préfixe` (panne serveur) ou `409:préfixe` pour
+ * une erreur métier — de quoi montrer côte à côte la 500 qui affiche une
+ * référence et la 4xx qui n'en affiche jamais. */
+function demoFailureSwitch(): { status: number; prefix: string } | null {
+  let value: string | null = null;
+  try {
+    value = typeof localStorage !== "undefined" ? localStorage.getItem(DEMO_FAILURE_KEY) : null;
+  } catch {
+    return null;
+  }
+  if (!value || !value.trim()) return null;
+  const raw = value.trim();
+  const sep = raw.indexOf(":");
+  if (sep > 0) {
+    const status = parseInt(raw.slice(0, sep), 10);
+    const prefix = raw.slice(sep + 1);
+    if (!Number.isNaN(status) && prefix) return { status, prefix };
+  }
+  return { status: 500, prefix: raw };
+}
+
+/** Panne simulée : 500 avec une référence, poussée dans le tampon des
+ * dernières erreurs (au plus cinquante, comme le vrai tampon). Une
+ * erreur métier simulée (statut < 500) n'a, elle, ni référence ni trace :
+ * elle n'a rien d'une panne. */
+function failDemoError(status: number, method: string, path: string): never {
+  if (status < 500) {
+    fail(status, "Caisse fermée : ouvrez la caisse avant d'encaisser.", "drawer_closed");
+  }
+  return failDemoServerError(method, path);
+}
+
+function failDemoServerError(method: string, path: string): never {
+  const requestId = Math.random().toString(16).slice(2).padEnd(16, "0").slice(0, 16);
+  monitoringRecentErrors.unshift({
+    at: new Date().toISOString(),
+    request_id: requestId,
+    method,
+    path,
+    status: 500,
+    error_type: "DemoError",
+  });
+  monitoringRecentErrors.splice(50);
+  const error = new ApiError(500, "Erreur interne du serveur.", "internal_error");
+  error.requestId = requestId;
+  error.body = { detail: "Erreur interne du serveur.", request_id: requestId, error_type: "DemoError" };
+  throw error;
+}
+
+function buildMonitoringSnapshot(): Monitoring {
+  const lastBackupAt = new Date(Date.now() - 51 * 3600_000).toISOString();
+  return {
+    generated_at: nowIso(),
+    app: {
+      version: "0.13.0",
+      build_sha: "a1b2c3d",
+      build_date: new Date(Date.now() - 6 * 86_400_000).toISOString(),
+      environment: "demo",
+      expected_db_revision: "0011",
+      current_db_revision: "0011",
+      db_revision_ok: true,
+      uptime_seconds: 3 * 86_400 + 5 * 3600,
+    },
+    database: { ok: true, latency_ms: 4, size_bytes: 78_643_200, tables_count: 27 },
+    backups: {
+      // Plus de 36 h depuis la dernière sauvegarde réussie : c'est ce qui
+      // met la démonstration en « À surveiller ».
+      last: { created_at: lastBackupAt, status: "success", size_bytes: 12_582_912 },
+      nightly_enabled: true,
+      dir_free_bytes: 42_949_672_960,
+      stale: true,
+    },
+    jobs: [
+      {
+        name: "daily_fiscal_close_guard",
+        cron: "59 23 * * *",
+        next_run_at: new Date(Date.now() + 9 * 3600_000).toISOString(),
+        last_run: { at: new Date(Date.now() - 15 * 3600_000).toISOString(), status: "ok", detail: null },
+      },
+      {
+        name: "monthly_fiscal_closure",
+        cron: "15 0 1 * *",
+        next_run_at: new Date(Date.now() + 11 * 86_400_000).toISOString(),
+        last_run: { at: new Date(Date.now() - 19 * 86_400_000).toISOString(), status: "ok", detail: null },
+      },
+      { name: "annual_fiscal_closure", cron: "30 0 1 1 *", next_run_at: null, last_run: null },
+      {
+        name: "nightly_database_backup",
+        cron: "0 3 * * *",
+        next_run_at: new Date(Date.now() + 5 * 3600_000).toISOString(),
+        last_run: {
+          at: new Date(Date.now() - 20 * 3600_000).toISOString(),
+          status: "failed",
+          detail: "Espace disque insuffisant sur le volume de sauvegarde.",
+        },
+      },
+      {
+        name: "daily_client_deletions",
+        cron: "0 4 * * *",
+        next_run_at: new Date(Date.now() + 6 * 3600_000).toISOString(),
+        last_run: { at: new Date(Date.now() - 19 * 3600_000).toISOString(), status: "ok", detail: null },
+      },
+    ],
+    integrity: monitoringIntegrity,
+    external: {
+      sumup: {
+        configured: true,
+        reader_configured: true,
+        last_ping: { ready: true, at: new Date(Date.now() - 4 * 60_000).toISOString() },
+      },
+      brevo: { configured: true },
+      openweather: { configured: true, cache_age_seconds: 420 },
+    },
+    printer: { mode: settings.hardware.printer_mode, online: true, latency_ms: 18 },
+    queues: { failed_payments_pending: failedPayments.filter((p) => p.status === "pending").length, sumup_exchange_errors_24h: 2, clients_deletion_due: 0 },
+    recent_errors: monitoringRecentErrors.slice(0, 50),
+    // Sauvegarde périmée + erreurs récentes : « À surveiller », l'état le
+    // plus instructif à montrer.
+    status: "warning",
+  };
+}
+
+function computeMonitoringIntegrity(): MonitoringIntegrity {
+  const checkedAt = nowIso();
+  monitoringIntegrity = {
+    jet: { valid: true, count: jetEvents.length, checked_at: checkedAt },
+    fiscal: { valid: true, checked: transactions.length, checked_at: checkedAt },
+    closures: { valid: true, checked: fiscalClosures.length, checked_at: checkedAt },
+  };
+  logJet("fiscal.integrity_checked", { source: "monitoring" });
+  return monitoringIntegrity;
+}
+
+/** Matériel compatible (N4) — même liste que côté serveur. */
+const hardwareCompatibility: HardwareCompatibilityItem[] = [
+  {
+    category: "Tablette de caisse",
+    model: "Tablette Android + Chrome",
+    connection: "—",
+    status: "tested",
+    notes: "Configuration de référence de la boutique.",
+  },
+  {
+    category: "Imprimante ticket",
+    model: "MUNBYN 047P (ESC/POS 80 mm)",
+    connection: "Réseau (port 9100)",
+    status: "tested",
+    notes: "Raccordement recommandé : l'impression part du serveur.",
+  },
+  {
+    category: "Imprimante ticket",
+    model: "MUNBYN 047P (ESC/POS 80 mm)",
+    connection: "USB sur la tablette",
+    status: "tested",
+    notes: "À associer une fois depuis l'onglet Matériel.",
+  },
+  {
+    category: "Tiroir-caisse",
+    model: "Safescan SD-4141",
+    connection: "Câble RJ-12 sur l'imprimante",
+    status: "tested",
+    notes: "Ouvert par l'imprimante à chaque encaissement en espèces.",
+  },
+  {
+    category: "Terminal de paiement",
+    model: "SumUp Solo",
+    connection: "Wi-Fi (compte SumUp)",
+    status: "tested",
+    notes: "Envoi direct sur le terminal si son identifiant est renseigné.",
+  },
+  {
+    category: "Tablette de caisse",
+    model: "iPad / Safari",
+    connection: "—",
+    status: "not_supported",
+    notes: "Ni impression USB, ni installation de Chrome : à ne pas prévoir.",
+  },
+  {
+    category: "Douchette",
+    model: "Douchette USB (clavier)",
+    connection: "USB",
+    status: "recommended",
+    notes: "Sans catalogue d'articles, elle n'apporte rien pour l'instant.",
+  },
+];
+
 export async function mockFetchAPI<T = unknown>(
   endpoint: string,
   options?: FetchAPIOptions,
@@ -2676,6 +3079,10 @@ export async function mockFetchAPI<T = unknown>(
   await new Promise((r) => setTimeout(r, 120));
 
   let m: RegExpMatchArray | null;
+
+  // PR12 (N5) — panne simulée : voir le bloc « supervision/matériel ».
+  const failure = demoFailureSwitch();
+  if (failure && path.startsWith(failure.prefix)) failDemoError(failure.status, method, path);
 
   // --- Caisse espèces -------------------------------------------------
   if (path === "/api/pos/drawer/current" && method === "GET") {
@@ -3539,6 +3946,28 @@ export async function mockFetchAPI<T = unknown>(
 
   // --- PR4 : comptabilité (écritures, exports bruts) ---------------------
 
+  // --- PR12 : journal comptable consultable (N1) -------------------------
+
+  if (path === "/api/admin/accounting/journal" && method === "GET") {
+    const today = new Date();
+    const defaults = {
+      from: `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`,
+      to: `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
+        new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate(),
+      ).padStart(2, "0")}`,
+    };
+    const from = query.get("from") || defaults.from;
+    const to = query.get("to") || defaults.to;
+    if (!isIsoDate(from) || !isIsoDate(to) || from > to) {
+      fail(422, "Période invalide : indiquez deux dates au format AAAA-MM-JJ, la première avant la seconde.", "invalid_date");
+    }
+    const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+    if (days > 366) {
+      fail(422, "Période trop longue : 366 jours au maximum.", "period_too_long");
+    }
+    return buildJournalResponse(from, to, (query.get("account") ?? "").trim(), (query.get("z") ?? "").trim()) as unknown as T;
+  }
+
   if (path === "/api/admin/accounting/exports" && method === "GET") {
     const year = query.get("year") ? parseInt(query.get("year")!, 10) : new Date().getFullYear();
     const month = query.get("month") ? parseInt(query.get("month")!, 10) : new Date().getMonth() + 1;
@@ -4235,6 +4664,21 @@ export async function mockFetchAPI<T = unknown>(
     return { events: page, next_before_seq: next } as unknown as T;
   }
 
+  // --- PR12 — supervision technique et matériel compatible (N2/N4) --------
+  if (path === "/api/admin/monitoring" && method === "GET") {
+    if (query.get("check") === "1") computeMonitoringIntegrity();
+    return buildMonitoringSnapshot() as unknown as T;
+  }
+
+  if (path === "/api/admin/monitoring/check" && method === "POST") {
+    computeMonitoringIntegrity();
+    return buildMonitoringSnapshot() as unknown as T;
+  }
+
+  if (path === "/api/hardware/compatibility" && method === "GET") {
+    return { items: hardwareCompatibility } as unknown as T;
+  }
+
   fail(501, `Route non simulée en mode démo : ${method} ${path}`, "mock_not_implemented");
 }
 
@@ -4787,6 +5231,7 @@ seedPr10CaisseDemo();
 seedDemoInvoice();
 seedPr10AdminDemo();
 seedPr11Cahier();
+seedPr12Journal();
 
 // Expose un reset pour d'éventuels tests / Playwright (état frais par page load
 // de toute façon, car le module vit en mémoire côté navigateur).

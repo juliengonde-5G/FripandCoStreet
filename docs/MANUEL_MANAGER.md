@@ -1,7 +1,7 @@
 # Manuel du manager — Frip & Co Street
 
-Court par choix : quatre écrans, et ce qu'il faut savoir avant de s'en
-servir. Le geste quotidien de la caisse est dans `GUIDE_VENDEUR.md`.
+Court par choix : les écrans du manager, et ce qu'il faut savoir avant de
+s'en servir. Le geste quotidien de la caisse est dans `GUIDE_VENDEUR.md`.
 
 ## Les rapports
 
@@ -28,6 +28,42 @@ jamais parce qu'une cliente revient trois jours plus tard.
 
 Un rapport est une **lecture**. Il ne modifie ni une vente, ni une clôture,
 ni la chaîne fiscale : le recalcul part à chaque fois des transactions.
+
+## Le journal comptable
+
+Administration → **Comptabilité** → carte **Journal**, tout en haut. C'est
+le cahier du comptable : chaque écriture, ligne à ligne, sur la période
+affichée.
+
+La période est le **mois courant** par défaut ; les flèches ‹ › reculent ou
+avancent d'un mois. Le champ **Compte** filtre sur le **début** d'un numéro
+de compte : `7` ne garde que les ventes et la TVA, `5` que les
+encaissements, `531` que la caisse.
+
+Chaque ligne porte sa date, la clôture Z dont elle vient, le compte et son
+libellé, le libellé de l'écriture, puis le débit ou le crédit. Le tableau
+défile **dans son cadre** : les filtres et le pied de tableau restent à
+l'écran.
+
+Le pied **Totaux** additionne les lignes affichées et affiche
+« **Équilibré** » quand débit et crédit tombent juste. « **Déséquilibré** »
+en rouge est normal **quand un filtre de compte est posé** — on ne regarde
+alors qu'une partie des écritures. Sur un mois entier et sans filtre, un
+déséquilibre n'est pas normal : il faut le signaler avant de remettre quoi
+que ce soit au comptable.
+
+Un bandeau orange peut annoncer une **clôture sans écriture enregistrée**.
+Ses lignes sont alors **recalculées** à l'affichage (elles portent la
+mention « recalculé ») au lieu d'être relues de l'écriture archivée ; le
+lien renvoie à la carte **Écritures comptables**, où l'on vérifie la
+clôture en question.
+
+**CSV du mois** télécharge exactement le même fichier que « Télécharger le
+CSV Pennylane » plus bas dans l'écran — c'est un raccourci, pas un second
+export.
+
+Le journal est une **lecture** : le consulter, le filtrer ou le
+télécharger ne modifie ni une vente, ni une clôture, ni la chaîne fiscale.
 
 ## Le cahier du jour et les jours d'ouverture
 
@@ -93,3 +129,75 @@ Chaque export est tracé dans le journal des événements avec le **nombre**
 de lignes, jamais une adresse. Une personne qui se désabonne sort de
 l'export suivant ; c'est dans l'outil d'e-mailing qu'il faut aussi la
 retirer, l'export ne défait pas un envoi déjà programmé.
+
+## La supervision
+
+Administration → **Supervision**, après Sauvegardes. Un seul écran pour
+répondre à « est-ce que tout va bien ? » sans ouvrir le serveur.
+
+En haut, un **bandeau d'état** : vert tout va bien, orange quelque chose
+est à surveiller, rouge quelque chose est cassé. Dessous, une carte par
+sujet : **Application** (version installée, révision de base attendue et
+réelle, temps depuis le démarrage), **Base de données** (temps de réponse,
+taille), **Sauvegardes** (la dernière et son âge — au-delà de trente-six
+heures sans sauvegarde réussie, l'état passe à l'orange), **Tâches
+planifiées** (prochain et dernier passage de chacune), **Intégrité** (les
+chaînages du journal des événements, des ventes et des clôtures),
+**Services externes** (terminal carte, e-mail, météo : seulement
+*configuré* ou *absent*, jamais une clé), **Imprimante**, **Files
+d'attente** (paiements carte en échec, échanges en erreur des dernières
+vingt-quatre heures, suppressions de fiches arrivées à échéance) et
+**Dernières erreurs**.
+
+Le bouton **Vérifier maintenant** de la carte Intégrité relance les trois
+contrôles de chaînage sur-le-champ ; sans lui, l'écran montre le dernier
+résultat connu (recalculé au plus toutes les dix minutes) et peut
+afficher « jamais vérifié » tant qu'aucun contrôle n'a tourné. La
+vérification est inscrite au journal des événements.
+
+**Dernières erreurs** liste les dernières erreurs du serveur avec leur
+**référence** de requête, copiable d'un bouton. C'est la même référence que
+celle affichée en caisse sous un message d'erreur : la vendeuse la note,
+on la retrouve ici, et le prestataire remonte directement à la bonne ligne
+de journal. Ni le contenu de la requête, ni une donnée de cliente n'y
+figurent.
+
+L'écran se rafraîchit tout seul chaque minute tant qu'il est affiché. En
+rouge — base injoignable, révision de base inattendue, chaînage invalide —
+on prévient le prestataire **avant** de continuer à encaisser. Aucun
+réglage ne se modifie depuis cet écran, et aucun secret n'y apparaît.
+
+## Matériel compatible
+
+Administration → **Matériel** → carte **Matériel compatible**. Le tableau
+répond à la question qu'on se pose avant d'acheter : « est-ce que ça
+marchera ? ». Trois statuts : **testé** (branché et utilisé pour de vrai),
+**conseillé** (compatible, mais dont on peut se passer) et **non supporté**
+(ne marche pas, avec la raison — autant l'apprendre ici que sur le parking).
+
+| Matériel | Branchement | Statut |
+|---|---|---|
+| Tablette Android + Chrome | Wi-Fi de la boutique | testé |
+| iPad / Safari | Wi-Fi de la boutique | **non supporté** |
+| Imprimante ticket MUNBYN 047P (ESC/POS 80 mm) | réseau, TCP 9100 | testé |
+| Imprimante ticket MUNBYN 047P (ESC/POS 80 mm) | USB-OTG sur la tablette | testé |
+| Tiroir-caisse Safescan SD-4141 | RJ-12 sur l'imprimante | testé |
+| Terminal SumUp Solo | Wi-Fi, compte SumUp | testé |
+| Douchette code-barres USB (mode clavier) | USB sur la tablette | conseillé |
+
+Trois choses à retenir :
+
+- **L'iPad ne convient pas.** Safari ne sait pas parler à une imprimante
+  branchée en USB, et Chrome ne s'installe pas sur iPad. Un iPad ne
+  fonctionne qu'avec une imprimante en réseau, et sans l'application
+  installée sur l'écran d'accueil.
+- **Le tiroir-caisse suppose une imprimante.** Il ne se branche pas sur la
+  tablette : c'est l'imprimante qui lui envoie l'impulsion d'ouverture. Pas
+  d'imprimante configurée, pas de tiroir qui s'ouvre tout seul.
+- **La douchette n'est pas nécessaire.** La caisse est en saisie libre, sans
+  catalogue d'articles : il n'y a rien à scanner.
+
+Cette liste vit dans le code et se met à jour avec les versions ; elle dit
+ce qui a été essayé, pas ce qui est réglé. L'état du matériel réellement
+installé (imprimante joignable, terminal en ligne) est au-dessus, dans la
+même page.
