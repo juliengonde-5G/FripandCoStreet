@@ -185,6 +185,11 @@ async def run_nightly_database_backup() -> None:
     `failed` avant de lever `BackupError` : ce wrapper journalise en plus
     au JET (`system.job_failed`) et alerte `backup.alert_email` (repli
     `shop.email` via `_alert_job_failure`) — jamais avale en silence (S-5).
+
+    Ce creneau porte aussi la purge du journal des echanges SumUp (PR9/K1),
+    qui tourne INDEPENDAMMENT de la sauvegarde : desactiver la sauvegarde
+    nocturne ne doit pas geler la retention, sinon `sumup_exchanges` grossit
+    indefiniment sans que personne ne s'en apercoive.
     """
     try:
         from app.services import database_backup
@@ -194,17 +199,13 @@ async def run_nightly_database_backup() -> None:
             backup_settings = await SettingsService(db).get("backup")
             if not backup_settings.get("nightly_enabled", True):
                 logger.info("Sauvegarde nocturne désactivée (backup.nightly_enabled=false)")
-                return
-            backup = await database_backup.run_backup(db, trigger="nightly", user_id=None)
-            logger.info(
-                "Sauvegarde nocturne : statut=%s fichier=%s", backup.status.value, backup.filename
-            )
-        # PR9/K1 — purge du journal des echanges SumUp, APRES la sauvegarde :
-        # ainsi le dump de la nuit contient encore les echanges qu'on va
-        # supprimer, et une purge trop agressive reste rattrapable. Session
-        # separee et echec avale : ce menage ne doit jamais faire echouer la
-        # sauvegarde, qui est la seule chose critique de ce job.
-        await _purge_sumup_exchanges()
+            else:
+                backup = await database_backup.run_backup(db, trigger="nightly", user_id=None)
+                logger.info(
+                    "Sauvegarde nocturne : statut=%s fichier=%s",
+                    backup.status.value,
+                    backup.filename,
+                )
     except Exception as exc:  # noqa: BLE001
         alert_email = ""
         try:
@@ -218,6 +219,15 @@ async def run_nightly_database_backup() -> None:
         await _alert_job_failure(
             JOB_NIGHTLY_DATABASE_BACKUP, exc, email_override=alert_email or None
         )
+    finally:
+        # PR9/K1 — purge du journal des echanges SumUp. Dans un `finally`
+        # pour qu'elle tourne dans les TROIS cas : sauvegarde reussie (elle
+        # passe apres, donc le dump de la nuit contient encore ce qu'on
+        # supprime et une purge trop agressive reste rattrapable),
+        # sauvegarde desactivee, sauvegarde en echec. Session separee et
+        # echec avale : ce menage ne doit jamais faire echouer la
+        # sauvegarde, qui est la seule chose critique de ce job.
+        await _purge_sumup_exchanges()
 
 
 async def _purge_sumup_exchanges() -> None:
@@ -267,42 +277,99 @@ async def run_daily_client_deletions() -> None:
     e-mail best-effort via `_alert_job_failure`.
     """
     try:
-        from sqlalchemy import select
-
-        from app.models.client import Client
-        from app.services.client_service import ClientService
-
-        async with async_session() as db:
-            now = datetime.now(timezone.utc)
-            due = (
-                await db.execute(
-                    select(Client).where(
-                        Client.deletion_scheduled_for.is_not(None),
-                        Client.deletion_scheduled_for <= now,
-                        Client.anonymized_at.is_(None),
-                    )
-                )
-            ).scalars().all()
-            service = ClientService(db)
-            for fiche in due:
-                # Capture AVANT l'anonymisation : celle-ci remplace
-                # l'adresse par un `@anonyme.invalid`, ce n'est donc plus
-                # celle a retirer de la liste Brevo dediee.
-                original_email = fiche.email
-                await service.anonymize(
-                    client=fiche, user_id=None, reason="deletion_request_expired"
-                )
-                if original_email:
-                    # Best-effort, et JAMAIS `DELETE /v3/contacts` ni la
-                    # blocklist globale : le compte Brevo est partage (E1).
-                    await _remove_from_brevo_list(original_email)
-            await db.commit()
-            if due:
-                logger.info(
-                    "Suppressions RGPD à échéance : %d fiche(s) anonymisée(s)", len(due)
-                )
+        anonymized = 0
+        for client_id in await _due_deletion_ids():
+            if await _process_due_deletion(client_id):
+                anonymized += 1
+        if anonymized:
+            logger.info(
+                "Suppressions RGPD à échéance : %d fiche(s) anonymisée(s)", anonymized
+            )
     except Exception as exc:  # noqa: BLE001 — cf. docstring
         await _alert_job_failure(JOB_DAILY_CLIENT_DELETIONS, exc)
+
+
+async def _due_deletion_ids() -> list:
+    """Identifiants des fiches dont la date d'effet est passee — LECTURE
+    SEULE, sans verrou, dans sa propre transaction.
+
+    On ne rapporte que des identifiants : les fiches elles-memes sont
+    relues une par une, verrouillees, au moment de les traiter. Entre
+    cette liste et ce traitement, un manager peut tres bien annuler une
+    demande depuis le back-office.
+    """
+    from sqlalchemy import select
+
+    from app.models.client import Client
+
+    async with async_session() as db:
+        now = datetime.now(timezone.utc)
+        rows = (
+            await db.execute(
+                select(Client.id).where(
+                    Client.deletion_scheduled_for.is_not(None),
+                    Client.deletion_scheduled_for <= now,
+                    Client.anonymized_at.is_(None),
+                )
+            )
+        ).scalars().all()
+    return list(rows)
+
+
+async def _process_due_deletion(client_id) -> bool:
+    """Anonymise UNE fiche echue, dans SA PROPRE transaction. Renvoie vrai
+    si la fiche a bien ete videe.
+
+    La fiche est relue `FOR UPDATE` et la condition d'echeance est
+    reverifiee juste avant d'effacer : sans cela, une annulation posee
+    entre la liste et le traitement serait ignoree — le manager aurait vu
+    « suppression annulée » (200) et la fiche aurait quand meme ete videe
+    la seconde d'apres. Le verrou serialise ce chemin avec
+    `request_deletion`/`cancel_deletion`, qui prennent le meme.
+
+    Une transaction par fiche, et non une pour toute la fournee : une
+    fiche qui echoue ne doit pas annuler l'effacement des autres (une
+    suppression RGPD deja faite n'a pas a etre refaite demain).
+    """
+    from sqlalchemy import select
+
+    from app.models.client import Client
+    from app.services.client_service import ClientService
+
+    async with async_session() as db:
+        fiche = (
+            await db.execute(
+                select(Client).where(Client.id == client_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if fiche is None:
+            return False
+        now = datetime.now(timezone.utc)
+        if (
+            fiche.deletion_scheduled_for is None
+            or fiche.deletion_scheduled_for > now
+            or fiche.anonymized_at is not None
+        ):
+            logger.info(
+                "Suppression RGPD annulée entre-temps (client_id=%s) : fiche conservée",
+                client_id,
+            )
+            return False
+        # Capture AVANT l'anonymisation : celle-ci remplace l'adresse par
+        # un `@anonyme.invalid`, ce n'est donc plus celle a retirer de la
+        # liste Brevo dediee.
+        original_email = fiche.email
+        await ClientService(db).anonymize(
+            client=fiche, user_id=None, reason="deletion_request_expired"
+        )
+        await db.commit()
+
+    if original_email:
+        # Best-effort, APRES le commit (un appel reseau ne doit pas tenir
+        # un verrou de ligne ouvert), et JAMAIS `DELETE /v3/contacts` ni la
+        # blocklist globale : le compte Brevo est partage (E1).
+        await _remove_from_brevo_list(original_email)
+    return True
 
 
 async def _remove_from_brevo_list(email: str) -> None:

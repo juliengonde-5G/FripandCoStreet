@@ -1261,6 +1261,22 @@ class ClientService:
         client.deletion_scheduled_for = None
         client.deletion_requested_by_user_id = None
 
+    async def _lock_deletion_row(self, client: Client) -> None:
+        """Verrouille la ligne `clients` (SELECT … FOR UPDATE) puis relit
+        la fiche.
+
+        Les deux gestes du manager (programmer / annuler) et le cron de
+        04:00 touchent les MEMES trois colonnes. Sans verrou, une
+        annulation posee pendant que le cron travaille peut repondre 200
+        au manager et voir la fiche videe la seconde d'apres. Le verrou
+        les serialise, et la relecture garantit qu'on decide sur l'etat
+        reellement commite, pas sur l'objet charge avant l'attente.
+        """
+        await self.db.execute(
+            select(Client.id).where(Client.id == client.id).with_for_update()
+        )
+        await self.db.refresh(client)
+
     async def request_deletion(
         self, *, client: Client, user_id: uuid.UUID | None
     ) -> Client:
@@ -1279,6 +1295,7 @@ class ClientService:
         anonymisee, ou absorbee par une fusion : il n'y a plus rien a
         supprimer ici).
         """
+        await self._lock_deletion_row(client)
         if client.anonymized_at is not None or client.merged_into_client_id is not None:
             raise PosServiceError(
                 "Cette fiche n'est plus active : rien à supprimer.",
@@ -1325,7 +1342,14 @@ class ClientService:
     ) -> Client:
         """Annule une suppression programmee (PR10/L5) — 409 `not_requested`
         s'il n'y en avait pas. C'est le geste qui donne son sens au differe :
-        tant que la date d'effet n'est pas atteinte, tout est reversible."""
+        tant que la date d'effet n'est pas atteinte, tout est reversible.
+
+        Verrouille la ligne avant de decider : si le cron de 04:00 est en
+        train de solder cette fiche, on attend son issue plutot que de
+        repondre « annulée » a un manager dont la fiche vient d'etre
+        videe (la relecture voit alors `anonymized_at`, et il n'y a plus
+        de demande a annuler -> 409)."""
+        await self._lock_deletion_row(client)
         if client.deletion_requested_at is None:
             raise PosServiceError(
                 "Aucune suppression n'est programmée pour cette fiche.",
@@ -1413,6 +1437,20 @@ class ClientService:
     # Fusion de deux fiches en double (PR10/L3)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_merge_allowed(winner: Client, source: Client) -> None:
+        """Conditions d'une fusion (L3). Extrait en methode parce qu'il est
+        joue DEUX fois : une premiere pour refuser au plus tot, sans prendre
+        de verrou, et une seconde sur les valeurs relues sous verrou — c'est
+        cette seconde qui fait foi."""
+        if winner.id == source.id:
+            raise MergeSameClient()
+        for candidate in (winner, source):
+            if candidate.anonymized_at is not None or candidate.merged_into_client_id is not None:
+                raise MergeClientInactive()
+        if winner.deletion_requested_at is not None or winner.deletion_scheduled_for is not None:
+            raise MergeDeletionPending()
+
     async def merge(
         self, *, winner: Client, source: Client, user_id: uuid.UUID | None
     ) -> dict:
@@ -1430,13 +1468,7 @@ class ClientService:
         un renvoi vers la fiche conservee, pour que l'ancienne URL et les
         anciens exports continuent de mener quelque part.
         """
-        if winner.id == source.id:
-            raise MergeSameClient()
-        for candidate in (winner, source):
-            if candidate.anonymized_at is not None or candidate.merged_into_client_id is not None:
-                raise MergeClientInactive()
-        if winner.deletion_requested_at is not None or winner.deletion_scheduled_for is not None:
-            raise MergeDeletionPending()
+        self._check_merge_allowed(winner, source)
 
         # Meme verrou que `create_or_get`, pris sur les DEUX moyens de
         # contact et dans un ordre deterministe (tri) : une vente en caisse
@@ -1450,6 +1482,44 @@ class ClientService:
             }
         ):
             await self._acquire_client_write_lock(key)
+
+        # RELECTURE SOUS VERROU, puis memes controles sur les valeurs
+        # fraiches (revue de code).
+        #
+        # Les deux fiches ont ete chargees par la route AVANT le verrou :
+        # entre ce chargement et ici, une autre requete a pu fusionner la
+        # meme source vers une AUTRE conservee et commiter. Poursuivre avec
+        # les objets en memoire, valides sur un etat perime, ecraserait son
+        # `merged_into_client_id` et recopierait ses coordonnees sur la
+        # mauvaise fiche, pendant que ses ventes resteraient rattachees a la
+        # premiere. Les controles ne valent donc que rejoues ici.
+        #
+        # `FOR UPDATE` verrouille les deux lignes par id croissant (ordre
+        # deterministe, donc pas d'interblocage entre deux fusions croisees)
+        # et couvre les ecritures qui, elles, ne passent pas par le verrou
+        # consultatif — une anonymisation RGPD concurrente, par exemple.
+        # `populate_existing` force la relecture des colonnes : sans lui,
+        # SQLAlchemy rendrait les instances deja en memoire, c'est-a-dire
+        # exactement les valeurs perimees qu'on cherche a ecarter.
+        reloaded = {
+            row.id: row
+            for row in (
+                await self.db.execute(
+                    select(Client)
+                    .where(Client.id.in_([winner.id, source.id]))
+                    .order_by(Client.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalars().all()
+        }
+        winner = reloaded.get(winner.id)
+        source = reloaded.get(source.id)
+        if winner is None or source is None:
+            # Une ligne `clients` n'est jamais supprimee (RGPD =
+            # anonymisation) : si elle a disparu, on ne fusionne rien.
+            raise MergeClientInactive()
+        self._check_merge_allowed(winner, source)
 
         # L'e-mail de la source doit etre capture AVANT qu'elle ne soit
         # videe : c'est lui qu'il faudra retirer de la liste Brevo.

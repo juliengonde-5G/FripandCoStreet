@@ -544,6 +544,43 @@ async def retry_cb_payment(
             status_code=409,
         )
 
+    # PR9/K3 — anti double débit : quand le premier envoi s'est perdu sans
+    # réponse (coupure, délai dépassé), on ne sait pas si le terminal a
+    # encaissé. On le demande AVANT de représenter le montant ; si c'est
+    # déjà payé, on ne repousse pas.
+    verdict, _poll = await failed_payment_service.reconcile_before_push(
+        db,
+        svc,
+        attempt,
+        error_type=await failed_payment_service.queued_error_type(db, attempt.client_uuid),
+    )
+    if verdict == failed_payment_service.RECONCILE_PAID:
+        await _log_exchanges(db, svc, request)
+        await failed_payment_service.resolve_if_queued(
+            db,
+            attempt.client_uuid,
+            user_id=current_user.id,
+            username=current_user.username,
+            ip=_client_ip(request),
+            request_id=_request_id(request),
+        )
+        await JournalService(db).record(
+            EVENT_CB_PAID,
+            user_id=current_user.id,
+            username=current_user.username,
+            ip=_client_ip(request),
+            request_id=_request_id(request),
+            payload={"checkout_id": attempt.checkout_id, "amount": str(attempt.amount)},
+        )
+        return {
+            "checkout_id": attempt.checkout_id,
+            "status": "paid",
+            "reconciled": True,
+            "transaction_code": attempt.sumup_transaction_code,
+            "card_brand": attempt.sumup_card_brand,
+            "last4": attempt.sumup_card_last4,
+        }
+
     new_count = attempt.attempt_count + 1
     new_client_transaction_id = f"{attempt.client_uuid}:r{new_count}"
     description = await _cb_description(db)
@@ -655,8 +692,14 @@ async def retry_failed_payment(
     # comprendre pourquoi le terminal restait muet.
     await _log_exchanges(db, svc, request)
 
+    if outcome.reconciled_paid:
+        # Même transition, même événement que le suivi de la caisse : le
+        # paiement est constaté une fois et une seule.
+        event_type = EVENT_CB_PAID
+    else:
+        event_type = EVENT_CB_FAILED if outcome.failed else EVENT_CB_INITIATED
     await JournalService(db).record(
-        EVENT_CB_FAILED if outcome.failed else EVENT_CB_INITIATED,
+        event_type,
         user_id=current_user.id,
         username=current_user.username,
         ip=_client_ip(request),
@@ -673,6 +716,23 @@ async def retry_failed_payment(
     # Le checkout à repoller est celui du nouvel essai, pas celui de l'essai
     # d'origine auquel la ligne en file reste rattachée.
     serialized["checkout_id"] = new_checkout_id
+
+    if outcome.reconciled_paid:
+        # Rien n'a été repoussé : le terminal avait bel et bien encaissé le
+        # premier essai, dont on n'avait jamais lu la réponse. La caisse
+        # reçoit `status: "paid"` sur le checkout D'ORIGINE et enchaîne sur
+        # la vente — repousser aurait débité la cliente une seconde fois.
+        return {
+            "checkout_id": new_checkout_id,
+            "status": "paid",
+            "reconciled": True,
+            "failed_payment_id": str(failed_payment.id),
+            "retry_count": serialized["retry_count"],
+            "transaction_code": attempt.sumup_transaction_code,
+            "card_brand": attempt.sumup_card_brand,
+            "last4": attempt.sumup_card_last4,
+            "failed_payment": serialized,
+        }
 
     if outcome.failed:
         # Le nouvel essai, le compteur de réessais et l'éventuel passage en

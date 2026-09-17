@@ -347,6 +347,75 @@ async def test_cron_anonymizes_only_the_due_clients(client, auth_headers):
     assert intacte.email == "tranquille@example.com"
 
 
+async def test_cron_skips_a_request_cancelled_after_the_listing(
+    client, auth_headers, monkeypatch
+):
+    """Course entre le cron et le back-office : le manager annule la
+    demande APRES que le cron a dresse sa liste.
+
+    Le cron relit chaque fiche `FOR UPDATE` et reverifie l'echeance juste
+    avant d'effacer : l'annulation, qui a repondu 200 au manager, doit
+    tenir. Une fiche encore echue dans la meme fournee, elle, part bien.
+    """
+    from app import jobs
+
+    survivante = await _create_client(client, auth_headers, email="ravisee-in-extremis@example.com")
+    condamnee = await _create_client(client, auth_headers, email="bien-echue@example.com")
+    for fiche in (survivante, condamnee):
+        r = await client.post(
+            f"/api/admin/clients/{fiche['id']}/deletion-request", headers=auth_headers
+        )
+        assert r.status_code == 200, r.text
+    async with async_session() as db:
+        for fiche in (survivante, condamnee):
+            row = (
+                await db.execute(
+                    select(Client).where(Client.id == uuid.UUID(fiche["id"]))
+                )
+            ).scalar_one()
+            row.deletion_scheduled_for = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await db.commit()
+
+    lister = jobs._due_deletion_ids
+
+    async def _list_then_cancel():
+        ids = await lister()
+        # Le manager annule pendant que le cron tient sa liste. Aucune
+        # contention de verrou ici : le cron n'a encore rien verrouille.
+        async with async_session() as db:
+            row = (
+                await db.execute(
+                    select(Client).where(Client.id == uuid.UUID(survivante["id"]))
+                )
+            ).scalar_one()
+            await ClientService(db).cancel_deletion(client=row, user_id=None)
+            await db.commit()
+        return ids
+
+    monkeypatch.setattr(jobs, "_due_deletion_ids", _list_then_cancel)
+    await jobs.run_daily_client_deletions()
+
+    gardee = await _row(survivante["id"])
+    assert gardee.anonymized_at is None
+    assert gardee.email == "ravisee-in-extremis@example.com"
+    assert gardee.deletion_scheduled_for is None
+
+    videe = await _row(condamnee["id"])
+    assert videe.anonymized_at is not None
+    assert videe.email.endswith("@anonyme.invalid")
+
+    # Le cron n'a pas echoue pour autant : une annulation n'est pas une erreur.
+    async with async_session() as db:
+        failures = (
+            await db.execute(
+                select(JournalEvent).where(
+                    JournalEvent.event_type == "system.job_failed"
+                )
+            )
+        ).scalars().all()
+    assert failures == []
+
+
 async def test_cron_is_idempotent_on_an_already_anonymized_client(client, auth_headers):
     fiche = await _create_client(client, auth_headers, email="deja-videe@example.com")
     await client.post(

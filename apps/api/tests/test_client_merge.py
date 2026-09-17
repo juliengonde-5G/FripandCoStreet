@@ -28,7 +28,7 @@ from app.models.communication import (
 from app.models.jet import JournalEvent
 from app.models.pos import Transaction
 from app.services import brevo_contacts
-from app.services.client_service import ClientService, name_key
+from app.services.client_service import ClientService, MergeClientInactive, name_key
 from app.services.fiscal import FiscalService
 from app.version import CONSENT_POLICY_VERSION
 
@@ -684,3 +684,115 @@ async def test_consent_content_remains_immutable_despite_the_exemption():
             await db.execute(
                 text("DELETE FROM consents WHERE id = :id"), {"id": consent_id}
             )
+
+
+# ---------------------------------------------------------------------------
+# L3 — course entre deux fusions de la MEME source
+# ---------------------------------------------------------------------------
+
+
+async def test_merge_rechecks_the_two_fiches_under_the_lock(monkeypatch):
+    """Deux fusions concurrentes de la meme source vers deux conservees
+    differentes (revue de code).
+
+    La route charge les deux fiches AVANT le verrou : la seconde requete
+    attend, puis reprend avec une source deja absorbee. Si les controles
+    n'etaient pas rejoues sur les valeurs relues sous verrou, elle
+    ecraserait le renvoi pose par la premiere et recopierait les
+    coordonnees sur la mauvaise fiche, pendant que les ventes resteraient
+    rattachees a la premiere conservee.
+
+    La course est jouee a coup sur : la premiere fusion est executee, dans
+    une AUTRE session, au moment ou la seconde s'apprete a prendre le
+    verrou — c'est-a-dire apres qu'elle a valide son etat perime.
+    """
+    winner_a = await _new_client(phone="+33600000011")
+    winner_b = await _new_client(phone="+33600000022")
+    source_id = await _new_client(email="disputee@example.com", last_name="Ambre")
+
+    original_lock = ClientService._acquire_client_write_lock
+    state = {"raced": False}
+
+    async def lock_then_race(self, contact_key):
+        # Une seule fois, et avant de prendre le verrou : la premiere
+        # fusion passe entierement et commite pendant que la seconde est
+        # encore sur ses valeurs d'origine.
+        if not state["raced"]:
+            state["raced"] = True
+            async with async_session() as other:
+                service = ClientService(other)
+                await service.merge(
+                    winner=(
+                        await other.execute(select(Client).where(Client.id == winner_a))
+                    ).scalar_one(),
+                    source=(
+                        await other.execute(select(Client).where(Client.id == source_id))
+                    ).scalar_one(),
+                    user_id=None,
+                )
+                await other.commit()
+        return await original_lock(self, contact_key)
+
+    monkeypatch.setattr(ClientService, "_acquire_client_write_lock", lock_then_race)
+
+    async with async_session() as db:
+        service = ClientService(db)
+        winner = (
+            await db.execute(select(Client).where(Client.id == winner_b))
+        ).scalar_one()
+        source = (
+            await db.execute(select(Client).where(Client.id == source_id))
+        ).scalar_one()
+        # Etat lu avant la course : la source parait encore fusionnable.
+        assert source.merged_into_client_id is None
+
+        with pytest.raises(MergeClientInactive):
+            await service.merge(winner=winner, source=source, user_id=None)
+        await db.rollback()
+
+    # La premiere fusion fait foi, la seconde n'a rien ecrit.
+    assert (await _get(source_id)).merged_into_client_id == winner_a
+    loser = await _get(winner_b)
+    assert loser.email is None
+    assert loser.last_name is None
+    assert loser.merged_at is None
+
+
+async def test_merge_sees_an_anonymization_committed_just_before_the_lock(monkeypatch):
+    """Meme relecture, autre concurrent : une anonymisation RGPD ne passe
+    pas par le verrou consultatif — d'ou le `FOR UPDATE` sur les deux
+    lignes et le controle rejoue."""
+    winner_id = await _new_client(email="survivante@example.com")
+    source_id = await _new_client(email="effacee-entre-temps@example.com")
+
+    original_lock = ClientService._acquire_client_write_lock
+    state = {"raced": False}
+
+    async def anonymize_then_lock(self, contact_key):
+        if not state["raced"]:
+            state["raced"] = True
+            async with async_session() as other:
+                row = (
+                    await other.execute(select(Client).where(Client.id == source_id))
+                ).scalar_one()
+                await ClientService(other).anonymize(
+                    client=row, user_id=None, reason="Demande RGPD"
+                )
+                await other.commit()
+        return await original_lock(self, contact_key)
+
+    monkeypatch.setattr(ClientService, "_acquire_client_write_lock", anonymize_then_lock)
+
+    async with async_session() as db:
+        service = ClientService(db)
+        winner = (
+            await db.execute(select(Client).where(Client.id == winner_id))
+        ).scalar_one()
+        source = (
+            await db.execute(select(Client).where(Client.id == source_id))
+        ).scalar_one()
+        with pytest.raises(MergeClientInactive):
+            await service.merge(winner=winner, source=source, user_id=None)
+        await db.rollback()
+
+    assert (await _get(source_id)).merged_into_client_id is None
