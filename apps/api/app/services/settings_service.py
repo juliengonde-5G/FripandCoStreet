@@ -101,7 +101,31 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
     # table grossit sans servir a personne. Aucun impact fiscal — table
     # d'exploitation, aucune vente n'y nait.
     "payments": {"exchange_retention_days": 90},
+    # PR10 (L5, docs/ARCHITECTURE_PR10.md) — fenetre de reflexion avant
+    # l'effacement d'une fiche cliente. Une suppression RGPD n'est plus
+    # immediate : la demande est enregistree, la cliente en est informee par
+    # e-mail, et un cron anonymise a echeance. Le delai est reglable parce
+    # que la boutique doit pouvoir le raccourcir si la cliente insiste, ou
+    # l'allonger le temps d'un litige — bornes 1-90 jours : en dessous d'un
+    # jour la demande ne serait plus annulable (c'est tout l'interet du
+    # differe), au-dela de trois mois on ne « differe » plus, on enterre.
+    "rgpd": {"deletion_delay_days": 30},
 }
+
+# Bornes du delai de suppression RGPD (L5). Le clamp vit ici, a cote du
+# defaut : le cron et le service doivent tourner meme si la valeur a ete
+# ecrite a la main dans le JSONB avec une valeur aberrante.
+DELETION_DELAY_MIN_DAYS = 1
+DELETION_DELAY_MAX_DAYS = 90
+DELETION_DELAY_DEFAULT_DAYS = 30
+
+
+def clamp_deletion_delay_days(value) -> int:
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return DELETION_DELAY_DEFAULT_DAYS
+    return max(DELETION_DELAY_MIN_DAYS, min(days, DELETION_DELAY_MAX_DAYS))
 
 
 class SettingsService:
@@ -145,6 +169,11 @@ class SettingsService:
 
         payments = await self.get("payments")
         return clamp_retention_days(payments.get("exchange_retention_days"))
+
+    async def get_deletion_delay_days(self) -> int:
+        """Reglage `rgpd.deletion_delay_days` (PR10/L5), borne 1-90 jours."""
+        rgpd = await self.get("rgpd")
+        return clamp_deletion_delay_days(rgpd.get("deletion_delay_days"))
 
     async def set(
         self,

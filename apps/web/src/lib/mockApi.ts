@@ -601,6 +601,9 @@ let settings: {
   hardware: HardwareSettings;
   accounting: AccountingSettings;
   targets: TargetsSettings;
+  // PR10 (L5) — délai, en jours, entre la demande de suppression RGPD et
+  // son effet. Réglable de 1 à 90 jours côté serveur.
+  rgpd: { deletion_delay_days: number };
 } = {
   // PR8 (J2) — identification facultative par défaut, comme le contrat :
   // la caisse d'une boutique qui tourne seule ne doit pas se bloquer du
@@ -655,6 +658,7 @@ let settings: {
   // départ : le tableau de bord doit pouvoir être vu dans son état « aucun
   // objectif défini » sans manipulation préalable.
   targets: { daily: "0.00", monthly: {} },
+  rgpd: { deletion_delay_days: 30 },
 };
 
 function reset(): void {
@@ -683,7 +687,9 @@ function reset(): void {
   pinAttempts.clear();
   seedDemoSales();
   seedDemoClients();
+  seedPr10CaisseDemo();
   seedDemoInvoice();
+  seedPr10AdminDemo();
   // `backupConfig` n'est pas remis à zéro, comme `settings` — un réglage
   // édité par la personne reste après un reset (état applicatif, pas une
   // donnée transactionnelle du jeu de démo).
@@ -957,6 +963,13 @@ function clientFullPayload(client: Client): ClientFull {
           transaction_number: t.transaction_number,
           created_at: t.created_at,
           total_ttc: t.total_ttc,
+          // PR10 (L4) : les articles du ticket et la mention « annulé ».
+          items: t.items.slice(0, 5).map((item) => ({
+            label: item.label,
+            quantity: item.quantity,
+            unit_price: money(item.unit_price),
+          })),
+          refunded: cancelledToRefund.has(t.id),
         }),
       ),
   };
@@ -1526,6 +1539,373 @@ function seedDemoClients(): void {
     tx.client = clientRefOf(client);
     tx.receipt_text = buildReceiptText(tx);
   });
+}
+
+// ---------------------------------------------------------------------------
+// PR10 — caisse : doublons de fiches et historique d'achats
+// (docs/ARCHITECTURE_PR10.md §1, L2 / L4 / L7)
+//
+// Ce bloc ne simule que ce que la CAISSE consomme : les candidats au
+// doublon proposés pendant la saisie d'une nouvelle fiche, et l'historique
+// d'achats d'une cliente. La fusion et la suppression différée vivent dans
+// le bloc « PR10 — administration ».
+// ---------------------------------------------------------------------------
+
+/** Deux fiches en double posées exprès sur le jeu de démo, pour que
+ * l'encart « Une fiche existe peut-être déjà » se déclenche sans
+ * préparation : une homonyme de Julie Vasseur (même nom, autre téléphone)
+ * et une fiche qui partage le téléphone de Sophie Lemoine. Un ticket
+ * annulé est par ailleurs rattaché à Julie Vasseur : son historique porte
+ * la mention « annulé » et un total qui l'exclut. */
+function seedPr10CaisseDemo(): void {
+  const olderIso = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const doubles: Client[] = [
+    {
+      id: uuid(),
+      email: null,
+      phone: "+33781920304",
+      first_name: "Julie",
+      last_name: "Vasseur",
+      newsletter_optin: false,
+      created_at: olderIso(12),
+      anonymized_at: null,
+    },
+    {
+      id: uuid(),
+      email: "sofia.lemoine@exemple.fr",
+      phone: "+33699887766",
+      first_name: "Sofia",
+      last_name: "Lemoine",
+      newsletter_optin: false,
+      created_at: olderIso(9),
+      anonymized_at: null,
+    },
+  ];
+  doubles.forEach((client) => clients.push(client));
+
+  const julie = clients.find(
+    (c) => c.first_name === "Julie" && c.last_name === "Vasseur" && c.email === "julie.vasseur@exemple.fr",
+  );
+  if (!julie) return;
+  // Les trois ventes récentes encore libres reviennent à Julie : son
+  // historique montre plusieurs tickets datés, avec leurs articles.
+  const recent = transactions.filter((t) => t.transaction_type === "sale" && !t.client).slice(0, 3);
+  recent.forEach((tx) => {
+    tx.client = clientRefOf(julie);
+    tx.receipt_text = buildReceiptText(tx);
+  });
+
+  // Et l'un d'eux est annulé, pour que la mention « Annulé » et le total
+  // qui l'exclut soient visibles sans manipulation. L'annulation du jeu de
+  // démo (PR6) tombe un jour fermé certaines semaines : on ne compte pas
+  // dessus, on en pose une ici.
+  const victim = [...recent].reverse().find((tx) => !cancelledToRefund.has(tx.id));
+  if (!victim) return;
+  const refund = buildTransaction(
+    "refund",
+    victim.items.map((item) => ({ label: item.label, unit_price: item.unit_price, quantity: item.quantity })),
+    null,
+    victim.payments.map((payment) => ({ method: payment.method, amount: payment.amount })),
+    {
+      original_transaction_id: victim.id,
+      refund_reason: "Taille qui ne convient pas",
+      original_transaction_number: victim.transaction_number,
+    },
+  );
+  const refundedAt = new Date(victim.created_at);
+  refundedAt.setHours(refundedAt.getHours() + 2);
+  refund.created_at = refundedAt.toISOString();
+  refund.receipt_text = buildReceiptText(refund, victim.transaction_number);
+  transactions.unshift(refund);
+  cancelledToRefund.set(victim.id, refund.id);
+}
+
+/** `name_key` du contrat (L2) : minuscules, accents retirés, espaces et
+ * tirets réduits. `null` quand le nom de famille est vide — un prénom
+ * seul ne fait jamais un doublon. */
+function nameKeyMock(firstName: string | null | undefined, lastName: string | null | undefined): string | null {
+  const squash = (value: string) =>
+    value
+      .normalize("NFKD")
+      .replace(/[̀-ͯ]/g, "")
+      .toLowerCase()
+      .replace(/[\s-]+/g, " ")
+      .trim();
+  const last = squash(lastName ?? "");
+  if (!last) return null;
+  return `${squash(firstName ?? "")} ${last}`.trim();
+}
+
+/** Une fiche encore utilisable : ni anonymisée, ni absorbée par une
+ * fusion (L2). Le champ de fusion est lu de façon souple — il est
+ * modélisé dans le bloc « PR10 — administration ». */
+function isActiveClientMock(client: Client): boolean {
+  if (client.anonymized_at) return false;
+  return !(client as { merged_into_client_id?: string | null }).merged_into_client_id;
+}
+
+/** Candidats au doublon pour la saisie en cours (L2) : e-mail, puis
+ * téléphone, puis nom ; 5 fiches au maximum, jamais deux fois la même. */
+function pr10DuplicateCandidates(criteria: {
+  first_name?: string | null;
+  last_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+}): Array<Record<string, unknown>> {
+  const email = normalizeEmail(criteria.email) || null;
+  let phone: string | null = null;
+  try {
+    phone = normalizePhoneMock(criteria.phone);
+  } catch {
+    // Une saisie de téléphone encore incomplète ne fait pas échouer la
+    // recherche de doublons : on l'ignore, les autres critères restent.
+    phone = null;
+  }
+  const nameKey = nameKeyMock(criteria.first_name, criteria.last_name);
+
+  const seen = new Set<string>();
+  const candidates: Array<Record<string, unknown>> = [];
+  const push = (client: Client, reason: "email" | "phone" | "name") => {
+    if (seen.has(client.id) || candidates.length >= 5) return;
+    seen.add(client.id);
+    const stats = visitStats(client.id);
+    candidates.push({
+      id: client.id,
+      first_name: client.first_name,
+      last_name: client.last_name,
+      email_masked: client.email ? maskEmail(client.email) : null,
+      phone_masked: maskPhoneMock(client.phone),
+      visits_count: stats.visits_count,
+      last_visit_at: stats.last_visit_at,
+      reason,
+    });
+  };
+
+  const active = clients.filter(isActiveClientMock);
+  if (email) active.filter((c) => normalizeEmail(c.email) === email).forEach((c) => push(c, "email"));
+  if (phone) active.filter((c) => c.phone === phone).forEach((c) => push(c, "phone"));
+  if (nameKey) active.filter((c) => nameKeyMock(c.first_name, c.last_name) === nameKey).forEach((c) => push(c, "name"));
+  return candidates;
+}
+
+/** Historique d'achats d'une fiche (L4) : ventes seulement, plus
+ * récentes d'abord, 5 articles listés par ticket, montants en chaînes à
+ * deux décimales. Le total dépensé ignore les tickets annulés. */
+function pr10ClientHistory(clientId: string, limit: number): Record<string, unknown> {
+  const sales = transactions
+    .filter((t) => t.transaction_type === "sale" && t.client?.id === clientId)
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  const stats = visitStats(clientId);
+  const totalSpent = sales
+    .filter((t) => !cancelledToRefund.has(t.id))
+    .reduce((sum, t) => sum + t.total_ttc, 0);
+  return {
+    client_id: clientId,
+    visits_count: stats.visits_count,
+    last_visit_at: stats.last_visit_at,
+    total_spent: money(totalSpent),
+    transactions: sales.slice(0, limit).map((tx) => ({
+      id: tx.id,
+      transaction_number: tx.transaction_number,
+      created_at: tx.created_at,
+      total_ttc: money(tx.total_ttc),
+      items_count: tx.items.length,
+      items: tx.items.slice(0, 5).map((item) => ({
+        label: item.label,
+        quantity: item.quantity,
+        unit_price: money(item.unit_price),
+      })),
+      refunded: cancelledToRefund.has(tx.id),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PR10 — administration : doublons, fusion et suppression différée
+// (docs/ARCHITECTURE_PR10.md §1, L2 / L3 / L5 / L6)
+//
+// Ce bloc simule ce que l'ONGLET CLIENTS consomme : les groupes de fiches
+// qui se ressemblent, la fusion de deux fiches et les deux gestes de la
+// suppression programmée. Les doublons proposés pendant la saisie en
+// caisse et l'historique d'achats vivent dans le bloc « PR10 — caisse ».
+// ---------------------------------------------------------------------------
+
+/** Deux groupes de doublons posés d'avance sur le jeu de démo — un même
+ * e-mail, un même nom — et une fiche dont la suppression est déjà
+ * programmée : la carte « Doublons possibles » et le badge de la fiche se
+ * voient dès le premier écran, sans préparation. */
+function seedPr10AdminDemo(): void {
+  const olderIso = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  // Groupe « même e-mail » : la même adresse saisie deux fois, une fois
+  // avec le nom complet, une fois sans.
+  const emailTwin: Client = {
+    id: uuid(),
+    email: "camille.perrot@exemple.fr",
+    phone: null,
+    first_name: "Camille",
+    last_name: "Perrot",
+    newsletter_optin: true,
+    created_at: olderIso(40),
+    anonymized_at: null,
+  };
+  const emailTwinBis: Client = {
+    id: uuid(),
+    email: "camille.perrot@exemple.fr",
+    phone: "+33612345678",
+    first_name: "Camille",
+    last_name: null,
+    newsletter_optin: false,
+    created_at: olderIso(6),
+    anonymized_at: null,
+  };
+
+  // Groupe « même nom » : deux fiches ouvertes à deux passages, avec des
+  // coordonnées différentes.
+  const nameTwin: Client = {
+    id: uuid(),
+    email: "n.lefevre@exemple.fr",
+    phone: null,
+    first_name: "Noémie",
+    last_name: "Lefèvre",
+    newsletter_optin: false,
+    created_at: olderIso(52),
+    anonymized_at: null,
+  };
+  const nameTwinBis: Client = {
+    id: uuid(),
+    email: null,
+    phone: "+33755443322",
+    first_name: "Noemie",
+    last_name: "Lefevre",
+    newsletter_optin: false,
+    created_at: olderIso(3),
+    anonymized_at: null,
+  };
+
+  [emailTwin, emailTwinBis, nameTwin, nameTwinBis].forEach((client) => clients.push(client));
+
+  // Quelques ventes rattachées à la fiche la plus ancienne de chaque
+  // groupe : la fusion a alors quelque chose à déplacer, et la
+  // présélection « celle qui a le plus de visites » se voit.
+  const free = transactions.filter((t) => t.transaction_type === "sale" && !t.client);
+  [emailTwin, emailTwin, nameTwin].forEach((client, index) => {
+    const tx = free[index];
+    if (!tx) return;
+    tx.client = clientRefOf(client);
+    tx.receipt_text = buildReceiptText(tx);
+  });
+
+  // Une fiche avec suppression programmée : le badge et le bouton
+  // « Annuler la suppression programmée » sont visibles d'emblée.
+  const pending = clients.find((c) => c.email === "karim.benali@exemple.fr") ?? emailTwin;
+  pending.deletion_requested_at = olderIso(4);
+  pending.deletion_scheduled_for = new Date(
+    Date.now() + Math.max(1, settings.rgpd.deletion_delay_days - 4) * 24 * 60 * 60 * 1000,
+  ).toISOString();
+}
+
+/** Groupes de fiches qui se ressemblent (L2) : e-mail, puis téléphone,
+ * puis nom ; un groupe compte au moins deux fiches, une fiche n'apparaît
+ * que dans son premier groupe. */
+function pr10DuplicateGroups(): Array<Record<string, unknown>> {
+  const active = clients.filter(isActiveClientMock);
+  const taken = new Set<string>();
+  const groups: Array<Record<string, unknown>> = [];
+
+  const collect = (reason: "email" | "phone" | "name", keyOf: (c: Client) => string | null) => {
+    const buckets = new Map<string, Client[]>();
+    active.forEach((client) => {
+      if (taken.has(client.id)) return;
+      const key = keyOf(client);
+      if (!key) return;
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(client);
+      else buckets.set(key, [client]);
+    });
+    buckets.forEach((bucket) => {
+      if (bucket.length < 2) return;
+      bucket.forEach((c) => taken.add(c.id));
+      groups.push({
+        reason,
+        // Coordonnées masquées, comme côté serveur : cet écran peut être
+        // ouvert devant du public.
+        clients: bucket.map((client) => ({
+          id: client.id,
+          first_name: client.first_name,
+          last_name: client.last_name,
+          email_masked: client.email ? maskEmail(client.email) : null,
+          phone_masked: maskPhoneMock(client.phone),
+          created_at: client.created_at,
+          ...visitStats(client.id),
+        })),
+      });
+    });
+  };
+
+  collect("email", (c) => normalizeEmail(c.email) || null);
+  collect("phone", (c) => c.phone ?? null);
+  collect("name", (c) => nameKeyMock(c.first_name, c.last_name));
+  return groups.slice(0, 50);
+}
+
+/** Fusion de deux fiches (L3) : les ventes, les consentements et les
+ * messages passent à la fiche conservée, ses champs vides sont complétés,
+ * la fiche absorbée est vidée puis marquée. Aucun ticket n'est modifié
+ * autrement que par son rattachement. */
+function pr10MergeClients(winner: Client, source: Client): Record<string, unknown> {
+  const moved = { transactions: 0, consents: 0, communications: 0 };
+
+  transactions
+    .filter((t) => t.client?.id === source.id)
+    .forEach((tx) => {
+      tx.client = clientRefOf(winner);
+      if (tx.transaction_type === "sale") tx.receipt_text = buildReceiptText(tx);
+      moved.transactions += 1;
+    });
+
+  consents
+    .filter((c) => c.client_id === source.id)
+    .forEach((c) => {
+      c.client_id = winner.id;
+      moved.consents += 1;
+    });
+
+  communications
+    .filter((c) => c.client_id === source.id)
+    .forEach((c) => {
+      c.client_id = winner.id;
+      moved.communications += 1;
+    });
+
+  // Champs vides complétés depuis la fiche absorbée, jamais écrasés.
+  if (!winner.email) winner.email = source.email;
+  if (!winner.phone) winner.phone = source.phone;
+  if (!winner.first_name) winner.first_name = source.first_name;
+  if (!winner.last_name) winner.last_name = source.last_name;
+  winner.newsletter_optin = winner.newsletter_optin || source.newsletter_optin;
+
+  // La fiche absorbée est vidée (même mécanique que l'anonymisation) et
+  // une suppression programmée sur elle n'a plus lieu d'être.
+  source.email = `fusionne-${source.id}@anonyme.invalid`;
+  source.phone = null;
+  source.first_name = null;
+  source.last_name = null;
+  source.anonymized_at = nowIso();
+  source.deletion_requested_at = null;
+  source.deletion_scheduled_for = null;
+  source.merged_into_client_id = winner.id;
+  source.merged_at = nowIso();
+
+  logJet("client.merged", {
+    winner_id: winner.id,
+    source_id: source.id,
+    transactions_moved: moved.transactions,
+    consents_moved: moved.consents,
+    communications_moved: moved.communications,
+  });
+
+  return { client: winner, moved };
 }
 
 /** Une facture pro de démonstration (PR8, J6), posée sur une vente
@@ -2157,8 +2537,8 @@ export async function mockFetchAPI<T = unknown>(
   }
 
   // --- Administration ---------------------------------------------------
-  if ((m = path.match(/^\/api\/admin\/settings\/(pos|shop|fiscal|receipt|hardware|accounting|targets)$/))) {
-    const key = m[1] as "pos" | "shop" | "fiscal" | "receipt" | "hardware" | "accounting" | "targets";
+  if ((m = path.match(/^\/api\/admin\/settings\/(pos|shop|fiscal|receipt|hardware|accounting|targets|rgpd)$/))) {
+    const key = m[1] as "pos" | "shop" | "fiscal" | "receipt" | "hardware" | "accounting" | "targets" | "rgpd";
     if (method === "GET") return settings[key] as unknown as T;
     if (method === "PUT") {
       const body = parseBody<Record<string, unknown>>(options);
@@ -2170,6 +2550,13 @@ export async function mockFetchAPI<T = unknown>(
       }
       if (key === "fiscal" && typeof body.tva_rate === "string" && !(TVA_RATES as readonly string[]).includes(body.tva_rate)) {
         fail(422, "Taux de TVA non autorisé.", "invalid_tva_rate");
+      }
+      if (key === "rgpd") {
+        const days = Math.round(Number(body.deletion_delay_days));
+        if (!Number.isFinite(days) || days < 1 || days > 90) {
+          fail(422, "Le délai de suppression doit être compris entre 1 et 90 jours.", "invalid_setting");
+        }
+        body.deletion_delay_days = days;
       }
       if (key === "accounting") {
         // Validation F1 réconciliée avec `AccountingSettingsIn`
@@ -2832,6 +3219,30 @@ export async function mockFetchAPI<T = unknown>(
     const response: CreatePosClientResponse = { client: posClientPayload(client), created };
     return response as unknown as T;
   }
+  // --- PR10 — caisse (L2/L4) : doublons proposés à la saisie, historique ---
+
+  if (path === "/api/pos/clients/duplicates" && method === "GET") {
+    const criteria = {
+      first_name: query.get("first_name"),
+      last_name: query.get("last_name"),
+      email: query.get("email"),
+      phone: query.get("phone"),
+    };
+    if (!Object.values(criteria).some((value) => (value ?? "").trim())) {
+      fail(422, "Renseignez au moins un critère.", "criteria_required");
+    }
+    return { candidates: pr10DuplicateCandidates(criteria) } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/pos\/clients\/([^/]+)\/history$/)) && method === "GET") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client || !isActiveClientMock(client)) fail(404, "Fiche introuvable.", "not_found");
+    const raw = query.get("limit");
+    const parsed = raw ? Number.parseInt(raw, 10) : 5;
+    const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 20) : 5;
+    return pr10ClientHistory(client!.id, limit) as unknown as T;
+  }
+
 
   if ((m = path.match(/^\/api\/pos\/transactions\/([^/]+)\/client$/)) && method === "DELETE") {
     const tx = transactions.find((t) => t.id === m![1]);
@@ -2963,6 +3374,53 @@ export async function mockFetchAPI<T = unknown>(
     return { status, provider } as unknown as T;
   }
 
+  // --- PR10 — administration (L2/L3/L5) : doublons, fusion, suppression ---
+
+  if (path === "/api/admin/clients/duplicates" && method === "GET") {
+    const groups = pr10DuplicateGroups();
+    return { groups, total: groups.length } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/merge$/)) && method === "POST") {
+    const winner = clients.find((c) => c.id === m![1]);
+    const body = parseBody<{ source_id?: string }>(options);
+    const source = clients.find((c) => c.id === body.source_id);
+    if (!winner || !source) fail(404, "Fiche introuvable.", "not_found");
+    if (winner!.id === source!.id) fail(409, "Il s'agit de la même fiche.", "same_client");
+    if (!isActiveClientMock(winner!) || !isActiveClientMock(source!)) {
+      fail(409, "Une de ces fiches n'est plus utilisable.", "client_inactive");
+    }
+    if (winner!.deletion_scheduled_for) {
+      fail(409, "La fiche à conserver a une suppression programmée : annulez-la d'abord.", "deletion_pending");
+    }
+    return pr10MergeClients(winner!, source!) as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/deletion-request$/)) && method === "POST") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client) fail(404, "Fiche introuvable.", "not_found");
+    if (!isActiveClientMock(client!)) fail(409, "Cette fiche n'est plus utilisable.", "client_inactive");
+    if (client!.deletion_scheduled_for) fail(409, "Une suppression est déjà programmée.", "already_requested");
+    const delayDays = settings.rgpd.deletion_delay_days;
+    client!.deletion_requested_at = nowIso();
+    client!.deletion_scheduled_for = new Date(Date.now() + delayDays * 24 * 60 * 60 * 1000).toISOString();
+    logJet("client.deletion_requested", {
+      client_id: client!.id,
+      scheduled_for: client!.deletion_scheduled_for,
+    });
+    return { client: client! } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/clients\/([^/]+)\/deletion-cancel$/)) && method === "POST") {
+    const client = clients.find((c) => c.id === m![1]);
+    if (!client) fail(404, "Fiche introuvable.", "not_found");
+    if (!client!.deletion_scheduled_for) fail(409, "Aucune suppression programmée.", "not_requested");
+    client!.deletion_requested_at = null;
+    client!.deletion_scheduled_for = null;
+    logJet("client.deletion_cancelled", { client_id: client!.id });
+    return { client: client! } as unknown as T;
+  }
+
   if (path === "/api/admin/clients" && method === "GET") {
     const raw = (query.get("q") ?? "").trim();
     const q = raw.toLowerCase();
@@ -2970,7 +3428,8 @@ export async function mockFetchAPI<T = unknown>(
     // chiffres — même règle qu'en caisse.
     const digits = raw.replace(/\D/g, "");
     const limit = query.get("limit") ? parseInt(query.get("limit")!, 10) : 50;
-    let list = clients;
+    // PR10 (L3) : une fiche absorbée par une fusion ne s'affiche plus.
+    let list = clients.filter((c) => !c.merged_into_client_id);
     if (q) {
       list = list.filter(
         (c) =>
@@ -3007,6 +3466,9 @@ export async function mockFetchAPI<T = unknown>(
     client!.last_name = null;
     recordConsent(client!, false, "rgpd", body.reason.trim());
     client!.anonymized_at = nowIso();
+    // PR10 (L5) : la suppression immédiate efface une demande en cours.
+    client!.deletion_requested_at = null;
+    client!.deletion_scheduled_for = null;
     logJet("client.anonymized", { client_id: client!.id, reason: body.reason.trim() });
     return clientFullPayload(client!) as unknown as T;
   }
@@ -3535,7 +3997,9 @@ export async function mockFetchBytesWithHeaders(endpoint: string, options?: Fetc
 // toucher à la journée en cours (ventes datées d'hier et avant).
 seedDemoSales();
 seedDemoClients();
+seedPr10CaisseDemo();
 seedDemoInvoice();
+seedPr10AdminDemo();
 
 // Expose un reset pour d'éventuels tests / Playwright (état frais par page load
 // de toute façon, car le module vit en mémoire côté navigateur).

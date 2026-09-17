@@ -54,6 +54,29 @@ class Client(Base):
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
+    # PR10/L3 — fusion de doublons. Pose sur la fiche ABSORBEE : elle pointe
+    # vers la fiche conservee, qui a recupere ses ventes, ses consentements
+    # et ses messages. NULL = fiche active. Une fiche absorbee est ignoree
+    # partout (recherche, `create_or_get`, detection de doublons) mais
+    # jamais supprimee : ses ventes gardent leur historique et l'URL de la
+    # fiche continue de repondre, pour rediriger vers la conservee.
+    merged_into_client_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), nullable=True, index=True
+    )
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # PR10/L5 — suppression RGPD DIFFEREE (30 jours par defaut, annulable).
+    # La fiche reste pleinement utilisable en caisse tant que la date
+    # d'effet n'est pas atteinte : la personne est toujours cliente. Le cron
+    # quotidien anonymise a echeance (jamais de suppression de ligne).
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deletion_scheduled_for: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deletion_requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
 
 
 class Consent(Base):

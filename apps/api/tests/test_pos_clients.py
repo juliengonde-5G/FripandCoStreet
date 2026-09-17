@@ -208,6 +208,64 @@ async def test_create_or_get_completes_a_fiche_without_overwriting():
         assert again.first_name == "Alice"  # jamais efface
 
 
+async def test_create_or_get_never_renames_an_existing_fiche(client, auth_headers):
+    """Une fiche retrouvee par son telephone ne change JAMAIS de nom.
+
+    Defaut constate en recette PR10 : « Marie DUPONT » devenait
+    silencieusement « Sophie Martin » des qu'une autre personne donnait le
+    meme numero (un conjoint, un proche, la ligne de la maison) — et la
+    cliente d'origine devenait introuvable par son nom, sans que personne
+    ne l'ait demande. Le nom suit desormais la meme regle que les
+    coordonnees : complete s'il manque, jamais ecrase.
+    """
+    first = await client.post(
+        "/api/pos/clients",
+        json={"phone": "06 99 11 22 33", "first_name": "Marie", "last_name": "DUPONT"},
+        headers=auth_headers,
+    )
+    assert first.status_code == 201, first.text
+    client_id = first.json()["client"]["id"]
+
+    second = await client.post(
+        "/api/pos/clients",
+        json={"phone": "+33699112233", "first_name": "Sophie", "last_name": "Martin"},
+        headers=auth_headers,
+    )
+    assert second.status_code == 201, second.text
+    body = second.json()
+    assert body["created"] is False
+    assert body["client"]["id"] == client_id
+    assert body["client"]["first_name"] == "Marie"
+    assert body["client"]["last_name"] == "DUPONT"
+
+    async with async_session() as db:
+        stored = (
+            await db.execute(select(Client).where(Client.id == uuid.UUID(client_id)))
+        ).scalar_one()
+    assert (stored.first_name, stored.last_name) == ("Marie", "DUPONT")
+
+
+async def test_create_or_get_names_a_fiche_that_had_none(client, auth_headers):
+    """Le pendant du test precedent : une fiche creee avec le seul numero
+    (la cliente etait pressee) recupere bien son nom a la visite suivante."""
+    first = await client.post(
+        "/api/pos/clients", json={"phone": "06 99 44 55 66"}, headers=auth_headers
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["client"]["last_name"] is None
+
+    second = await client.post(
+        "/api/pos/clients",
+        json={"phone": "06 99 44 55 66", "first_name": "Lea", "last_name": "Fontaine"},
+        headers=auth_headers,
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["created"] is False
+    assert second.json()["client"]["id"] == first.json()["client"]["id"]
+    assert second.json()["client"]["first_name"] == "Lea"
+    assert second.json()["client"]["last_name"] == "Fontaine"
+
+
 async def test_create_or_get_never_steals_a_contact_from_another_fiche(client, auth_headers):
     """Une cliente dont l'adresse est deja connue, mais dont le numero
     appartient deja a une AUTRE fiche : la saisie ne recopie pas le numero
