@@ -110,6 +110,21 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
     # jour la demande ne serait plus annulable (c'est tout l'interet du
     # differe), au-dela de trois mois on ne « differe » plus, on enterre.
     "rgpd": {"deletion_delay_days": 30},
+    # PR11 (M3, docs/ARCHITECTURE_PR11.md) — meteo locale affichee a cote du
+    # chiffre du jour. Ville vide -> repli sur `shop.city`. Latitude et
+    # longitude facultatives : renseignees, elles priment sur la ville (deux
+    # communes homonymes ne se departagent pas autrement) ; absentes, la
+    # ville est passee telle quelle a OpenWeather (pas de geocodage, §2 du
+    # contrat). La CLE d'API n'est PAS ici : c'est un secret, donc une
+    # variable d'environnement (`OPENWEATHER_API_KEY`), jamais un reglage.
+    "weather": {"city": "", "lat": None, "lon": None},
+    # PR11 (M2, docs/ARCHITECTURE_PR11.md) — jours d'ouverture de la
+    # boutique, du lundi au dimanche (meme ordre que `date.weekday()`, pas
+    # celui de `strftime('%w')` qui commence le dimanche). Sert a repartir
+    # l'objectif mensuel sur les seuls jours ouverts : un dimanche ferme ne
+    # doit porter aucun objectif, sinon la boutique est en retard des le
+    # lundi matin. Defaut : ouvert du lundi au samedi.
+    "cahier": {"weekday_open": [True, True, True, True, True, True, False]},
 }
 
 # Bornes du delai de suppression RGPD (L5). Le clamp vit ici, a cote du

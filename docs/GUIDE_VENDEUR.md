@@ -23,6 +23,33 @@ et la part espèces / carte. **Ce mois** montre le cumul du mois, l'objectif et
 le montant à faire chaque jour restant pour le tenir. **7 derniers jours** situe
 la journée par rapport à la semaine. Touche **Aller à la caisse** pour encaisser.
 
+## Le cahier du jour
+Dans le menu, **Cahier du jour** ouvre la page de la journée — le carnet
+qu'on tenait au comptoir, en plus lisible.
+
+**Lire l'objectif.** En haut à gauche, le montant à faire aujourd'hui : c'est
+la part du mois qui revient à cette journée, répartie sur les jours
+d'ouverture. En dessous, où en est le mois et ce qu'il reste à faire chaque
+jour pour tenir l'objectif. À droite, **Réalisé** : l'argent encaissé depuis
+ce matin, le nombre de ventes, le panier moyen, et un petit graphique qui
+montre les heures qui marchent. Plus bas, le temps qu'il fait et la même
+journée l'an dernier, pour savoir à quoi comparer.
+
+**Écrire le message.** **Message du jour**, c'est le mot pour l'équipe ;
+**Opération en cours**, c'est ce qui tourne en boutique (braderie, remise sur
+les manteaux, collecte). Écris dedans, puis touche ailleurs : le texte
+s'enregistre tout seul, « Enregistré » s'affiche à droite du titre.
+
+**Signer.** En bas, **Signer (manager)** et **Signer (équipe)**. Si tu es
+identifiée sur le tiroir, ton prénom est repris tout seul ; sinon écris-le
+dans la case avant de signer. Une signature s'appose une fois et ne
+s'efface pas.
+
+**Feuilleter et imprimer.** ‹ et › passent d'une journée à l'autre,
+**Aujourd'hui** revient à celle du jour. Une journée passée se relit mais ne
+se modifie plus : ni texte, ni signature. **Imprimer** sort une feuille A4
+propre, sans le menu ni les boutons — à glisser dans le classeur.
+
 ## Ouvrir la caisse
 Au lancement, l'écran affiche « Ouvrir la caisse ». Compte l'argent du fond
 de caisse (billet par billet ou en montant global), saisis-le, puis touche

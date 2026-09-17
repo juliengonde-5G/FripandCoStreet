@@ -36,6 +36,8 @@ const STORAGE_KEY = "fripco_sidebar_state";
 
 type IconName =
   | "home"
+  | "chart"
+  | "notebook"
   | "cash"
   | "users"
   | "badge"
@@ -55,6 +57,27 @@ const ICON_PATHS: Record<IconName, React.ReactNode> = {
   home: (
     <>
       <path d="M3 9.5 12 3l9 6.5V20a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z" />
+    </>
+  ),
+  // PR11 (M5) — « Rapports » : un graphique en barres dans son cadre, avec
+  // ses deux axes. Voisin de `accounting` (trois barres nues, Comptabilité)
+  // sans se confondre avec lui : le cadre et les axes les distinguent.
+  chart: (
+    <>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M7 17v-4" />
+      <path d="M12 17V8" />
+      <path d="M17 17v-6" />
+    </>
+  ),
+  // PR11 (M5) — « Cahier du jour » : un carnet à reliure, lignes écrites.
+  notebook: (
+    <>
+      <path d="M5 3h13a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+      <path d="M3 8h4" />
+      <path d="M11 8h4" />
+      <path d="M11 12h4" />
+      <path d="M11 16h2" />
     </>
   ),
   cash: (
@@ -194,7 +217,12 @@ interface NavGroup {
 const NAV_GROUPS: NavGroup[] = [
   {
     title: "Pilotage",
-    items: [{ href: "/", label: "Accueil", icon: "home", exact: true }],
+    items: [
+      { href: "/", label: "Accueil", icon: "home", exact: true },
+      // PR11 (M5) — rapports par période et cahier du jour.
+      { href: "/rapports", label: "Rapports", icon: "chart" },
+      { href: "/cahier", label: "Cahier du jour", icon: "notebook" },
+    ],
   },
   {
     title: "Commerce",

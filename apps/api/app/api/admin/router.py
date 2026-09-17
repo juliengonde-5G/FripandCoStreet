@@ -33,7 +33,11 @@ from app.models.database_backup import BackupStatus, DatabaseBackup
 from app.services import database_backup as database_backup_service
 from app.services.accounting_service import AccountingService
 from app.services.cashier_service import CashierService, serialize_cashier
-from app.services.client_service import ClientService, _serialize_client
+from app.services.client_service import (
+    ClientService,
+    _serialize_client,
+    newsletter_export_csv,
+)
 from app.services.fiscal import FiscalService, PosServiceError
 from app.services.fiscal_closure import FiscalClosureService
 from app.services.fiscal_export import FiscalExportService
@@ -326,6 +330,25 @@ class RgpdSettingsIn(BaseModel):
     deletion_delay_days: int = Field(default=30, ge=1, le=90)
 
 
+class WeatherSettingsIn(BaseModel):
+    """Reglages meteo (PR11, M3) — localisation seulement.
+
+    Aucune cle d'API ici : `OPENWEATHER_API_KEY` est un secret, donc une
+    variable d'environnement. L'ecran de reglages en affiche l'ETAT
+    (`api_key_configured`), jamais la valeur — c'est `_decorate_settings`
+    qui l'ajoute a la reponse, sans jamais l'ecrire en base.
+    """
+
+    city: str = ""
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+
+    @field_validator("city")
+    @classmethod
+    def _strip_city(cls, value: str) -> str:
+        return (value or "").strip()[:120]
+
+
 _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "shop": ShopSettingsIn,
     "fiscal": FiscalSettingsIn,
@@ -337,7 +360,22 @@ _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "pos": PosSettingsIn,
     "payments": PaymentsSettingsIn,
     "rgpd": RgpdSettingsIn,
+    "weather": WeatherSettingsIn,
 }
+
+
+def _decorate_settings(key: str, value: dict) -> dict:
+    """Champs derives ajoutes a la LECTURE d'un reglage, jamais stockes.
+
+    `weather.api_key_configured` (PR11, M3) : l'ecran de reglages doit
+    pouvoir dire « clé configurée / absente » sans que la cle transite
+    jamais par une reponse d'API ni par `app_settings`.
+    """
+    if key == "weather":
+        from app.services.weather import api_key_configured
+
+        return {**value, "api_key_configured": api_key_configured()}
+    return value
 
 
 def _settings_to_json(value: Any) -> Any:
@@ -367,7 +405,7 @@ async def get_settings(
 ):
     if key not in _SETTINGS_SCHEMAS:
         raise PosServiceError(f"Paramètre inconnu : {key}", code="unknown_setting", status_code=404)
-    return await SettingsService(db).get(key)
+    return _decorate_settings(key, await SettingsService(db).get(key))
 
 
 @router.put("/settings/{key}")
@@ -388,7 +426,7 @@ async def put_settings(
         )
     row = await SettingsService(db).set(key, _settings_to_json(validated), user_id=user.id)
     await db.commit()
-    return row.value
+    return _decorate_settings(key, dict(row.value or {}))
 
 
 # ---------------------------------------------------------------------------
@@ -1063,11 +1101,56 @@ async def list_clients(
     db: Annotated[AsyncSession, Depends(get_db)],
     q: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    optin: Literal["newsletter"] | None = Query(default=None),
+    deletion: Literal["pending"] | None = Query(default=None),
 ):
     """Recherche admin : e-mail, prenom, nom — et telephone (PR7/I3, la
-    recherche porte alors sur les chiffres, cf. `ClientService.search`)."""
-    clients = await ClientService(db).search(q, limit=limit)
+    recherche porte alors sur les chiffres, cf. `ClientService.search`).
+
+    PR11/M4 — deux filtres ADDITIFS, cumulables entre eux et avec la
+    recherche : `optin=newsletter` (fiches abonnees) et `deletion=pending`
+    (suppression programmee, pas encore executee). Ce sont les puces de
+    l'onglet Clients.
+    """
+    clients = await ClientService(db).search(
+        q,
+        limit=limit,
+        newsletter_only=optin == "newsletter",
+        deletion_pending=deletion == "pending",
+    )
     return {"clients": [_serialize_client_summary(c) for c in clients]}
+
+
+@router.get("/clients/export")
+async def export_newsletter_subscribers(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    optin: Literal["newsletter"] = Query(default="newsletter"),
+    format: Literal["csv"] = Query(default="csv"),
+):
+    """Export CSV des abonnes a la newsletter (PR11/M4).
+
+    Declaree AVANT `/clients/{client_id}` : sans cela, FastAPI lirait
+    « export » comme un identifiant et repondrait 422 (meme precaution que
+    `/clients/duplicates`).
+
+    Le JET ne recoit QUE le nombre de lignes : ni les adresses, ni les noms
+    — le journal est immuable, une adresse qui y tomberait ne pourrait plus
+    jamais en sortir, alors meme qu'une desinscription doit pouvoir effacer
+    la fiche (art. 17 RGPD).
+    """
+    filename, csv_text, count = await newsletter_export_csv(db)
+    await JournalService(db).record(
+        EVENT_EXPORT_DOWNLOADED,
+        user_id=user.id,
+        payload={"kind": "clients_newsletter_csv", "count": count},
+    )
+    await db.commit()
+    return Response(
+        content=csv_text.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/clients/duplicates")

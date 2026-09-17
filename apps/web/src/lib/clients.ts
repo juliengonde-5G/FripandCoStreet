@@ -13,7 +13,8 @@
  * qu'on reçoit, on ne démasque jamais.
  */
 import { api, fetchAPI } from "./api";
-import type { Client } from "./types";
+import { downloadFile } from "./download";
+import type { Client, ClientListResponse } from "./types";
 
 // ---------------------------------------------------------------------------
 // Doublons (L2)
@@ -313,4 +314,88 @@ export function hasPendingDeletion(
   client: Pick<Client, "deletion_scheduled_for">,
 ): boolean {
   return Boolean(client.deletion_scheduled_for);
+}
+
+// ---------------------------------------------------------------------------
+// Liste filtrée et export des abonnés (PR11, M4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Filtre de la liste des fiches. Les deux critères s'ajoutent à la
+ * recherche libre : `newsletter` ne garde que les fiches abonnées,
+ * `deletion` celles dont la suppression est programmée.
+ */
+export type ClientListFilter = "all" | "newsletter" | "deletion";
+
+/** Libellé des puces de filtre, dans l'ordre d'affichage. */
+export const CLIENT_FILTERS: { value: ClientListFilter; label: string }[] = [
+  { value: "all", label: "Tous" },
+  { value: "newsletter", label: "Abonnés newsletter" },
+  { value: "deletion", label: "Suppression programmée" },
+];
+
+/** Nombre de fiches ramenées par défaut (le serveur borne également). */
+export const CLIENT_LIST_DEFAULT_LIMIT = 50;
+
+export interface FetchClientsOptions {
+  /** Recherche libre : e-mail, nom ou téléphone. */
+  q?: string;
+  /** `"newsletter"` → uniquement les fiches abonnées. */
+  optin?: "newsletter" | null;
+  /** `"pending"` → uniquement les suppressions programmées. */
+  deletion?: "pending" | null;
+  limit?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Liste des fiches, avec recherche et filtres additifs
+ * (`GET /api/admin/clients`).
+ */
+export async function fetchClients(options: FetchClientsOptions = {}): Promise<Client[]> {
+  const params = new URLSearchParams({
+    limit: String(options.limit ?? CLIENT_LIST_DEFAULT_LIMIT),
+  });
+  const q = (options.q ?? "").trim();
+  if (q) params.set("q", q);
+  if (options.optin) params.set("optin", options.optin);
+  if (options.deletion) params.set("deletion", options.deletion);
+  const data = await fetchAPI<ClientListResponse>(`/api/admin/clients?${params.toString()}`, {
+    signal: options.signal,
+  });
+  return data?.clients ?? [];
+}
+
+/** Traduit une puce de filtre en paramètres de requête. */
+export function clientFilterParams(
+  filter: ClientListFilter,
+): Pick<FetchClientsOptions, "optin" | "deletion"> {
+  if (filter === "newsletter") return { optin: "newsletter" };
+  if (filter === "deletion") return { deletion: "pending" };
+  return {};
+}
+
+/** Route de l'export CSV des abonnés à la newsletter. */
+export function newsletterExportUrl(): string {
+  return "/api/admin/clients/export?optin=newsletter&format=csv";
+}
+
+/** Nom du fichier proposé au téléchargement : `abonnes_newsletter_<jour>.csv`. */
+export function newsletterExportFilename(date: Date = new Date()): string {
+  const y = date.getFullYear();
+  const m = `${date.getMonth() + 1}`.padStart(2, "0");
+  const d = `${date.getDate()}`.padStart(2, "0");
+  return `abonnes_newsletter_${y}-${m}-${d}.csv`;
+}
+
+/**
+ * Télécharge la liste des abonnés au format CSV.
+ *
+ * Le fichier ne contient que les fiches actives et abonnées : ni
+ * anonymisées, ni absorbées, ni en attente de suppression — c'est le
+ * serveur qui tient cette règle, le front ne filtre rien lui-même. Le
+ * fichier n'a qu'un usage : l'outil d'e-mailing déclaré de la boutique.
+ */
+export async function downloadNewsletterCsv(): Promise<void> {
+  await downloadFile(newsletterExportUrl(), newsletterExportFilename());
 }

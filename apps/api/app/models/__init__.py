@@ -32,6 +32,7 @@ from app.models.cashier import Cashier
 from app.models.invoice import Invoice, InvoiceKind
 from app.models.sumup_exchange import SumUpExchange
 from app.models.failed_payment import FailedPayment, FailedPaymentStatus
+from app.models.cahier_day import CahierDay
 
 __all__ = [
     "Base",
@@ -70,4 +71,5 @@ __all__ = [
     "SumUpExchange",
     "FailedPayment",
     "FailedPaymentStatus",
+    "CahierDay",
 ]

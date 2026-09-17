@@ -81,6 +81,16 @@ de débogage des appels au service SumUp, purgeable) et `failed_payments`
 n'est écrite que lorsque le paiement est confirmé —, elles ne portent aucun
 montant opposable et ne participent à aucune chaîne de preuve.
 
+Les **rapports** (jour, semaine, mois, avec leur export CSV), le **cahier du
+jour** (objectif, message, opération, signatures) et la **météo locale**
+sont des fonctions de lecture et d'exploitation : elles agrègent des ventes
+déjà écrites et signées, sans jamais créer, modifier ni supprimer une
+transaction, un paiement, un mouvement de caisse, un Z ou une ligne du
+journal des événements. Elles sont donc **hors périmètre fiscal** et ne
+participent à aucune chaîne de preuve ; le seul geste qu'elles inscrivent au
+journal est le téléchargement d'un export (`export.downloaded`, bornes de la
+période uniquement, jamais son contenu).
+
 Sont explicitement **hors périmètre** : gestion de stock/catalogue produit,
 programme de fidélité, coupons, personal shopper, facture sur une
 annulation partielle (refusée, l'avoir couvrant l'annulation totale).

@@ -18,6 +18,7 @@ from app.api.admin.payments_router import router as admin_payments_router
 from app.api.admin.router import router as admin_router
 from app.api.auth.router import router as auth_router
 from app.api.brevo.router import router as brevo_router
+from app.api.cahier.router import router as cahier_router
 from app.api.hardware.router import router as hardware_router
 from app.api.health import router as health_router
 from app.api.pos.cb_router import router as cb_router
@@ -244,3 +245,6 @@ app.include_router(invoices_router, prefix="/api")
 app.include_router(brevo_router, prefix="/api")
 app.include_router(hardware_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
+# PR11/M2 — cahier du jour : bloc autonome (lecture des chiffres du jour,
+# textes libres et signatures), monte a part des rapports.
+app.include_router(cahier_router, prefix="/api")
