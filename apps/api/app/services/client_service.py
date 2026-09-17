@@ -1241,6 +1241,22 @@ class ClientService:
         client.deletion_scheduled_for = None
         client.deletion_requested_by_user_id = None
 
+    async def _lock_deletion_row(self, client: Client) -> None:
+        """Verrouille la ligne `clients` (SELECT … FOR UPDATE) puis relit
+        la fiche.
+
+        Les deux gestes du manager (programmer / annuler) et le cron de
+        04:00 touchent les MEMES trois colonnes. Sans verrou, une
+        annulation posee pendant que le cron travaille peut repondre 200
+        au manager et voir la fiche videe la seconde d'apres. Le verrou
+        les serialise, et la relecture garantit qu'on decide sur l'etat
+        reellement commite, pas sur l'objet charge avant l'attente.
+        """
+        await self.db.execute(
+            select(Client.id).where(Client.id == client.id).with_for_update()
+        )
+        await self.db.refresh(client)
+
     async def request_deletion(
         self, *, client: Client, user_id: uuid.UUID | None
     ) -> Client:
@@ -1259,6 +1275,7 @@ class ClientService:
         anonymisee, ou absorbee par une fusion : il n'y a plus rien a
         supprimer ici).
         """
+        await self._lock_deletion_row(client)
         if client.anonymized_at is not None or client.merged_into_client_id is not None:
             raise PosServiceError(
                 "Cette fiche n'est plus active : rien à supprimer.",
@@ -1305,7 +1322,14 @@ class ClientService:
     ) -> Client:
         """Annule une suppression programmee (PR10/L5) — 409 `not_requested`
         s'il n'y en avait pas. C'est le geste qui donne son sens au differe :
-        tant que la date d'effet n'est pas atteinte, tout est reversible."""
+        tant que la date d'effet n'est pas atteinte, tout est reversible.
+
+        Verrouille la ligne avant de decider : si le cron de 04:00 est en
+        train de solder cette fiche, on attend son issue plutot que de
+        repondre « annulée » a un manager dont la fiche vient d'etre
+        videe (la relecture voit alors `anonymized_at`, et il n'y a plus
+        de demande a annuler -> 409)."""
+        await self._lock_deletion_row(client)
         if client.deletion_requested_at is None:
             raise PosServiceError(
                 "Aucune suppression n'est programmée pour cette fiche.",
