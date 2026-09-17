@@ -216,10 +216,22 @@ export async function abandonFailedPayment(id: string, reason: string): Promise<
 /** Réponse d'un réessai : un nouvel encaissement est poussé sur le
  * terminal, la caisse reprend son suivi sur `checkout_id`. */
 export interface RetryFailedPaymentResponse {
+  /** Le nouvel encaissement poussé sur le terminal — ou celui **d'origine**
+   * quand `reconciled` vaut `true`. */
   checkout_id: string;
   status: CbCheckoutState;
   failed_payment_id?: string;
   retry_count?: number;
+  /** Le serveur a réconcilié avant de repousser : l'encaissement d'origine
+   * était déjà payé, rien n'est reparti sur le terminal. `status` vaut
+   * alors `"paid"` et la cliente n'est débitée qu'une fois. */
+  reconciled?: boolean;
+  transaction_code?: string;
+  card_brand?: string;
+  last4?: string;
+  /** La ligne de file telle qu'elle est après l'appel (`succeeded` quand
+   * la réconciliation a abouti). */
+  failed_payment?: FailedPayment;
 }
 
 /** Relance un paiement de la file — même mécanique qu'un réessai normal
