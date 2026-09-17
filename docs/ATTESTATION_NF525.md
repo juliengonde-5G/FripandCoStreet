@@ -74,6 +74,13 @@ mono-poste, mono-utilisateur :
   vente facturée émet automatiquement l'avoir correspondant
   (`A-AAAA-NNNN`).
 
+Deux tables techniques servent uniquement à l'exploitation du terminal de
+paiement et restent **hors périmètre fiscal** : `sumup_exchanges` (journal
+de débogage des appels au service SumUp, purgeable) et `failed_payments`
+(file des encaissements carte à relancer). Aucune vente n'y naît — une vente
+n'est écrite que lorsque le paiement est confirmé —, elles ne portent aucun
+montant opposable et ne participent à aucune chaîne de preuve.
+
 Sont explicitement **hors périmètre** : gestion de stock/catalogue produit,
 programme de fidélité, coupons, personal shopper, facture sur une
 annulation partielle (refusée, l'avoir couvrant l'annulation totale).

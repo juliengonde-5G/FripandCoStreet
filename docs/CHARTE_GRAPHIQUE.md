@@ -406,6 +406,7 @@ tokens §6.
 | `apps/web/src/components/layout/AppShell.tsx` | pastille « F&C » (9×9) → `<Image src="/brand/logo-mark.png" width={40} height={40}>` |
 | `apps/web/src/app/caisse/page.tsx` | même remplacement dans l'en-tête caisse (en-tête propre à cette page, hors `AppShell`) ; `tabular-nums` ajouté sur le prix unitaire/pièce |
 | `apps/web/src/app/admin/page.tsx` | `tabular-nums` ajouté aux 5 colonnes numériques du tableau des rapports Z |
+| `apps/web/src/components/layout/Sidebar.tsx` | icône `card` (carte bancaire) ajoutée à l'inventaire d'icônes inline — SVG 22 px, trait 2, style « Feather », sans dépendance, pour l'entrée « Paiements CB » |
 
 Aucun nom de token existant n'a été renommé (mapping à valeurs
 constantes, comme demandé) — seuls `fc.accent`/`fc.accent-soft` et

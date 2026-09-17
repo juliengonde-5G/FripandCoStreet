@@ -1,5 +1,21 @@
 # Guide de la caisse — Frip & Co Street
 
+## Installer l'application sur la tablette (3 gestes)
+Au premier lancement, un bandeau bleu apparaît en bas de l'écran :
+**Installer Frip & Co Street**.
+
+1. Touche **Installer** dans le bandeau.
+2. Confirme dans la fenêtre de Chrome (**Installer**).
+3. Lance désormais la caisse par l'icône bleue de l'écran d'accueil : elle
+   s'ouvre en plein écran, sans barre d'adresse.
+
+**Plus tard** fait disparaître le bandeau jusqu'au prochain démarrage de la
+tablette ; **Ne plus proposer** le retire pour de bon. Pour le faire revenir,
+ou pour installer plus tard : **Administration** → **Réglages** → carte
+**Application** → **Installer l'application**. Si Chrome ne propose rien, la
+caisse est sans doute déjà installée ; sinon passe par le menu **⋮** de
+Chrome → **Installer l'application**.
+
 ## Accueil
 En te connectant, tu arrives sur le tableau de bord. **Aujourd'hui** montre
 l'argent encaissé depuis ce matin (ventes moins annulations), le panier moyen
@@ -75,6 +91,22 @@ sans vente : touche **Mouvement de caisse**, choisis **Entrée** ou
 
 ## Si le terminal refuse la carte
 Touche **Réessayer**. Si ça persiste, encaisse en **Espèces**.
+
+## Le terminal n'a pas répondu : réessayer
+Quand l'écran affiche « Le terminal n'a pas répondu, la vente n'est pas
+perdue », le montant n'est jamais arrivé au terminal : **rien n'a été
+débité, rien n'a été encaissé, le panier est intact**. Deux boutons :
+
+- **Réessayer** — le montant repart sur le terminal, fais présenter la carte
+  à nouveau. C'est le geste normal.
+- **Autre moyen de paiement** — retour au choix Espèces / Carte / Mixte avec
+  le même panier, pour encaisser autrement.
+
+Au bout de trois réessais, l'écran affiche « Réessais épuisés, choisissez un
+autre moyen de paiement » et le bouton **Réessayer** disparaît : encaisse en
+**Espèces**. Dans tous les cas la vente ne s'enregistre qu'une fois le
+paiement accepté. L'essai raté reste tracé côté **Administration** (onglet
+**Paiements CB**) : rien de plus à faire en caisse.
 
 ## Si l'imprimante ne répond pas
 Le message « Imprimante injoignable » apparaît. Vérifie qu'elle est allumée

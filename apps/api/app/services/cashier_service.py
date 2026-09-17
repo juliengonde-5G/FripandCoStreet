@@ -424,7 +424,14 @@ async def sales_by_cashier(
     """Ventes ventilees par vendeuse, pour chaque Z passe en parametre.
 
     Retourne ``{z_report_id: [{cashier_id, display_name, sales_count,
-    sales_total}, …]}``.
+    sales_total, refunds_count, refunds_total, net_total}, …]}``.
+
+    `sales_*` reste le BRUT des ventes ; `refunds_*` compte les annulations
+    de la meme fenetre portant la meme vendeuse ; `net_total` est la
+    difference (PR9/K0). Sans le net, une vendeuse dont la seule vente de la
+    journee a ete annulee apparaissait avec un chiffre qui ne se
+    reconciliait avec rien — et c'est exactement le cas qui remonte, parce
+    que c'est celui qu'on regarde.
 
     Calcule A LA LECTURE plutot que scelle dans le Z : ajouter un champ au
     payload signe du Z serait une evolution fiscale majeure (bump de
@@ -441,20 +448,29 @@ async def sales_by_cashier(
     if not z_reports:
         return {}
 
+    is_sale = Transaction.transaction_type == TransactionType.sale
+    is_refund = Transaction.transaction_type == TransactionType.refund
     rows = (
         await db.execute(
             select(
                 ZReport.id,
                 Transaction.cashier_id,
                 Cashier.display_name,
-                func.count(Transaction.id),
-                func.coalesce(func.sum(Transaction.total_ttc), 0),
+                func.count(Transaction.id).filter(is_sale),
+                func.coalesce(func.sum(Transaction.total_ttc).filter(is_sale), 0),
+                func.count(Transaction.id).filter(is_refund),
+                func.coalesce(func.sum(Transaction.total_ttc).filter(is_refund), 0),
             )
             .join(
                 Transaction,
                 (Transaction.created_at >= ZReport.opened_at)
                 & (Transaction.created_at <= ZReport.closed_at)
-                & (Transaction.transaction_type == TransactionType.sale),
+                # Ventes ET annulations : une annulation porte son propre
+                # `cashier_id` (celle qui l'a passee), pose a l'INSERT puis
+                # gele comme sur une vente (migration 0008).
+                & Transaction.transaction_type.in_(
+                    (TransactionType.sale, TransactionType.refund)
+                ),
             )
             .outerjoin(Cashier, Cashier.id == Transaction.cashier_id)
             .where(ZReport.id.in_([z.id for z in z_reports]))
@@ -463,13 +479,28 @@ async def sales_by_cashier(
     ).all()
 
     grouped: dict[str, list[dict]] = {str(z.id): [] for z in z_reports}
-    for z_id, cashier_id, display_name, count, total in rows:
+    for (
+        z_id,
+        cashier_id,
+        display_name,
+        sales_count,
+        sales_total,
+        refunds_count,
+        refunds_total,
+    ) in rows:
+        # Arrondi en Decimal AVANT la conversion en float : `net_total` doit
+        # etre exactement la difference affichee, pas un residu binaire.
+        sales = Decimal(str(sales_total or 0))
+        refunds = Decimal(str(refunds_total or 0))
         grouped[str(z_id)].append(
             {
                 "cashier_id": str(cashier_id) if cashier_id else None,
                 "display_name": display_name or UNIDENTIFIED_LABEL,
-                "sales_count": int(count or 0),
-                "sales_total": float(Decimal(str(total or 0))),
+                "sales_count": int(sales_count or 0),
+                "sales_total": float(sales),
+                "refunds_count": int(refunds_count or 0),
+                "refunds_total": float(refunds),
+                "net_total": float(sales - refunds),
             }
         )
     # Ordre deterministe (le PDF du Z doit rester octet pour octet

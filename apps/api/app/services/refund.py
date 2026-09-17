@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import uuid
+from contextvars import ContextVar
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -59,6 +60,16 @@ class SumUpRefundFailed(RefundError):
 # AVANT tout appel — une fois pose, il n'est plus reimporte.
 refund_card_payment = None
 
+# PR9/K1 — sas de transmission des echanges SumUp du remboursement.
+# `refund_card_payment` est une indirection de module (l'agent B y injecte
+# son implementation, les tests un faux) : elle ne recoit ni session ni
+# service, il n'y a donc aucun moyen de lui faire persister elle-meme son
+# journal. Le sas est un ContextVar et non un global : deux annulations
+# concurrentes ne doivent pas se voler leurs traces. Une implementation
+# injectee qui l'ignore laisse simplement la liste vide, et le journal reste
+# facultatif — comme partout ailleurs en PR9.
+_refund_exchanges: ContextVar[list] = ContextVar("fripco_refund_exchanges", default=None)
+
 
 def _resolve_refund_card_payment():
     global refund_card_payment
@@ -67,7 +78,13 @@ def _resolve_refund_card_payment():
         async def _default(sumup_transaction_id: str, amount: Decimal) -> dict:
             from app.services.sumup_service import SumUpService
 
-            return await SumUpService().refund_transaction(sumup_transaction_id, amount=amount)
+            svc = SumUpService()
+            try:
+                return await svc.refund_transaction(sumup_transaction_id, amount=amount)
+            finally:
+                sink = _refund_exchanges.get()
+                if sink is not None:
+                    sink.extend(svc.drain_exchanges())
 
         refund_card_payment = _default
     return refund_card_payment
@@ -141,18 +158,54 @@ class RefundService:
         # un refus (reseau/HTTP) — il retourne ``{"ok": False, ...}`` — donc
         # on traite aussi bien une exception (faux de test) qu'un ok=False
         # comme un echec bloquant.
-        for payment in original.payments or []:
-            if payment.method == PaymentMethod.card and payment.sumup_transaction_id:
-                refunder = _resolve_refund_card_payment()
-                try:
-                    result = await refunder(payment.sumup_transaction_id, Decimal(str(payment.amount)))
-                except Exception as exc:  # noqa: BLE001 — cf. commentaire d'interface ci-dessus
-                    raise SumUpRefundFailed(f"Le remboursement SumUp a échoué : {exc}") from exc
-                if isinstance(result, dict) and not result.get("ok", True):
-                    raise SumUpRefundFailed(
-                        "Le remboursement SumUp a échoué : "
-                        f"{result.get('message') or result.get('status') or 'erreur inconnue'}"
-                    )
+        # PR9/K1 — sas ouvert pour la duree du remboursement ; vide dans le
+        # journal APRES l'operation metier (cf. `_refund_exchanges`).
+        #
+        # Deux sorties, deux facons d'ecrire le journal. En cas de SUCCES, la
+        # session de l'annulation sera commitee : `persist` ordinaire. En cas
+        # d'ECHEC, on leve `SumUpRefundFailed`, `get_db` annule la
+        # transaction — et un `persist` ordinaire y perdrait justement les
+        # echanges qu'on ira relire pour comprendre le refus. D'ou la session
+        # independante commitee a part (`persist_detached`).
+        sink: list = []
+        token = _refund_exchanges.set(sink)
+        refund_failed = False
+        try:
+            for payment in original.payments or []:
+                if payment.method == PaymentMethod.card and payment.sumup_transaction_id:
+                    refunder = _resolve_refund_card_payment()
+                    try:
+                        result = await refunder(
+                            payment.sumup_transaction_id, Decimal(str(payment.amount))
+                        )
+                    except Exception as exc:  # noqa: BLE001 — cf. commentaire d'interface ci-dessus
+                        refund_failed = True
+                        raise SumUpRefundFailed(
+                            f"Le remboursement SumUp a échoué : {exc}"
+                        ) from exc
+                    if isinstance(result, dict) and not result.get("ok", True):
+                        refund_failed = True
+                        raise SumUpRefundFailed(
+                            "Le remboursement SumUp a échoué : "
+                            f"{result.get('message') or result.get('status') or 'erreur inconnue'}"
+                        )
+        except BaseException:
+            # Toute autre sortie brutale (annulation de tache, erreur
+            # inattendue) emporte aussi la transaction : meme traitement.
+            refund_failed = True
+            raise
+        finally:
+            _refund_exchanges.reset(token)
+            if sink:
+                from app.services.sumup_exchange_log import (
+                    persist as persist_exchanges,
+                    persist_detached as persist_exchanges_detached,
+                )
+
+                if refund_failed:
+                    await persist_exchanges_detached(sink)
+                else:
+                    await persist_exchanges(self.db, sink)
 
         next_number = (
             await self.db.execute(select(func.coalesce(func.max(Transaction.transaction_number), 0)))

@@ -94,6 +94,13 @@ DEFAULT_VALUES: dict[str, dict[str, Any]] = {
     # vendeuses. Une fois vrai, aucune vente, annulation ni mouvement de
     # caisse n'est possible sans vendeuse identifiee (422 `cashier_required`).
     "pos": {"cashier_required": False},
+    # PR9 (K1, docs/ARCHITECTURE_PR9.md) — retention du journal des echanges
+    # SumUp (`sumup_exchanges`), purge par le cron nocturne de 03:00 apres
+    # la sauvegarde. Bornes 7-730 jours : en dessous d'une semaine on ne
+    # peut plus deboguer un incident du week-end, au-dela de deux ans la
+    # table grossit sans servir a personne. Aucun impact fiscal — table
+    # d'exploitation, aucune vente n'y nait.
+    "payments": {"exchange_retention_days": 90},
 }
 
 
@@ -126,6 +133,18 @@ class SettingsService:
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
+
+    async def get_exchange_retention_days(self) -> int:
+        """Reglage `payments.exchange_retention_days` (PR9/K1), borne 7-730.
+
+        Passe par le clamp du service de journal plutot que de faire
+        confiance au JSONB : la purge nocturne doit tourner meme si le
+        reglage a ete ecrit a la main avec une valeur aberrante.
+        """
+        from app.services.sumup_exchange_log import clamp_retention_days
+
+        payments = await self.get("payments")
+        return clamp_retention_days(payments.get("exchange_retention_days"))
 
     async def set(
         self,

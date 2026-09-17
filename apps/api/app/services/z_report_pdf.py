@@ -234,22 +234,38 @@ async def generate_z_report_pdf(db: AsyncSession, z_report: ZReport) -> bytes:
     # ------------------------------------------------------------------
     if by_cashier:
         story.append(Paragraph("Ventes par vendeuse", h2))
+        # PR9/K0 — trois colonnes : brut des ventes, annulations, net. Le
+        # total de la colonne Net se reconcilie avec le net du Z ; sans
+        # elle, une vendeuse dont la vente a ete annulee affichait un
+        # chiffre que rien ne recoupait.
         cashier_rows = [
             [
                 Paragraph("<b>Vendeuse</b>", body),
                 Paragraph("<b>Ventes</b>", body_right),
-                Paragraph("<b>Total</b>", body_right),
+                Paragraph("<b>Annulations</b>", body_right),
+                Paragraph("<b>Net</b>", body_right),
             ]
         ]
         for entry in by_cashier:
+            # `.get` avec repli : un Z peut etre rendu a partir d'un
+            # dictionnaire produit avant PR9 (cache, test, appelant tiers).
+            sales_total = float(entry["sales_total"])
+            refunds_total = float(entry.get("refunds_total", 0.0))
+            net_total = float(entry.get("net_total", sales_total - refunds_total))
             cashier_rows.append(
                 [
                     Paragraph(entry["display_name"], body),
-                    Paragraph(str(entry["sales_count"]), body_right),
-                    Paragraph(_format_eur(float(entry["sales_total"])), body_right),
+                    Paragraph(
+                        f"{entry['sales_count']} · {_format_eur(sales_total)}", body_right
+                    ),
+                    Paragraph(
+                        f"{int(entry.get('refunds_count', 0))} · {_format_eur(refunds_total)}",
+                        body_right,
+                    ),
+                    Paragraph(_format_eur(net_total), body_right),
                 ]
             )
-        cashier_table = Table(cashier_rows, colWidths=[80 * mm, 35 * mm, 35 * mm])
+        cashier_table = Table(cashier_rows, colWidths=[60 * mm, 35 * mm, 35 * mm, 30 * mm])
         cashier_table.setStyle(
             TableStyle(
                 [

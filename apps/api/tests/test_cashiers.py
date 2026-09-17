@@ -633,18 +633,27 @@ async def test_z_report_breaks_sales_down_by_cashier(client, auth_headers, open_
             "display_name": "Léa",
             "sales_count": 2,
             "sales_total": 30.0,
+            "refunds_count": 0,
+            "refunds_total": 0.0,
+            "net_total": 30.0,
         },
         {
             "cashier_id": manon["id"],
             "display_name": "Manon",
             "sales_count": 1,
             "sales_total": 30.0,
+            "refunds_count": 0,
+            "refunds_total": 0.0,
+            "net_total": 30.0,
         },
         {
             "cashier_id": None,
             "display_name": UNIDENTIFIED_LABEL,
             "sales_count": 1,
             "sales_total": 5.0,
+            "refunds_count": 0,
+            "refunds_total": 0.0,
+            "net_total": 5.0,
         },
     ]
     # La vendeuse qui cloture est notee sur le Z et sur le tiroir.
@@ -668,6 +677,40 @@ async def test_z_report_breaks_sales_down_by_cashier(client, auth_headers, open_
     assert listing.json()["z_reports"][0]["by_cashier"] == body["by_cashier"]
 
 
+async def test_z_report_by_cashier_is_net_of_refunds(client, auth_headers, open_drawer):
+    """PR9/K0 — une vendeuse dont l'unique vente est annulee finit a zero net.
+
+    Le brut, lui, ne bouge pas : la vente a bien eu lieu, et c'est ce que
+    verifie le rapprochement avec la bande de caisse.
+    """
+    lea = await _create_cashier(client, auth_headers, "Léa")
+    await _identify(client, auth_headers, lea["id"], PIN)
+    sale = await _sell(client, auth_headers, "40.00")
+    assert sale.status_code == 201, sale.text
+    cancelled = await client.post(
+        f"/api/pos/transactions/{sale.json()['id']}/cancel",
+        json={"reason": "Article défectueux"},
+        headers=auth_headers,
+    )
+    assert cancelled.status_code == 201, cancelled.text
+
+    z = await client.post(
+        "/api/pos/drawer/close", json={"closing_amount": "100.00"}, headers=auth_headers
+    )
+    assert z.status_code == 200, z.text
+    assert z.json()["by_cashier"] == [
+        {
+            "cashier_id": lea["id"],
+            "display_name": "Léa",
+            "sales_count": 1,
+            "sales_total": 40.0,
+            "refunds_count": 1,
+            "refunds_total": 40.0,
+            "net_total": 0.0,
+        },
+    ]
+
+
 async def test_z_report_pdf_stays_deterministic_with_cashiers(client, auth_headers, open_drawer):
     cashier = await _create_cashier(client, auth_headers, "Léa")
     await _identify(client, auth_headers, cashier["id"], PIN)
@@ -683,6 +726,9 @@ async def test_z_report_pdf_stays_deterministic_with_cashiers(client, auth_heade
     assert first.content == second.content
     assert first.headers["X-PDF-SHA256"] == second.headers["X-PDF-SHA256"]
     assert b"Ventes par vendeuse" in first.content
+    # PR9/K0 — les trois colonnes brut / annulations / net.
+    assert b"Annulations" in first.content
+    assert b"Net" in first.content
 
 
 # ---------------------------------------------------------------------------

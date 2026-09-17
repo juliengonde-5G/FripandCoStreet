@@ -10,13 +10,22 @@
  * Annuler, `POST /retry` pour Réessayer) — §4.5 du contrat, en appelant
  * directement `lib/api.ts` (transparent réel/mock selon
  * NEXT_PUBLIC_MOCK_API, cf. lib/mockApi.ts).
+ *
+ * PR9 (K4) : quand le terminal n'a pas répondu pour une cause récupérable,
+ * le serveur met l'encaissement en file et renvoie une 409 `payment_failed`
+ * portant `recoverable` et `failed_payment_id`. La caisse le dit en clair
+ * (« la vente n'est pas perdue »), propose **Réessayer** (qui relance un
+ * encaissement sur le terminal puis reprend le polling existant) et
+ * **Autre moyen de paiement** — le panier reste intact dans les deux cas,
+ * et aucune vente n'est créée tant que le paiement n'est pas accepté.
  */
 import React, { useEffect, useRef, useState } from "react";
 
 import Modal from "@/components/ui/Modal";
 import { api, ApiError } from "@/lib/api";
 import { formatCurrency } from "@/lib/format";
-import type { CbCheckoutStatus, CbInitiateResponse, PaymentInput } from "@/lib/types";
+import { retryFailedPayment, type FailedPayment } from "@/lib/payments";
+import type { CbCheckoutState, CbCheckoutStatus, CbInitiateResponse, PaymentInput } from "@/lib/types";
 
 import NumPadModal from "./NumPadModal";
 import PaymentMethodSelector, { type PosPaymentMethod } from "./PaymentMethodSelector";
@@ -47,10 +56,44 @@ interface Props {
 type Step =
   | { kind: "select" }
   | { kind: "amount-cash"; mixed: boolean }
-  | { kind: "card-pending"; amount: number; status: PaymentStatus; detail?: string }
+  | {
+      kind: "card-pending";
+      amount: number;
+      status: PaymentStatus;
+      /** Libellé imposé, quand le bandeau par défaut ne dit pas l'essentiel. */
+      label?: string;
+      detail?: string;
+      /** Échec récupérable : l'encaissement est en file, on peut le relancer. */
+      recovery?: CardRecovery;
+    }
   | { kind: "confirm" };
 
+/** Ce que la caisse retient d'un encaissement carte mis en file (K3) —
+ * de quoi le relancer et savoir combien de réessais restent. */
+interface CardRecovery {
+  failedPaymentId: FailedPayment["id"] | null;
+  retryCount: FailedPayment["retry_count"] | null;
+  maxRetries: FailedPayment["max_retries"] | null;
+  /** Plus aucun réessai possible (409 `retries_exhausted`). */
+  exhausted: boolean;
+}
+
+/** Réponse d'un réessai, côté file (K3) comme côté route historique :
+ * un nouvel encaissement `pending`, ou — si le serveur a réconcilié — le
+ * `checkout_id` d'origine déjà `paid`. */
+interface CardRetryResult {
+  checkout_id: string;
+  status?: CbCheckoutState;
+  retry_count?: number;
+  reconciled?: boolean;
+  card_brand?: string;
+  last4?: string;
+}
+
 const POLL_MS = 1500;
+
+const RECOVERABLE_LABEL = "Le terminal n'a pas répondu, la vente n'est pas perdue";
+const EXHAUSTED_LABEL = "Réessais épuisés, choisissez un autre moyen de paiement";
 
 export default function MultiStepPaymentWizard({
   open,
@@ -69,6 +112,11 @@ export default function MultiStepPaymentWizard({
   const checkoutIdRef = useRef<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stoppedRef = useRef(false);
+  /** Encaissement carte mis en file pour ce panier (K3), avec son montant :
+   * repris tel quel si la vendeuse revient sur la carte après avoir regardé
+   * un autre moyen de paiement — le serveur refuse un nouvel `initiate`
+   * tant que l'essai précédent n'a pas été relancé. */
+  const queuedCardRef = useRef<(CardRecovery & { amount: number }) | null>(null);
 
   const stopPolling = () => {
     stoppedRef.current = true;
@@ -93,6 +141,7 @@ export default function MultiStepPaymentWizard({
     if (committing) return;
     stopPolling();
     checkoutIdRef.current = null;
+    queuedCardRef.current = null;
     setTenders([]);
     setStep({ kind: "select" });
     setCommitError(null);
@@ -100,6 +149,30 @@ export default function MultiStepPaymentWizard({
   };
 
   // -- CB ------------------------------------------------------------------
+
+  /** Paiement accepté : bandeau vert un court instant (le vendeur voit le
+   * passage au vert), puis le tender est ajouté au panier avec le
+   * `checkout_id` qui a effectivement été payé. Aucun polling au-delà. */
+  const settleCardPayment = (
+    amount: number,
+    checkoutId: string,
+    banner?: { label?: string; detail?: string },
+  ): Promise<void> => {
+    stoppedRef.current = true;
+    // Le serveur a soldé la ligne de file (K3) : plus rien à relancer.
+    queuedCardRef.current = null;
+    checkoutIdRef.current = checkoutId;
+    setStep({ kind: "card-pending", amount, status: "paid", ...banner });
+    const tender: Tendered = { method: "card", amount, checkout_id: checkoutId };
+    return sleep(700).then(() => {
+      setTenders((prev) => {
+        const next = [...prev, tender];
+        const cover = coverage(next, totalTtc);
+        setStep(cover >= totalTtc - 0.001 ? { kind: "confirm" } : { kind: "select" });
+        return next;
+      });
+    });
+  };
 
   const pollLoop = async (amount: number): Promise<void> => {
     stoppedRef.current = false;
@@ -110,19 +183,7 @@ export default function MultiStepPaymentWizard({
         const data = await api.get<CbCheckoutStatus>(`/api/pos/payments/cb/${checkoutIdRef.current}/status`);
         if (stoppedRef.current) return;
         if (data.status === "paid") {
-          stoppedRef.current = true;
-          // Montre le bandeau "Paiement validé" un court instant avant
-          // d'enchaîner sur la confirmation — le vendeur voit le passage à
-          // vert avant que l'écran change.
-          setStep({ kind: "card-pending", amount, status: "paid" });
-          const tender: Tendered = { method: "card", amount, checkout_id: checkoutIdRef.current };
-          await sleep(700);
-          setTenders((prev) => {
-            const next = [...prev, tender];
-            const cover = coverage(next, totalTtc);
-            setStep(cover >= totalTtc - 0.001 ? { kind: "confirm" } : { kind: "select" });
-            return next;
-          });
+          await settleCardPayment(amount, checkoutIdRef.current, { detail: cardSummary(data) });
           return;
         }
         if (data.status === "failed") {
@@ -144,7 +205,28 @@ export default function MultiStepPaymentWizard({
     }
   };
 
+  /** Construit l'écran d'échec : soit l'échec récupérable de PR9 (le
+   * terminal n'a pas répondu, l'encaissement est en file), soit le refus
+   * de carte historique. `previous` sert au 409 `retries_exhausted`, qui
+   * ne répète pas l'identifiant de la ligne en file. */
+  const failureStep = (amount: number, err: unknown, previous: CardRecovery | null): Step => {
+    const detail = err instanceof ApiError ? err.detail : "Impossible de joindre le terminal de paiement.";
+    const recovery = readCardRecovery(err, previous);
+    if (recovery) {
+      queuedCardRef.current = recovery.failedPaymentId ? { ...recovery, amount } : null;
+      return { kind: "card-pending", amount, status: "failed", detail, recovery };
+    }
+    return { kind: "card-pending", amount, status: "failed", detail };
+  };
+
   const startCardCheckout = async (amount: number): Promise<void> => {
+    // Un encaissement du même montant attend déjà dans la file : on le
+    // relance au lieu d'en ouvrir un nouveau (le serveur refuserait).
+    const queued = queuedCardRef.current;
+    if (queued && !queued.exhausted && queued.failedPaymentId && Math.abs(queued.amount - amount) < 0.005) {
+      await runCardRetry(amount, queued, () => retryFailedPayment(queued.failedPaymentId as string));
+      return;
+    }
     setStep({ kind: "card-pending", amount, status: "pending" });
     try {
       const data = await api.post<CbInitiateResponse>("/api/pos/payments/cb/initiate", {
@@ -154,8 +236,42 @@ export default function MultiStepPaymentWizard({
       checkoutIdRef.current = data.checkout_id;
       void pollLoop(amount);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : "Impossible de joindre le terminal de paiement.";
-      setStep({ kind: "card-pending", amount, status: "failed", detail });
+      setStep(failureStep(amount, err, null));
+    }
+  };
+
+  /** Relance commune : on repasse en « en attente », on appelle le
+   * serveur, puis on reprend le polling existant sur le nouvel
+   * encaissement — sauf si le serveur répond que l'encaissement d'origine
+   * était déjà payé (réconciliation) : on enchaîne alors directement sur
+   * la vente, avec le `checkout_id` d'origine, sans rien repousser sur le
+   * terminal et sans débiter la cliente une seconde fois. */
+  const runCardRetry = async (
+    amount: number,
+    previous: CardRecovery | null,
+    call: () => Promise<CardRetryResult>,
+  ): Promise<void> => {
+    setStep({ kind: "card-pending", amount, status: "pending" });
+    try {
+      const data = await call();
+      if (data.status === "paid") {
+        await settleCardPayment(amount, data.checkout_id, {
+          label: data.reconciled ? "Ce paiement était déjà passé sur le terminal" : undefined,
+          detail: cardSummary(data),
+        });
+        return;
+      }
+      checkoutIdRef.current = data.checkout_id;
+      if (previous?.failedPaymentId) {
+        queuedCardRef.current = {
+          ...previous,
+          retryCount: data.retry_count ?? (previous.retryCount ?? 0) + 1,
+          amount,
+        };
+      }
+      void pollLoop(amount);
+    } catch (err) {
+      setStep(failureStep(amount, err, previous));
     }
   };
 
@@ -176,17 +292,27 @@ export default function MultiStepPaymentWizard({
     if (step.kind !== "card-pending") return;
     const amount = step.amount;
     const id = checkoutIdRef.current;
-    setStep({ kind: "card-pending", amount, status: "pending" });
-    try {
-      const data = id
-        ? await api.post<CbInitiateResponse>(`/api/pos/payments/cb/${id}/retry`, {})
-        : await api.post<CbInitiateResponse>("/api/pos/payments/cb/initiate", { amount, client_uuid: clientUuid });
-      checkoutIdRef.current = data.checkout_id;
-      void pollLoop(amount);
-    } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : "Impossible de joindre le terminal de paiement.";
-      setStep({ kind: "card-pending", amount, status: "failed", detail });
-    }
+    await runCardRetry(amount, null, () =>
+      id
+        ? api.post<CbInitiateResponse>(`/api/pos/payments/cb/${id}/retry`, {})
+        : api.post<CbInitiateResponse>("/api/pos/payments/cb/initiate", { amount, client_uuid: clientUuid }),
+    );
+  };
+
+  /** PR9 (K4) : réessai d'un encaissement mis en file. */
+  const handleRetryQueuedCard = async (): Promise<void> => {
+    if (step.kind !== "card-pending") return;
+    const recovery = step.recovery;
+    const failedPaymentId = recovery?.failedPaymentId;
+    if (!recovery || !failedPaymentId) return;
+    await runCardRetry(step.amount, recovery, () => retryFailedPayment(failedPaymentId));
+  };
+
+  /** « Autre moyen de paiement » : retour au choix, panier intact — la
+   * ligne reste en file côté serveur, rien n'est encaissé. */
+  const handleOtherMethod = (): void => {
+    stopPolling();
+    setStep({ kind: "select" });
   };
 
   // -- Méthodes --------------------------------------------------------
@@ -315,22 +441,53 @@ export default function MultiStepPaymentWizard({
           <div className="space-y-3">
             <PaymentStatusBanner
               status={step.status}
-              detail={step.detail}
+              label={step.label ?? (step.recovery ? (step.recovery.exhausted ? EXHAUSTED_LABEL : RECOVERABLE_LABEL) : undefined)}
+              detail={step.recovery ? recoveryDetail(step.recovery, step.detail) : step.detail}
               actionLabel={step.status === "pending" ? "Annuler" : undefined}
               onAction={step.status === "pending" ? () => void handleCancelCard() : undefined}
-              secondaryActionLabel={step.status === "failed" || step.status === "cancelled" ? "Réessayer" : undefined}
+              secondaryActionLabel={
+                !step.recovery && (step.status === "failed" || step.status === "cancelled") ? "Réessayer" : undefined
+              }
               onSecondaryAction={
-                step.status === "failed" || step.status === "cancelled" ? () => void handleRetryCard() : undefined
+                !step.recovery && (step.status === "failed" || step.status === "cancelled")
+                  ? () => void handleRetryCard()
+                  : undefined
               }
             />
-            {(step.status === "failed" || step.status === "cancelled") && (
-              <button
-                type="button"
-                onClick={() => setStep({ kind: "select" })}
-                className="min-h-touch w-full rounded-fc-lg border border-fc-line bg-fc-surface px-4 py-3 text-base font-medium text-fc-ink hover:bg-fc-bg-alt"
+            {step.recovery ? (
+              // Échec récupérable (K4) : deux issues, jamais de panier perdu.
+              <div
+                className={
+                  canRetryQueued(step.recovery) ? "grid gap-2 sm:grid-cols-2" : "grid gap-2"
+                }
               >
-                Choisir un autre moyen de paiement
-              </button>
+                {canRetryQueued(step.recovery) && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRetryQueuedCard()}
+                    className="min-h-touch w-full rounded-fc-lg bg-fc-primary px-4 py-3 text-base font-semibold text-white transition-colors hover:bg-fc-primary-deep"
+                  >
+                    Réessayer
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleOtherMethod}
+                  className="min-h-touch w-full rounded-fc-lg border border-fc-line bg-fc-surface px-4 py-3 text-base font-medium text-fc-ink hover:bg-fc-bg-alt"
+                >
+                  Autre moyen de paiement
+                </button>
+              </div>
+            ) : (
+              (step.status === "failed" || step.status === "cancelled") && (
+                <button
+                  type="button"
+                  onClick={handleOtherMethod}
+                  className="min-h-touch w-full rounded-fc-lg border border-fc-line bg-fc-surface px-4 py-3 text-base font-medium text-fc-ink hover:bg-fc-bg-alt"
+                >
+                  Choisir un autre moyen de paiement
+                </button>
+              )
             )}
           </div>
         )}
@@ -388,6 +545,52 @@ export default function MultiStepPaymentWizard({
       </div>
     </Modal>
   );
+}
+
+/** « VISA •••• 4242 » — ce que le terminal a renvoyé, quand il le renvoie. */
+function cardSummary(data: { card_brand?: string; last4?: string }): string | undefined {
+  const parts = [data.card_brand, data.last4 ? `•••• ${data.last4}` : null].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+/** Un réessai n'est proposé que si la file en accepte encore un. */
+function canRetryQueued(recovery: CardRecovery): boolean {
+  return !recovery.exhausted && Boolean(recovery.failedPaymentId);
+}
+
+/** Lit les champs de reprise d'une 409 : `recoverable` + `failed_payment_id`
+ * sur `payment_failed`, ou le code `retries_exhausted` (qui ne répète pas
+ * l'identifiant — on garde alors celui de l'échec précédent). Toute autre
+ * erreur, dont un refus de carte, rend `null` : comportement inchangé. */
+function readCardRecovery(err: unknown, previous: CardRecovery | null): CardRecovery | null {
+  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  const body = err.body && typeof err.body === "object" ? (err.body as Record<string, unknown>) : {};
+  const bodyId = typeof body.failed_payment_id === "string" && body.failed_payment_id ? body.failed_payment_id : null;
+  const failedPaymentId = bodyId ?? previous?.failedPaymentId ?? null;
+  const retryCount = readNumber(body.retry_count) ?? previous?.retryCount ?? null;
+  const maxRetries = readNumber(body.max_retries) ?? previous?.maxRetries ?? null;
+  if (err.code === "retries_exhausted") {
+    return { failedPaymentId, retryCount, maxRetries, exhausted: true };
+  }
+  if (err.code === "payment_failed" && body.recoverable === true && failedPaymentId) {
+    return { failedPaymentId, retryCount, maxRetries, exhausted: false };
+  }
+  return null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Message sous le bandeau : la cause rédigée par le serveur, puis le
+ * compte des réessais déjà faits quand le serveur le donne. */
+function recoveryDetail(recovery: CardRecovery, detail?: string): string | undefined {
+  const parts: string[] = [];
+  if (detail) parts.push(detail);
+  if (!recovery.exhausted && recovery.retryCount && recovery.maxRetries) {
+    parts.push(`Réessais déjà faits : ${recovery.retryCount} sur ${recovery.maxRetries}.`);
+  }
+  return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
 function coverage(tenders: Tendered[], total: number): number {

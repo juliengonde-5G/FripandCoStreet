@@ -1,5 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Poppins, IBM_Plex_Mono } from "next/font/google";
+
+import PwaInstallBanner from "@/components/pwa/PwaInstallBanner";
+import ServiceWorkerRegistration from "@/components/pwa/ServiceWorkerRegistration";
 import "./globals.css";
 
 // Charte graphique (docs/CHARTE_GRAPHIQUE.md) — Poppins pour les titres et
@@ -40,6 +43,16 @@ export const metadata: Metadata = {
     shortcut: "/favicon.ico",
     apple: "/apple-touch-icon.png",
   },
+  // Application installable (PR9, contrat K6) — le manifeste est un fichier
+  // statique (`public/manifest.webmanifest`), pas une route générée : c'est
+  // Chrome sur la tablette Android qui le lit pour proposer l'installation.
+  manifest: "/manifest.webmanifest",
+  applicationName: "Frip & Co Street",
+  appleWebApp: {
+    capable: true,
+    title: "Frip & Co",
+    statusBarStyle: "default",
+  },
 };
 
 export default function RootLayout({
@@ -51,6 +64,10 @@ export default function RootLayout({
     <html lang="fr" className={`${poppins.variable} ${ibmPlexMono.variable}`}>
       <body className="font-sans antialiased bg-background text-foreground">
         {children}
+        {/* Application installable (PR9, K6) — rendus ici pour être présents
+            sur toutes les pages, écran de connexion compris. */}
+        <ServiceWorkerRegistration />
+        <PwaInstallBanner />
       </body>
     </html>
   );

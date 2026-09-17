@@ -77,6 +77,7 @@ import type {
   ZReport,
 } from "./types";
 import type { BytesWithHeaders, FetchAPIOptions } from "./api";
+import type { FailedPayment, PaymentFailuresReport, SumupExchange, SumupOperation } from "./payments";
 
 /** Version de la politique de consentement (E8) — même constante que le
  * backend (`CONSENT_POLICY_VERSION`), horodate chaque ligne du journal. */
@@ -294,6 +295,155 @@ function requireCashier(): void {
   }
 }
 
+// --- PR9 — administration : journal des échanges et file des paiements ----
+//
+// Jeu de démonstration de l'onglet « Paiements CB » (K4) : trois échanges
+// avec le terminal dont un en erreur, un encaissement resté en attente, et
+// l'analyse qui se calcule à partir des deux. Assez pour voir les trois
+// cartes remplies, assez peu pour rester lisible.
+//
+// Aucune donnée personnelle ici, comme en vrai (K1) : des numéros, des
+// montants, des durées.
+
+function seedSumupExchanges(): SumupExchange[] {
+  const minutesAgo = (n: number): string => new Date(Date.now() - n * 60_000).toISOString();
+  return [
+    {
+      id: uuid(),
+      created_at: minutesAgo(4),
+      operation: "checkout_status",
+      method: "GET",
+      url_path: "/v0.1/checkouts/9f2c41e0",
+      request_payload: null,
+      response_status: 200,
+      response_payload: { id: "9f2c41e0", status: "PAID", amount: 24.5, currency: "EUR" },
+      duration_ms: 141,
+      retry_count: 0,
+      is_error: false,
+      error_type: null,
+      error_message: null,
+      checkout_id: "9f2c41e0",
+      client_transaction_id: "demo-9f2c41e0",
+      request_id: "req-7f3a19",
+    },
+    {
+      id: uuid(),
+      created_at: minutesAgo(21),
+      operation: "push_to_reader",
+      method: "POST",
+      url_path: "/v0.1/merchants/MDEMO123/readers/rdr-solo-01/checkout",
+      request_payload: { total_amount: { value: 3490, currency: "EUR", minor_unit: 2 }, description: "Frip & Co Street" },
+      response_status: null,
+      response_payload: null,
+      duration_ms: 9_012,
+      retry_count: 2,
+      is_error: true,
+      error_type: "timeout",
+      error_message: "Le terminal n'a pas répondu dans le délai imparti.",
+      checkout_id: "5b8d7a44",
+      client_transaction_id: "demo-5b8d7a44",
+      request_id: "req-7f3a17",
+    },
+    {
+      id: uuid(),
+      created_at: minutesAgo(22),
+      operation: "ping_reader",
+      method: "GET",
+      url_path: "/v0.1/merchants/MDEMO123/readers/rdr-solo-01",
+      request_payload: null,
+      response_status: 200,
+      response_payload: { id: "rdr-solo-01", status: "online", battery: 78 },
+      duration_ms: 96,
+      retry_count: 0,
+      is_error: false,
+      error_type: null,
+      error_message: null,
+      checkout_id: null,
+      client_transaction_id: null,
+      request_id: "req-7f3a16",
+    },
+  ];
+}
+
+/** Un encaissement laissé en attente au chargement, pour que la carte
+ * « Échecs en attente » ne soit pas vide en démonstration. Même file que
+ * la caisse : le parcours d'échec récupérable (plus bas) y ajoute ses
+ * propres lignes. */
+function seedFailedPayments(): FailedPayment[] {
+  const created = new Date(Date.now() - 21 * 60_000).toISOString();
+  return [
+    {
+      id: "demo-failed-payment",
+      created_at: created,
+      updated_at: created,
+      attempt_id: "demo-5b8d7a44",
+      client_uuid: "demo-5b8d7a44",
+      amount: 34.9,
+      status: "pending",
+      error_type: "timeout",
+      last_error: "Le terminal n'a pas répondu dans le délai imparti.",
+      retry_count: 1,
+      max_retries: 3,
+      next_retry_at: null,
+      resolved_at: null,
+      transaction_id: null,
+      cashier_id: null,
+    },
+  ];
+}
+
+let sumupExchanges: SumupExchange[] = seedSumupExchanges();
+let failedPayments: FailedPayment[] = seedFailedPayments();
+
+/** Analyse des échecs (K2) recalculée à la lecture, à partir des échanges
+ * et de la file — comme le backend, qui n'entrepose aucun agrégat. */
+function buildPaymentFailuresReport(days: number): PaymentFailuresReport {
+  const since = Date.now() - days * 24 * 60 * 60 * 1000;
+  const window = sumupExchanges.filter((x) => Date.parse(x.created_at) >= since);
+  const inWindow = failedPayments.filter((f) => Date.parse(f.created_at) >= since);
+
+  const topErrors = new Map<string, number>();
+  const byErrorType: Record<string, number> = {};
+  const byOperation = new Map<SumupOperation, { count: number; errors: number }>();
+  for (const x of window) {
+    const row = byOperation.get(x.operation) ?? { count: 0, errors: 0 };
+    row.count += 1;
+    if (x.is_error) {
+      row.errors += 1;
+      if (x.error_type) byErrorType[x.error_type] = (byErrorType[x.error_type] ?? 0) + 1;
+      const message = x.error_message ?? "Erreur sans message";
+      topErrors.set(message, (topErrors.get(message) ?? 0) + 1);
+    }
+    byOperation.set(x.operation, row);
+  }
+
+  const attempts = { failed: 0, paid: 0, pending: 0, cancelled: 0 };
+  for (const a of cbAttempts.values()) attempts[a.status] += 1;
+  // Les essais de démo pré-semés : un échec (celui de la file) et un
+  // encaissement accepté, pour que la carte ne soit pas vide au chargement.
+  attempts.failed += inWindow.length;
+  attempts.paid += window.filter((x) => x.operation === "checkout_status" && !x.is_error).length;
+
+  return {
+    period_days: days,
+    attempts,
+    top_errors: [...topErrors.entries()]
+      .map(([error_message, count]) => ({ error_message, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10),
+    exchanges_by_error_type: byErrorType,
+    by_operation: [...byOperation.entries()]
+      .map(([operation, row]) => ({ operation, count: row.count, errors: row.errors }))
+      .sort((a, b) => b.count - a.count),
+    retries: {
+      queued: failedPayments.filter((f) => f.status === "pending").length,
+      succeeded: failedPayments.filter((f) => f.status === "succeeded").length,
+      exhausted: failedPayments.filter((f) => f.status === "exhausted").length,
+      abandoned: failedPayments.filter((f) => f.status === "abandoned").length,
+    },
+  };
+}
+
 // --- PR3 : clients, consentements, envois de ticket -----------------------
 let clients: Client[] = [];
 let consents: MockConsent[] = [];
@@ -320,8 +470,123 @@ interface CbAttempt {
   amount: number;
   status: CbCheckoutState;
   created_at: number; // Date.now()
+  /** PR9 : essai né d'un réessai de la file — l'accepter la solde. */
+  failed_payment_id?: string;
 }
 const cbAttempts = new Map<string, CbAttempt>();
+
+// --- PR9 — caisse : file des encaissements carte en échec ------------------
+//
+// Contrat K3/K4 (docs/ARCHITECTURE_PR9.md) : quand le terminal ne répond
+// pas pour une cause récupérable, le serveur met l'encaissement en file et
+// renvoie une 409 `payment_failed` enrichie de `recoverable: true` et de
+// `failed_payment_id` ; la caisse propose alors **Réessayer**
+// (`POST /api/pos/payments/cb/retry-failed/{id}`) ou un autre moyen de
+// paiement, sans jamais perdre le panier et sans créer de vente.
+//
+// Règles de la démo, choisies pour être déclenchables à volonté sans
+// matériel :
+//   - montant se terminant par **,99 €** → la première tentative carte
+//     échoue de façon récupérable, le réessai repart sur le terminal et
+//     réussit ;
+//   - montant se terminant par **,98 €** → même échec, mais le paiement
+//     d'origine était en fait passé : le réessai ne repousse rien, le
+//     serveur **réconcilie** et répond `status: "paid"` avec le
+//     `checkout_id` d'origine et `reconciled: true` (la cliente n'est
+//     débitée qu'une fois).
+// Tout autre montant passe comme avant (payé ~2 s après l'envoi au
+// terminal). Un deuxième panier au même montant repart sur une file neuve
+// (`client_uuid` différent).
+//
+// La file elle-même (`failedPayments`) est déclarée avec le bloc « PR9 —
+// administration », qui la lit pour la carte « Échecs en attente ».
+
+/** Une ligne de la file par son identifiant. */
+function findQueuedPayment(id: string): FailedPayment | undefined {
+  return failedPayments.find((f) => f.id === id);
+}
+
+function centsOf(amount: number): number {
+  return Math.round(Math.abs(amount) * 100) % 100;
+}
+
+/** Montants de démo qui n'aboutissent pas du premier coup : …,99 € et …,98 €. */
+function triggersRecoverableFailure(amount: number): boolean {
+  return centsOf(amount) === 99 || centsOf(amount) === 98;
+}
+
+/** …,98 € : au réessai, le serveur découvre que l'original était payé. */
+function triggersReconciliation(amount: number): boolean {
+  return centsOf(amount) === 98;
+}
+
+/** 409 enrichie : `detail` + `code` comme partout (§5), plus les champs de
+ * reprise que la caisse lit sur `ApiError.body`. */
+function failWithBody(status: number, detail: string, code: string, extra: Record<string, unknown>): never {
+  const error = new ApiError(status, detail, code);
+  error.body = { detail, code, ...extra };
+  throw error;
+}
+
+/** Met un encaissement en file (statut `pending`) et journalise. */
+function queueFailedPayment(checkoutId: string, clientUuid: string, amount: number): FailedPayment {
+  const now = new Date().toISOString();
+  const queued: FailedPayment = {
+    id: uuid(),
+    created_at: now,
+    updated_at: now,
+    attempt_id: checkoutId,
+    client_uuid: clientUuid,
+    amount,
+    status: "pending",
+    error_type: "timeout",
+    last_error: "Le terminal n'a pas répondu à temps.",
+    retry_count: 0,
+    max_retries: 3,
+    next_retry_at: null,
+    resolved_at: null,
+    transaction_id: null,
+    cashier_id: null,
+  };
+  failedPayments.push(queued);
+  logJet("payment.failed_queued", {
+    failed_payment_id: queued.id,
+    attempt_id: checkoutId,
+    checkout_id: checkoutId,
+    amount,
+    error_type: queued.error_type,
+  });
+  return queued;
+}
+
+/** Paiement accepté : la ligne de file est soldée (la vente, elle, n'est
+ * créée qu'ensuite — c'est `linkQueuedPayments` qui l'y rattache). */
+function resolveQueuedPayment(attempt: CbAttempt): void {
+  if (!attempt.failed_payment_id) return;
+  const queued = findQueuedPayment(attempt.failed_payment_id);
+  if (!queued || queued.status !== "pending") return;
+  queued.status = "succeeded";
+  queued.resolved_at = new Date().toISOString();
+  queued.updated_at = queued.resolved_at;
+  logJet("payment.retry_succeeded", {
+    failed_payment_id: queued.id,
+    checkout_id: attempt.checkout_id,
+    retry_count: queued.retry_count,
+  });
+}
+
+/** Rattache la vente finalement encaissée aux lignes de file soldées. */
+function linkQueuedPayments(transactionId: string, payments: { checkout_id?: string }[]): void {
+  for (const payment of payments) {
+    if (!payment.checkout_id) continue;
+    const attempt = cbAttempts.get(payment.checkout_id);
+    const queued = attempt?.failed_payment_id ? findQueuedPayment(attempt.failed_payment_id) : undefined;
+    if (queued && !queued.transaction_id) {
+      queued.transaction_id = transactionId;
+      queued.updated_at = new Date().toISOString();
+    }
+  }
+}
 
 /** Compteur d'impressions PHYSIQUES par ticket (PR3b — distinct de
  * `_dup`/`duplicate_count`, qui compte les lectures du TEXTE du ticket via
@@ -411,6 +676,8 @@ function reset(): void {
   fiscalClosures = [];
   closureSeq = 0;
   databaseBackups = seedDatabaseBackups();
+  sumupExchanges = seedSumupExchanges();
+  failedPayments = seedFailedPayments();
   cashiers = seedCashiers();
   currentCashierId = null;
   pinAttempts.clear();
@@ -1564,6 +1831,9 @@ export async function mockFetchAPI<T = unknown>(
 
     const tx = buildTransaction("sale", body.items, body.discount, body.payments ?? []);
     (tx as unknown as { client_uuid?: string }).client_uuid = body.client_uuid;
+    // PR9 : si la carte est passée au deuxième essai, la ligne de file
+    // garde la trace de la vente qui en est née.
+    linkQueuedPayments(tx.id, body.payments ?? []);
     // PR7 (I3) — cliente choisie en caisse AVANT l'encaissement : le lien
     // est posé dès la création, et le ticket porte « Client : Prénom N. ».
     if (body.client_id) {
@@ -1739,15 +2009,99 @@ export async function mockFetchAPI<T = unknown>(
       return { checkout_id: pendingForUuid.checkout_id, status: "pending" } as unknown as T;
     }
     const checkout_id = uuid();
+    const amount = round2(body.amount || 0);
+    // PR9 (K4) : premier envoi d'un montant en ,99 € → le terminal ne
+    // répond pas, l'encaissement part en file, la caisse propose le réessai.
+    const alreadyQueued = failedPayments.some((f) => f.client_uuid === body.client_uuid);
+    if (triggersRecoverableFailure(amount) && !alreadyQueued) {
+      cbAttempts.set(checkout_id, {
+        checkout_id,
+        client_uuid: body.client_uuid,
+        amount,
+        status: "failed",
+        created_at: Date.now(),
+      });
+      const queued = queueFailedPayment(checkout_id, body.client_uuid, amount);
+      failWithBody(409, "Le terminal n'a pas répondu à temps.", "payment_failed", {
+        recoverable: true,
+        failed_payment_id: queued.id,
+        retry_count: queued.retry_count,
+        max_retries: queued.max_retries,
+      });
+    }
     cbAttempts.set(checkout_id, {
       checkout_id,
       client_uuid: body.client_uuid,
-      amount: round2(body.amount || 0),
+      amount,
       status: "pending",
       created_at: Date.now(),
     });
     logJet("payment.cb_initiated", { checkout_id, amount: body.amount });
     return { checkout_id, status: "pending" } as unknown as T;
+  }
+
+  // PR9 (K4) — réessai d'un encaissement mis en file : un nouvel envoi part
+  // sur le terminal, la caisse reprend son polling sur le `checkout_id`
+  // renvoyé. Au-delà de `max_retries` : 409 `retries_exhausted`.
+  if ((m = path.match(/^\/api\/pos\/payments\/cb\/retry-failed\/([^/]+)$/)) && method === "POST") {
+    const queued = findQueuedPayment(m![1]);
+    if (!queued) fail(404, "Encaissement en file introuvable.", "not_found");
+    if (queued!.status === "succeeded") {
+      fail(409, "Cet encaissement a déjà été accepté par le terminal.", "already_paid");
+    }
+    if (queued!.status === "abandoned") fail(409, "Cet encaissement a été abandonné.", "abandoned");
+    if (queued!.status === "exhausted" || queued!.retry_count >= queued!.max_retries) {
+      queued!.status = "exhausted";
+      queued!.updated_at = new Date().toISOString();
+      logJet("payment.retries_exhausted", { failed_payment_id: queued!.id, retry_count: queued!.retry_count });
+      failWithBody(409, "Réessais épuisés pour cet encaissement.", "retries_exhausted", {
+        failed_payment_id: queued!.id,
+        retry_count: queued!.retry_count,
+        max_retries: queued!.max_retries,
+      });
+    }
+    // Réconciliation (revue Codex) : avant de repousser, le serveur relit
+    // l'encaissement d'origine. S'il était passé, rien ne repart sur le
+    // terminal et la caisse enchaîne sur la vente avec ce checkout-là.
+    const original = cbAttempts.get(queued!.attempt_id);
+    if (original && triggersReconciliation(queued!.amount)) {
+      original.status = "paid";
+      original.failed_payment_id = queued!.id;
+      resolveQueuedPayment(original);
+      return {
+        checkout_id: original.checkout_id,
+        status: "paid",
+        reconciled: true,
+        failed_payment_id: queued!.id,
+        retry_count: queued!.retry_count,
+        transaction_code: `MOCK-${original.checkout_id.slice(0, 8).toUpperCase()}`,
+        card_brand: "VISA",
+        last4: "4242",
+        failed_payment: queued,
+      } as unknown as T;
+    }
+    const checkout_id = uuid();
+    queued!.retry_count += 1;
+    queued!.updated_at = new Date().toISOString();
+    cbAttempts.set(checkout_id, {
+      checkout_id,
+      client_uuid: queued!.client_uuid,
+      amount: queued!.amount,
+      status: "pending",
+      created_at: Date.now(),
+      failed_payment_id: queued!.id,
+    });
+    logJet("payment.retry_started", {
+      failed_payment_id: queued!.id,
+      checkout_id,
+      retry_count: queued!.retry_count,
+    });
+    return {
+      checkout_id,
+      status: "pending",
+      failed_payment_id: queued!.id,
+      retry_count: queued!.retry_count,
+    } as unknown as T;
   }
 
   if ((m = path.match(/^\/api\/pos\/payments\/cb\/([^/]+)\/status$/)) && method === "GET") {
@@ -1758,6 +2112,7 @@ export async function mockFetchAPI<T = unknown>(
     if (attempt!.status === "pending" && Date.now() - attempt!.created_at >= 2000) {
       attempt!.status = "paid";
       logJet("payment.cb_paid", { checkout_id: attempt!.checkout_id, amount: attempt!.amount });
+      resolveQueuedPayment(attempt!);
     }
     if (attempt!.status === "paid") {
       return { status: "paid", transaction_code: `MOCK-${attempt!.checkout_id.slice(0, 8).toUpperCase()}`, card_brand: "VISA", last4: "4242" } as unknown as T;
@@ -1989,6 +2344,64 @@ export async function mockFetchAPI<T = unknown>(
     databaseBackups = databaseBackups.filter((b) => b.id !== m![1]);
     logJet("backup.deleted", { backup_id: backup!.id, filename: backup!.filename });
     return { deleted: true, id: m![1] } as unknown as T;
+  }
+
+  // --- PR9 — administration : journal des échanges et file (K2/K3) -------
+
+  if (path === "/api/admin/sumup-exchanges" && method === "GET") {
+    const onlyFailed = query.get("only_failed") === "true";
+    const operation = query.get("operation");
+    const errorType = query.get("error_type");
+    const checkoutId = query.get("checkout_id");
+    const from = query.get("from");
+    const to = query.get("to");
+    const limit = Math.min(query.get("limit") ? parseInt(query.get("limit")!, 10) : 100, 500);
+    const filtered = sumupExchanges
+      .filter((x) => (onlyFailed ? x.is_error : true))
+      .filter((x) => (operation ? x.operation === operation : true))
+      .filter((x) => (errorType ? x.error_type === errorType : true))
+      .filter((x) => (checkoutId ? (x.checkout_id ?? "").includes(checkoutId) : true))
+      .filter((x) => (from ? Date.parse(x.created_at) >= Date.parse(from) : true))
+      .filter((x) => (to ? Date.parse(x.created_at) <= Date.parse(to) : true))
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+    return { exchanges: filtered.slice(0, limit), total: filtered.length } as unknown as T;
+  }
+
+  if (path === "/api/admin/sumup-exchanges" && method === "DELETE") {
+    const count = sumupExchanges.length;
+    sumupExchanges = [];
+    logJet("sumup_exchanges.purged", { count });
+    return { deleted: count } as unknown as T;
+  }
+
+  if (path === "/api/admin/payment-failures" && method === "GET") {
+    const days = query.get("days") ? parseInt(query.get("days")!, 10) : 7;
+    if (!Number.isInteger(days) || days < 1) fail(422, "Période invalide.", "invalid_period");
+    return buildPaymentFailuresReport(days) as unknown as T;
+  }
+
+  if (path === "/api/admin/failed-payments" && method === "GET") {
+    const status = query.get("status");
+    const list = failedPayments
+      .filter((f) => (status ? f.status === status : true))
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+    return { failed_payments: list } as unknown as T;
+  }
+
+  if ((m = path.match(/^\/api\/admin\/failed-payments\/([^/]+)\/abandon$/)) && method === "POST") {
+    const payment = findQueuedPayment(m![1]);
+    if (!payment) fail(404, "Encaissement introuvable.", "not_found");
+    if (payment!.status !== "pending") {
+      fail(409, "Cet encaissement n'est plus en attente.", "not_pending");
+    }
+    const body = parseBody<{ reason?: string }>(options);
+    const reason = (body.reason ?? "").trim();
+    if (!reason) fail(422, "Indiquez un motif.", "reason_required");
+    payment!.status = "abandoned";
+    payment!.updated_at = nowIso();
+    payment!.resolved_at = payment!.updated_at;
+    logJet("payment.abandoned", { failed_payment_id: payment!.id, reason: reason.slice(0, 200) });
+    return payment as unknown as T;
   }
 
   // --- Matériel — imprimante ticket + tiroir-caisse (PR3b) ----------------

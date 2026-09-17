@@ -304,6 +304,16 @@ class PosSettingsIn(BaseModel):
     cashier_required: bool = False
 
 
+class PaymentsSettingsIn(BaseModel):
+    """Reglages paiement (PR9, K1) — retention du journal des echanges SumUp.
+
+    Bornes 7-730 jours : en dessous d'une semaine on ne peut plus deboguer
+    un incident du week-end, au-dela de deux ans la table grossit pour rien.
+    """
+
+    exchange_retention_days: int = Field(default=90, ge=7, le=730)
+
+
 _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "shop": ShopSettingsIn,
     "fiscal": FiscalSettingsIn,
@@ -313,6 +323,7 @@ _SETTINGS_SCHEMAS: dict[str, type[BaseModel]] = {
     "backup": BackupSettingsIn,
     "targets": TargetsSettingsIn,
     "pos": PosSettingsIn,
+    "payments": PaymentsSettingsIn,
 }
 
 

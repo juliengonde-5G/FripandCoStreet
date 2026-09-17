@@ -52,6 +52,10 @@ vente ne peut pas être réattribuée à une autre vendeuse après coup (la base
 le refuse), et la relève en cours de journée n'affecte que les ventes
 suivantes : celles déjà encaissées gardent le nom de celle qui les a faites.
 
+Trois colonnes par vendeuse : **Ventes** (le brut de la journée),
+**Annulations** et **Net** — et c'est la somme de la colonne Net qui se
+réconcilie avec le net du rapport Z, annulations déduites.
+
 C'est un outil de suivi d'équipe, pas un contrôle fiscal : un écart de
 caisse reste l'écart de **la journée**, pas celui d'une vendeuse — la caisse
 est physiquement commune, et rien n'est compté par vendeuse à la relève.

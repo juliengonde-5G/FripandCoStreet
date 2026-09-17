@@ -39,6 +39,7 @@ type IconName =
   | "cash"
   | "users"
   | "badge"
+  | "card"
   | "settings"
   | "printer"
   | "accounting"
@@ -79,6 +80,15 @@ const ICON_PATHS: Record<IconName, React.ReactNode> = {
       <path d="M9 2h6v3H9z" />
       <circle cx="12" cy="11" r="2.5" />
       <path d="M8 18.5a4 4 0 0 1 8 0" />
+    </>
+  ),
+  // PR9 (K4) — « Paiements CB » : une carte bancaire, bande magnétique
+  // horizontale, distincte de `cash` (le tiroir-caisse) juste au-dessus.
+  card: (
+    <>
+      <rect x="2" y="5" width="20" height="14" rx="2" />
+      <path d="M2 10h20" />
+      <path d="M6 15h4" />
     </>
   ),
   settings: (
@@ -192,6 +202,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/caisse", label: "Caisse", icon: "cash" },
       { href: "/admin?tab=clients", label: "Clients", icon: "users", matchQuery: { tab: "clients" } },
       { href: "/admin?tab=cashiers", label: "Vendeuses", icon: "badge", matchQuery: { tab: "cashiers" } },
+      { href: "/admin?tab=payments", label: "Paiements CB", icon: "card", matchQuery: { tab: "payments" } },
     ],
   },
   {

@@ -185,6 +185,11 @@ async def run_nightly_database_backup() -> None:
     `failed` avant de lever `BackupError` : ce wrapper journalise en plus
     au JET (`system.job_failed`) et alerte `backup.alert_email` (repli
     `shop.email` via `_alert_job_failure`) — jamais avale en silence (S-5).
+
+    Ce creneau porte aussi la purge du journal des echanges SumUp (PR9/K1),
+    qui tourne INDEPENDAMMENT de la sauvegarde : desactiver la sauvegarde
+    nocturne ne doit pas geler la retention, sinon `sumup_exchanges` grossit
+    indefiniment sans que personne ne s'en apercoive.
     """
     try:
         from app.services import database_backup
@@ -194,11 +199,13 @@ async def run_nightly_database_backup() -> None:
             backup_settings = await SettingsService(db).get("backup")
             if not backup_settings.get("nightly_enabled", True):
                 logger.info("Sauvegarde nocturne désactivée (backup.nightly_enabled=false)")
-                return
-            backup = await database_backup.run_backup(db, trigger="nightly", user_id=None)
-            logger.info(
-                "Sauvegarde nocturne : statut=%s fichier=%s", backup.status.value, backup.filename
-            )
+            else:
+                backup = await database_backup.run_backup(db, trigger="nightly", user_id=None)
+                logger.info(
+                    "Sauvegarde nocturne : statut=%s fichier=%s",
+                    backup.status.value,
+                    backup.filename,
+                )
     except Exception as exc:  # noqa: BLE001
         alert_email = ""
         try:
@@ -212,6 +219,40 @@ async def run_nightly_database_backup() -> None:
         await _alert_job_failure(
             JOB_NIGHTLY_DATABASE_BACKUP, exc, email_override=alert_email or None
         )
+    finally:
+        # PR9/K1 — purge du journal des echanges SumUp. Dans un `finally`
+        # pour qu'elle tourne dans les TROIS cas : sauvegarde reussie (elle
+        # passe apres, donc le dump de la nuit contient encore ce qu'on
+        # supprime et une purge trop agressive reste rattrapable),
+        # sauvegarde desactivee, sauvegarde en echec. Session separee et
+        # echec avale : ce menage ne doit jamais faire echouer la
+        # sauvegarde, qui est la seule chose critique de ce job.
+        await _purge_sumup_exchanges()
+
+
+async def _purge_sumup_exchanges() -> None:
+    """Applique la retention `payments.exchange_retention_days` (PR9/K1).
+
+    Best-effort : `sumup_exchanges` est une table d'exploitation (aucune
+    vente n'y nait), une purge ratee se rattrapera la nuit suivante ou
+    depuis l'ecran admin.
+    """
+    try:
+        from app.services.settings_service import SettingsService
+        from app.services.sumup_exchange_log import purge
+
+        async with async_session() as db:
+            retention_days = await SettingsService(db).get_exchange_retention_days()
+            deleted = await purge(db, retention_days)
+            await db.commit()
+        if deleted:
+            logger.info(
+                "Journal des échanges SumUp : %d ligne(s) purgée(s) (rétention %d j)",
+                deleted,
+                retention_days,
+            )
+    except Exception:  # noqa: BLE001 — cf. docstring
+        logger.exception("Purge du journal des échanges SumUp échouée")
 
 
 def register_all_jobs(scheduler) -> None:

@@ -12,6 +12,15 @@ export class ApiError extends Error {
   detail: string;
   code?: string;
   retryAfter?: string;
+  /**
+   * Corps JSON brut de la réponse en erreur, quand il y en avait un.
+   * `detail` et `code` suffisent à l'immense majorité des écrans ; certaines
+   * erreurs portent en plus des champs de reprise que l'appelant doit lire
+   * (PR9 K4 : `recoverable` et `failed_payment_id` sur une 409
+   * `payment_failed`, pour proposer « Réessayer » en caisse). Toujours
+   * traité comme une donnée inconnue : on ne suppose jamais sa forme.
+   */
+  body?: unknown;
 
   constructor(status: number, detail: string, code?: string) {
     super(detail);

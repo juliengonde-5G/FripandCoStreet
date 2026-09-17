@@ -228,6 +228,46 @@ l'API pousse le montant sur le TPE via l'API SumUp, aucune saisie sur le TPE.
 Sans ces trois variables ou TPE hors ligne, la caisse n'accepte que les espèces.
 État visible dans l'écran Administration.
 
+### 6.1 Lire le journal des échanges avec le terminal (PR9)
+
+Quand un encaissement carte se passe mal, l'écran **Administration → Paiements
+CB** répond à la question « qu'est-ce qui s'est réellement passé entre la caisse
+et SumUp ». Trois blocs :
+
+- **Échecs en attente** : les paniers dont le paiement n'a pas abouti pour une
+  cause rattrapable (terminal muet, réseau coupé, panne côté SumUp). Une carte
+  refusée n'y figure pas : il n'y a rien à relancer, la cliente change de moyen
+  de paiement.
+- **Analyse des échecs** (7 ou 30 jours) : les causes les plus fréquentes, la
+  répartition par type (`transport` = la requête n'est jamais partie,
+  `timeout` = pas de réponse à temps, `http_4xx` = SumUp a refusé la demande,
+  `http_5xx` = panne chez SumUp, `decode` = réponse illisible) et le nombre de
+  relances tentées.
+- **Journal des échanges** : un appel HTTP par ligne, du plus récent au plus
+  ancien, filtrable par erreurs seules, opération ou identifiant de paiement.
+  Déplier une ligne montre la durée, le nombre d'essais et le détail envoyé et
+  reçu.
+
+Ce journal ne contient **ni clé API, ni en-tête d'authentification, ni numéro de
+carte, ni donnée personnelle** : tout est expurgé avant écriture et la réponse
+est tronquée à 4 Ko. C'est une table d'exploitation, hors périmètre fiscal :
+elle se purge sans conséquence. La purge automatique tourne chaque nuit à 3h,
+après la sauvegarde (le dump de la nuit contient donc encore ce qui va être
+supprimé) ; la durée de conservation se règle dans `payments.exchange_retention_days`
+(90 jours par défaut, entre 7 et 730). Le bouton **Vider le journal** purge tout
+immédiatement ; ce geste est lui-même inscrit au journal des événements
+(`sumup_exchanges.purged`), pour qu'un trou dans les traces ne passe jamais pour
+un terminal silencieux.
+
+En ligne de commande, pour une lecture rapide sur le VPS :
+
+```bash
+curl -s -H "Authorization: Bearer <jeton>" \
+  "https://app.lloomi.fr/api/admin/sumup-exchanges?only_failed=true&limit=20" | jq
+curl -s -H "Authorization: Bearer <jeton>" \
+  "https://app.lloomi.fr/api/admin/payment-failures?days=7" | jq
+```
+
 ## 7. E-mail des tickets et newsletter (PR3)
 
 Compte Brevo **partagé** avec la boutique de Vernon : la caisse n'utilise que sa
