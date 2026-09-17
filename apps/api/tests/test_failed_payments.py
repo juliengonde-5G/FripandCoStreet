@@ -82,8 +82,15 @@ def _configure_sumup(monkeypatch, handler) -> None:
 def _handler(state: dict):
     """Faux SumUp piloté par `state`, mutable d'une étape du test à l'autre.
 
-    - `state["push"]` : réponse du push reader (None = accepté, 202) ;
-    - `state["paid"]` : la carte a été tapée → la Transactions API répond.
+    - `state["push"]` : réponse du push reader (None = accepté 202, une
+      exception = le réseau lâche avant qu'on lise la réponse) ;
+    - `state["paid"]` : la carte a été tapée → la Transactions API répond ;
+    - `state["txn_status"]` : statut renvoyé par la Transactions API quand
+      on la relit sans que `paid` soit posé (« FAILED », par exemple).
+
+    Compte aussi les appels (`pushes`, `terminates`, `lookups`) : la
+    question « a-t-on présenté le montant une seconde fois ? » se vérifie
+    au nombre d'envois, pas au discours du service.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -91,14 +98,23 @@ def _handler(state: dict):
         if path.endswith("/status") and "/readers/" in path:
             return httpx.Response(200, json={"data": {"status": "ONLINE"}})
         if path.endswith("/checkout"):
+            state["pushes"] = state.get("pushes", 0) + 1
             push = state.get("push")
             if isinstance(push, Exception):
                 raise push
             return push if push is not None else httpx.Response(202, json={"data": {}})
+        if path.endswith("/terminate"):
+            state["terminates"] = state.get("terminates", 0) + 1
+            return httpx.Response(202, json={})
         if "/readers/" in path:
             return httpx.Response(200, json={"status": "paired", "name": "Solo"})
         if path.endswith("/transactions"):
+            state["lookups"] = state.get("lookups", 0) + 1
             if not state.get("paid"):
+                if state.get("txn_status"):
+                    return httpx.Response(
+                        200, json={"id": "txn-0", "status": state["txn_status"]}
+                    )
                 return httpx.Response(404)  # carte pas encore tapée
             return httpx.Response(
                 200,
@@ -386,6 +402,155 @@ async def test_fourth_retry_is_refused_and_queue_is_exhausted(
     # Toujours aucune vente écrite.
     async with async_session() as db:
         assert (await db.execute(select(Transaction))).scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Réconciliation avant un nouveau push — anti double débit
+#
+# Le cas redouté : l'envoi au terminal ARRIVE chez SumUp, mais la réponse se
+# perd. On croit l'essai raté alors que la cliente a peut-être déjà payé.
+# Repousser à l'aveugle, c'est la débiter deux fois.
+# ---------------------------------------------------------------------------
+
+
+async def test_ambiguous_timeout_then_original_paid_does_not_push_again(
+    client, auth_headers, monkeypatch
+):
+    state = {"push": httpx.ReadTimeout("la réponse ne revient pas")}
+    _configure_sumup(monkeypatch, _handler(state))
+    client_uuid, body = await _initiate_failure(client, auth_headers, state)
+    assert state["pushes"] == 1
+    queued = await _only_queued()
+    assert queued.error_type == "timeout"
+
+    # En réalité le terminal avait encaissé : la Transactions API le dit.
+    state["paid"] = True
+    state["push"] = None  # un push réussirait — il ne doit pas avoir lieu
+    resp = await client.post(
+        f"/api/pos/payments/cb/retry-failed/{body['failed_payment_id']}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["status"] == "paid"
+    assert payload["reconciled"] is True
+    # Le checkout rendu est celui d'ORIGINE : c'est lui qui porte l'argent.
+    assert payload["checkout_id"] == client_uuid
+    assert payload["retry_count"] == 0
+    assert payload["last4"] == "4242"
+
+    # Aucun second envoi au terminal.
+    assert state["pushes"] == 1
+    assert state.get("terminates", 0) == 0
+
+    attempts = await _attempts(client_uuid)
+    assert len(attempts) == 1
+    assert attempts[0].status == PaymentAttemptStatus.paid
+    assert attempts[0].sumup_transaction_code == "TC1"
+
+    queued = await _only_queued()
+    assert queued.status == FailedPaymentStatus.succeeded
+    assert queued.retry_count == 0
+    assert queued.resolved_at is not None
+
+    assert len(await _events(EVENT_PAYMENT_RETRY_SUCCEEDED)) == 1
+    # Rien n'a été relancé : pas d'événement de réessai.
+    assert await _events(EVENT_PAYMENT_RETRY_STARTED) == []
+    assert len(await _events("payment.cb_paid")) == 1
+
+    # Et la vente s'écrit sur ce checkout d'origine, sans second débit.
+    async with async_session() as db:
+        assert (await db.execute(select(Transaction))).scalars().all() == []
+
+
+async def test_ambiguous_timeout_then_original_still_active_terminates_then_pushes(
+    client, auth_headers, monkeypatch
+):
+    state = {"push": httpx.ReadTimeout("la réponse ne revient pas")}
+    _configure_sumup(monkeypatch, _handler(state))
+    client_uuid, body = await _initiate_failure(client, auth_headers, state)
+
+    # Le terminal peut encore afficher le montant (SumUp ne connaît pas
+    # encore de transaction) : on coupe son écran avant de repousser.
+    state["push"] = None
+    resp = await client.post(
+        f"/api/pos/payments/cb/retry-failed/{body['failed_payment_id']}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "pending"
+    assert resp.json()["checkout_id"] == f"{client_uuid}:r2"
+
+    assert state["lookups"] >= 1
+    assert state["terminates"] == 1
+    assert state["pushes"] == 2
+
+    queued = await _only_queued()
+    assert queued.status == FailedPaymentStatus.pending
+    assert queued.retry_count == 1
+
+
+async def test_ambiguous_timeout_then_original_failed_pushes_without_terminate(
+    client, auth_headers, monkeypatch
+):
+    state = {"push": httpx.ReadTimeout("la réponse ne revient pas")}
+    _configure_sumup(monkeypatch, _handler(state))
+    _client_uuid, body = await _initiate_failure(client, auth_headers, state)
+
+    # SumUp répond cette fois : l'essai d'origine a bien échoué, rien
+    # n'attend sur le terminal — on repousse directement.
+    state["txn_status"] = "FAILED"
+    state["push"] = None
+    resp = await client.post(
+        f"/api/pos/payments/cb/retry-failed/{body['failed_payment_id']}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "pending"
+    assert state["lookups"] >= 1
+    assert state.get("terminates", 0) == 0
+    assert state["pushes"] == 2
+
+
+async def test_unambiguous_failure_skips_reconciliation(client, auth_headers, monkeypatch):
+    # 503 : SumUp a RÉPONDU non, aucun paiement n'a pu démarrer. Inutile
+    # d'aller relire quoi que ce soit avant de repousser.
+    state = {"push": httpx.Response(503, json={"error_code": "INTERNAL_ERROR"})}
+    _configure_sumup(monkeypatch, _handler(state))
+    _client_uuid, body = await _initiate_failure(client, auth_headers, state)
+
+    state["push"] = None
+    resp = await client.post(
+        f"/api/pos/payments/cb/retry-failed/{body['failed_payment_id']}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert state.get("lookups", 0) == 0
+    assert state.get("terminates", 0) == 0
+    assert state["pushes"] == 2
+
+
+async def test_historical_retry_also_reconciles_before_pushing(
+    client, auth_headers, monkeypatch
+):
+    """Le réessai historique partage la mécanique : même garde-fou."""
+    state = {"push": httpx.ReadTimeout("la réponse ne revient pas")}
+    _configure_sumup(monkeypatch, _handler(state))
+    client_uuid, _body = await _initiate_failure(client, auth_headers, state)
+
+    state["paid"] = True
+    state["push"] = None
+    resp = await client.post(
+        f"/api/pos/payments/cb/{client_uuid}/retry", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "paid"
+    assert resp.json()["reconciled"] is True
+    assert resp.json()["checkout_id"] == client_uuid
+    assert state["pushes"] == 1
+
+    queued = await _only_queued()
+    assert queued.status == FailedPaymentStatus.succeeded
 
 
 # ---------------------------------------------------------------------------
