@@ -558,6 +558,13 @@ acceptables pour une caisse mono-poste auto-attestée.
   la signature que le rattachement a posteriori, `client_id` n'apparaissant
   nulle part dans le payload signé
   (`apps/api/app/services/fiscal.py::_transaction_payload`).
+  Depuis PR10, la **fusion de deux fiches clientes en double** repose sur
+  cette même exception : elle repointe `client_id` des ventes et des
+  annulations de la fiche absorbée vers la fiche conservée, exactement comme
+  le rattachement décrit ci-dessus — aucune vente n'est modifiée au sens
+  fiscal, aucune n'est supprimée, et les empreintes comme la chaîne restent
+  identiques avant et après l'opération
+  (`apps/api/tests/test_client_merge.py::test_merge_leaves_sale_hashes_untouched`).
   Sur un ticket (`receipts`) déjà émis, `duplicate_count` (nombre de
   relectures du texte), `printed_count` et `printed_at` (compteur et date
   de la dernière impression physique) restent mutables ; le contenu du

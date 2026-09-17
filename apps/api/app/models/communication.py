@@ -14,6 +14,10 @@ from app.models.base import Base
 
 class CommunicationKind(str, enum.Enum):
     receipt = "receipt"
+    # PR10/L5 — accuse de reception d'une demande de suppression RGPD. Meme
+    # table, meme preuve d'envoi : ce n'est pas un ticket, mais c'est bien
+    # un e-mail transactionnel adresse a une cliente identifiee.
+    rgpd = "rgpd"
 
 
 class CommunicationChannel(str, enum.Enum):

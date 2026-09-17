@@ -282,6 +282,27 @@ La caisse ne touche jamais à la blocklist globale d'un contact ni ne supprime
 un contact Brevo : un désabonnement ou une suppression RGPD retire le contact
 de la liste dédiée et anonymise la fiche locale.
 
+### 7.1 Suppression RGPD différée (PR10)
+
+Une demande de suppression n'efface plus la fiche le jour même : elle pose une
+**date d'effet 30 jours plus tard**, pendant lesquels tout reste réversible.
+La cliente reçoit un accusé de réception par e-mail (date d'effet, possibilité
+d'annuler en boutique, contact du DPO) et la fiche continue de fonctionner
+normalement en caisse — la personne est toujours cliente jusqu'à l'échéance.
+La demande s'annule depuis la fiche (Administration → Clients), et « Supprimer
+immédiatement » reste disponible pour les cas où la cliente insiste.
+
+- **Délai réglable** : `rgpd.deletion_delay_days`, de 1 à 90 jours,
+  `PUT /api/admin/settings/rgpd` (défaut 30). Le raccourcir n'affecte que les
+  demandes suivantes : une demande déjà posée garde sa date d'effet.
+- **Cron interne** (APScheduler, `app/jobs.py::run_daily_client_deletions`) à
+  **04:00 Europe/Paris** — après la sauvegarde de 03:00, de sorte que le dump
+  de la nuit contient encore les fiches qui vont être vidées : une erreur reste
+  rattrapable pendant toute la durée de rétention. À l'échéance, la fiche est
+  anonymisée (jamais supprimée : les ventes gardent leur historique comptable)
+  et le contact est retiré de la liste Brevo dédiée. Un échec est journalisé au
+  JET (`system.job_failed`) et signalé par e-mail à l'adresse de la boutique.
+
 ## 8. Imprimante ticket et tiroir-caisse (PR3b)
 
 Matériel : imprimante ticket ESC/POS 80 mm **MUNBYN 047P** et tiroir-caisse

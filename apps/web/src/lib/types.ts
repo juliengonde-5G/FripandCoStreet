@@ -341,6 +341,17 @@ export interface Client {
   created_at: string;
   /** Posée par la suppression RGPD (E4) — fiche anonymisée dès que non nul. */
   anonymized_at?: string | null;
+  // PR10 (L1/L5) — fusion de fiches et suppression programmée. Champs
+  // ajoutés par `_serialize_client` ; absents des déploiements antérieurs,
+  // d'où l'optionnel.
+  /** Fiche absorbée : identifiant de la fiche conservée. Le front
+   * redirige vers elle avec un bandeau « Cette fiche a été fusionnée ». */
+  merged_into_client_id?: string | null;
+  merged_at?: string | null;
+  /** Suppression programmée demandée à cette date… */
+  deletion_requested_at?: string | null;
+  /** …et effective à celle-ci (30 jours plus tard par défaut). */
+  deletion_scheduled_for?: string | null;
 }
 
 export interface ClientListResponse {
@@ -384,6 +395,12 @@ export interface ClientTransactionRef {
   transaction_number: number;
   created_at: string;
   total_ttc: number;
+  /** PR10 (L4) — libellés des articles du ticket (5 lignes au maximum,
+   * puis une ligne « … »). Même forme que `ClientHistoryItem`
+   * (`lib/clients.ts`) ; absent des déploiements antérieurs. */
+  items?: { label: string; quantity: number; unit_price: string }[];
+  /** PR10 (L4) — vrai si une annulation référence cette vente. */
+  refunded?: boolean;
 }
 
 /** Réponse de `GET /admin/clients/{id}` (et de `POST …/anonymize`, qui

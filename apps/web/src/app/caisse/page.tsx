@@ -17,6 +17,7 @@ import NumPad from "@/components/ui/NumPad";
 import CashDrawerOpenModal from "@/components/pos/CashDrawerOpenModal";
 import CashDrawerCloseModal from "@/components/pos/CashDrawerCloseModal";
 import CashierIdentifyScreen from "@/components/pos/CashierIdentifyScreen";
+import ClientHistoryPanel from "@/components/pos/ClientHistoryPanel";
 import ClientSelectionScreen from "@/components/pos/ClientSelectionScreen";
 import type { DenominationLine } from "@/components/pos/DenominationGrid";
 import MultiStepPaymentWizard from "@/components/pos/MultiStepPaymentWizard";
@@ -84,6 +85,8 @@ export default function CaissePage() {
   // zéro au ticket suivant (`handleNewTicket`).
   const [selectedClient, setSelectedClient] = useState<PosClient | null>(null);
   const [clientScreenOpen, setClientScreenOpen] = useState(false);
+  // PR10 (L7) — panneau « Historique » de la cliente du ticket.
+  const [clientHistoryOpen, setClientHistoryOpen] = useState(false);
 
   // PR8 (J4) — vendeuse qui encaisse. L'identité vit sur le tiroir
   // (`current_cashier`), pas dans le navigateur : cet état n'en est qu'un
@@ -132,7 +135,13 @@ export default function CaissePage() {
   // que les moteurs de requête par rôle respectent de façon fiable.
   const mainContentRef = useRef<HTMLDivElement | null>(null);
   const anyOverlayOpen =
-    discountEditorOpen || paymentOpen || ticketsOpen || closeDrawerOpen || clientScreenOpen || cashierScreenOpen;
+    discountEditorOpen ||
+    paymentOpen ||
+    ticketsOpen ||
+    closeDrawerOpen ||
+    clientScreenOpen ||
+    cashierScreenOpen ||
+    clientHistoryOpen;
   useEffect(() => {
     const el = mainContentRef.current;
     if (!el) return;
@@ -529,20 +538,30 @@ export default function CaissePage() {
               <div className="flex-shrink-0 flex items-center justify-between gap-2 border-b border-fc-line bg-fc-surface px-4 py-2">
                 <h2 className="text-sm font-semibold uppercase tracking-wide text-fc-ink-mute">Ticket en cours</h2>
                 {selectedClient ? (
-                  <span className="inline-flex max-w-[60%] items-center gap-1 rounded-full border border-fc-primary bg-fc-primary-soft py-0.5 pl-1 pr-1 text-sm font-medium text-fc-primary-deep">
+                  <span className="inline-flex max-w-[70%] items-center gap-1 rounded-full border border-fc-primary bg-fc-primary-soft py-0.5 pl-1 pr-1 text-sm font-medium text-fc-primary-deep">
                     <button
                       type="button"
                       onClick={() => setClientScreenOpen(true)}
                       title="Changer de cliente"
-                      className="min-h-[36px] max-w-full truncate rounded-full px-2 hover:underline"
+                      className="min-h-[44px] min-w-0 truncate rounded-full px-2 hover:underline"
                     >
                       {clientChipLabel}
+                    </button>
+                    {/* PR10 (L7) — « elle est déjà venue ? » se demande le
+                        plus souvent une fois la cliente posée sur le
+                        ticket : le bouton est donc ici, à côté de son nom. */}
+                    <button
+                      type="button"
+                      onClick={() => setClientHistoryOpen(true)}
+                      className="min-h-[44px] flex-shrink-0 rounded-full px-2 text-xs font-semibold hover:bg-fc-primary hover:text-white"
+                    >
+                      Historique
                     </button>
                     <button
                       type="button"
                       onClick={() => setSelectedClient(null)}
                       aria-label="Retirer la cliente du ticket"
-                      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-fc-primary-deep hover:bg-fc-primary hover:text-white"
+                      className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full text-fc-primary-deep hover:bg-fc-primary hover:text-white"
                     >
                       ✕
                     </button>
@@ -745,6 +764,13 @@ export default function CaissePage() {
           setClientScreenOpen(false);
         }}
         dpoEmail={dpoEmail}
+      />
+
+      <ClientHistoryPanel
+        open={clientHistoryOpen && selectedClient !== null}
+        clientId={selectedClient?.id ?? null}
+        clientName={clientChipLabel}
+        onClose={() => setClientHistoryOpen(false)}
       />
 
       <TicketsPanel open={ticketsOpen} onClose={() => setTicketsOpen(false)} onCancelled={() => void loadDrawer()} />

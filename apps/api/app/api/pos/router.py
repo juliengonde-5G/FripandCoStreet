@@ -1062,6 +1062,56 @@ async def search_pos_clients(
     return {"clients": [_serialize_pos_client(c, stats) for c in clients]}
 
 
+@router.get("/clients/duplicates")
+async def find_pos_client_duplicates(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    first_name: str | None = Query(default=None),
+    last_name: str | None = Query(default=None),
+    email: str | None = Query(default=None),
+    phone: str | None = Query(default=None),
+):
+    """« Une fiche existe peut-etre deja » (PR10/L2), appele PENDANT la
+    saisie d'un nouveau client en caisse.
+
+    Au moins un critere non vide, sinon 422 `criteria_required` : sans quoi
+    la caisse demanderait a la base de comparer une fiche vide a toutes les
+    autres. Une saisie encore incomplete (e-mail sans `@`, numero a trois
+    chiffres) n'est PAS une erreur ici — le critere est simplement ignore,
+    la vendeuse tape encore.
+    """
+    criteria = (first_name, last_name, email, phone)
+    if not any((value or "").strip() for value in criteria):
+        raise PosServiceError(
+            "Renseignez au moins un critère (nom, prénom, e-mail ou téléphone).",
+            code="criteria_required",
+            status_code=422,
+        )
+    service = ClientService(db)
+    candidates = await service.find_duplicate_candidates(
+        email=email,
+        phone=phone,
+        first_name=first_name,
+        last_name=last_name,
+    )
+    stats = await service.visit_stats([item["client"].id for item in candidates])
+    return {
+        "candidates": [
+            {
+                "id": str(item["client"].id),
+                "first_name": item["client"].first_name,
+                "last_name": item["client"].last_name,
+                "email_masked": mask_email(item["client"].email),
+                "phone_masked": mask_phone(item["client"].phone),
+                "visits_count": stats.get(str(item["client"].id), {}).get("visits_count", 0),
+                "last_visit_at": stats.get(str(item["client"].id), {}).get("last_visit_at"),
+                "reason": item["reason"],
+            }
+            for item in candidates
+        ]
+    }
+
+
 @router.post("/clients", status_code=201)
 async def create_pos_client(
     body: CreatePosClientRequest,
@@ -1101,6 +1151,37 @@ async def create_pos_client(
     await db.commit()
     stats = await service.visit_stats([client.id])
     return {"client": _serialize_pos_client(client, stats), "created": created}
+
+
+@router.get("/clients/{client_id}/history")
+async def pos_client_history(
+    client_id: uuid.UUID,
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=5, ge=1, le=20),
+):
+    """Historique d'achats d'une cliente, pour la caisse (PR10/L4).
+
+    Repond a la seule question que se pose la vendeuse au comptoir : « elle
+    est deja venue ? ». En tete les compteurs (visites, derniere visite,
+    cumul depense hors annulations), puis les derniers tickets avec le
+    libelle des articles.
+
+    404 `not_found` pour une fiche inconnue, ANONYMISEE (elle ne porte plus
+    aucune donnee personnelle : il n'y a plus personne a reconnaitre) ou
+    ABSORBEE par une fusion (son historique a ete repointe sur la fiche
+    conservee, c'est celle-la qu'il faut ouvrir). Les montants sont des
+    chaines a deux decimales — rien n'est arrondi en route.
+    """
+    service = ClientService(db)
+    client = await service.get_by_id(client_id)
+    if (
+        client is None
+        or client.anonymized_at is not None
+        or client.merged_into_client_id is not None
+    ):
+        raise PosServiceError("Client introuvable.", code="not_found", status_code=404)
+    return await service.history(client, limit=limit)
 
 
 @router.delete("/transactions/{transaction_id}/client")
