@@ -172,7 +172,9 @@ async def reconcile_before_push(
     if error_type not in AMBIGUOUS_ERROR_TYPES:
         return RECONCILE_PUSH, None
 
-    poll = await svc.get_checkout_status(attempt.checkout_id)
+    poll = await svc.get_checkout_status(
+        attempt.checkout_id, client_transaction_id=attempt.client_transaction_id
+    )
     status = str(poll.get("status") or "").upper()
 
     if status == "PAID":
@@ -547,10 +549,10 @@ async def retry(
     _guard_retryable(failed_payment)
 
     new_count = source.attempt_count + 1
-    new_client_transaction_id = f"{failed_payment.client_uuid}:r{new_count}"
+    new_checkout_id = f"{failed_payment.client_uuid}:r{new_count}"
     result = await svc._push_to_reader(  # noqa: SLF001 — service interne, meme paquet
         amount=failed_payment.amount,
-        client_transaction_id=new_client_transaction_id,
+        checkout_id=new_checkout_id,
         description=description,
     )
     failed = str(result.get("status", "")).upper() == "FAILED"
@@ -559,9 +561,9 @@ async def retry(
         client_uuid=failed_payment.client_uuid,
         amount=failed_payment.amount,
         status=PaymentAttemptStatus.failed if failed else PaymentAttemptStatus.pending,
-        checkout_id=result.get("checkout_id") or new_client_transaction_id,
+        checkout_id=result.get("checkout_id") or new_checkout_id,
         client_transaction_id=(
-            result.get("client_transaction_id") or new_client_transaction_id
+            result.get("client_transaction_id") or new_checkout_id
         ),
         reader_id=reader_id if reader_id is not None else getattr(svc, "reader_id", None),
         error_message=(

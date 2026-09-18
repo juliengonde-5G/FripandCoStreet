@@ -53,12 +53,18 @@ def _service(handler) -> SumUpService:
     return svc
 
 
+# PR13 — comme le vrai SumUp : la Readers API refuse l'identifiant de
+# l'appelant (il n'est meme plus envoye) et rend le sien.
+SUMUP_CTID = "ctid_ok"
+
+
 def _ok_handler(request: httpx.Request) -> httpx.Response:
     path = request.url.path
     if path.endswith("/status") and "/readers/" in path:
         return httpx.Response(200, json={"data": {"status": "ONLINE"}})
     if path.endswith("/checkout"):
-        return httpx.Response(202, json={"data": {}})
+        assert "client_transaction_id" not in (request.content or b"").decode()
+        return httpx.Response(201, json={"data": {"client_transaction_id": SUMUP_CTID}})
     if path.endswith("/terminate"):
         return httpx.Response(202, json={})
     if path.endswith("/refunds"):
@@ -90,13 +96,15 @@ async def test_ping_reader_records_exchanges():
 async def test_push_to_reader_records_exchange():
     svc = _service(_ok_handler)
     checkout = str(uuid.uuid4())
-    await svc._push_to_reader(amount=Decimal("12.50"), client_transaction_id=checkout)
+    await svc._push_to_reader(amount=Decimal("12.50"), checkout_id=checkout)
     record = svc.exchanges[-1]
     assert record.operation == "push_to_reader"
     assert record.method == "POST"
+    # Les deux identifiants sont traces : le notre (cle de l'essai) et celui
+    # de SumUp (le seul relisable a la Transactions API).
     assert record.checkout_id == checkout
-    assert record.client_transaction_id == checkout
-    assert record.response_status == 202
+    assert record.client_transaction_id == SUMUP_CTID
+    assert record.response_status == 201
     # Le montant part bien en unites mineures dans la trace.
     assert record.request_payload["total_amount"]["value"] == 1250
 
@@ -200,7 +208,7 @@ async def test_transport_failure_is_recorded_then_reraised():
 
     svc = _service(handler)
     result = await svc._push_to_reader(
-        amount=Decimal("10.00"), client_transaction_id="abc"
+        amount=Decimal("10.00"), checkout_id="abc"
     )
     assert result["status"] == "FAILED"
     record = svc.exchanges[-1]

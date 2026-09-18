@@ -25,7 +25,11 @@ pytestmark = pytest.mark.anyio
 
 
 async def _insert_pending_attempt(
-    *, client_uuid: uuid.UUID, checkout_id: str, amount: Decimal = Decimal("10.00")
+    *,
+    client_uuid: uuid.UUID,
+    checkout_id: str,
+    amount: Decimal = Decimal("10.00"),
+    client_transaction_id: str | None = None,
 ) -> None:
     async with async_session() as db:
         db.add(
@@ -34,7 +38,7 @@ async def _insert_pending_attempt(
                 amount=amount,
                 status=PaymentAttemptStatus.pending,
                 checkout_id=checkout_id,
-                client_transaction_id=checkout_id,
+                client_transaction_id=client_transaction_id or checkout_id,
                 reader_id="reader-1",
                 attempt_count=1,
             )
@@ -51,8 +55,17 @@ async def _get_attempt(checkout_id: str) -> PaymentAttempt:
         ).scalar_one()
 
 
-def _patch_paid(monkeypatch, *, amount: Decimal = Decimal("10.00")):
-    async def fake_status(self, checkout_id):
+def _patch_paid(
+    monkeypatch,
+    *,
+    amount: Decimal = Decimal("10.00"),
+    expected_client_transaction_id: str | None = None,
+):
+    async def fake_status(self, checkout_id, *, client_transaction_id=None):
+        # PR13 — la relecture doit présenter l'identifiant SumUp de l'essai,
+        # jamais notre `checkout_id`.
+        if expected_client_transaction_id is not None:
+            assert client_transaction_id == expected_client_transaction_id
         return {
             "checkout_id": checkout_id,
             "status": "PAID",
@@ -78,9 +91,11 @@ def _patch_paid(monkeypatch, *, amount: Decimal = Decimal("10.00")):
 
 async def test_verify_card_tender_success(monkeypatch):
     client_uuid = uuid.uuid4()
-    checkout_id = f"ctid-{client_uuid}"
-    await _insert_pending_attempt(client_uuid=client_uuid, checkout_id=checkout_id)
-    _patch_paid(monkeypatch)
+    checkout_id = str(client_uuid)
+    await _insert_pending_attempt(
+        client_uuid=client_uuid, checkout_id=checkout_id, client_transaction_id="ctid_sumup"
+    )
+    _patch_paid(monkeypatch, expected_client_transaction_id="ctid_sumup")
 
     async with async_session() as db:
         result = await verify_card_tender(
@@ -136,7 +151,7 @@ async def test_verify_card_tender_status_not_paid(monkeypatch):
     checkout_id = f"ctid-{client_uuid}"
     await _insert_pending_attempt(client_uuid=client_uuid, checkout_id=checkout_id)
 
-    async def fake_status(self, checkout_id):
+    async def fake_status(self, checkout_id, *, client_transaction_id=None):
         return {"checkout_id": checkout_id, "status": "PENDING"}
 
     monkeypatch.setattr(SumUpService, "get_checkout_status", fake_status)

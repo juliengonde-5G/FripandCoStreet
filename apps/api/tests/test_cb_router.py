@@ -69,22 +69,85 @@ def _configure_sumup(monkeypatch, handler, *, configured: bool = True) -> None:
     monkeypatch.setattr(SumUpService, "__init__", patched_init)
 
 
-def _online_reader_handler(push_response: httpx.Response | None = None):
-    """Handler générique : pairing OK, live ONLINE, push -> `push_response`."""
+class FakeSumUp:
+    """Double du SumUp réel (PR13) — deux règles, et elles font tout le test.
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    1. La Readers API **génère** le `client_transaction_id` : elle n'accepte
+       aucun identifiant imposé (le service n'en envoie plus) et rend le sien
+       dans `201 {"data": {"client_transaction_id": …}}`.
+    2. La Transactions API ne connaît **que** les identifiants qu'elle a
+       émis : la relecture d'un identifiant maison répond 404, comme en
+       production le 18/09. Un service qui repollerait sa propre clé
+       resterait donc « en attente » — le test le verrait.
+    """
+
+    default_transaction = {
+        "id": "txn-1",
+        "status": "SUCCESSFUL",
+        "transaction_code": "TC1",
+        "auth_code": "AUTH1",
+        "amount": 7.0,
+        "currency": "EUR",
+        "card": {"type": "mastercard", "last_4_digits": "9999"},
+    }
+
+    def __init__(
+        self,
+        *,
+        push_response: httpx.Response | Exception | None = None,
+        reader_status: str = "ONLINE",
+        transaction: dict | None = None,
+    ):
+        self.push_response = push_response
+        self.reader_status = reader_status
+        self.transaction = transaction or dict(self.default_transaction)
+        self.issued: list[str] = []      # identifiants émis par « SumUp »
+        self.pushed: list[dict] = []     # corps des pushs reçus
+        self.queried: list[str | None] = []  # identifiants relus
+        self.paid = False                # la carte a-t-elle été tapée ?
+        self.txn_status: str | None = None   # statut forcé (« FAILED »…)
+        self.terminates = 0
+
+    @property
+    def last_issued(self) -> str | None:
+        return self.issued[-1] if self.issued else None
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/status") and "/readers/" in path:
-            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
+            return httpx.Response(200, json={"data": {"status": self.reader_status}})
         if path.endswith("/checkout"):
-            return push_response or httpx.Response(202, json={"data": {}})
+            import json as _json
+
+            self.pushed.append(_json.loads(request.content or b"{}"))
+            if isinstance(self.push_response, Exception):
+                raise self.push_response
+            if self.push_response is not None:
+                return self.push_response
+            ctid = f"ctid_{len(self.issued) + 1}"
+            self.issued.append(ctid)
+            return httpx.Response(201, json={"data": {"client_transaction_id": ctid}})
+        if path.endswith("/terminate"):
+            self.terminates += 1
+            return httpx.Response(202, json={})
         if "/readers/" in path:
             return httpx.Response(200, json={"status": "paired", "name": "Solo"})
         if path.endswith("/transactions"):
-            return httpx.Response(404)  # pas encore tapé
+            queried = request.url.params.get("client_transaction_id")
+            self.queried.append(queried)
+            if queried not in self.issued:
+                return httpx.Response(404, json={"error_code": "NOT_FOUND"})
+            if self.txn_status:
+                return httpx.Response(200, json={"id": "txn-0", "status": self.txn_status})
+            if not self.paid:
+                return httpx.Response(404)  # connu, mais pas encore tapé
+            return httpx.Response(200, json=self.transaction)
         return httpx.Response(404, json={})
 
-    return handler
+
+def _online_reader_handler(push_response: httpx.Response | None = None):
+    """Handler générique : pairing OK, live ONLINE, push -> `push_response`."""
+    return FakeSumUp(push_response=push_response).handler
 
 
 async def _last_event(event_type: str) -> list[JournalEvent]:
@@ -200,15 +263,7 @@ async def test_initiate_unconfigured_returns_409_reader_unavailable(client, auth
 
 
 async def test_initiate_offline_reader_returns_409_reader_unavailable(client, auth_headers, monkeypatch):
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/status") and "/readers/" in path:
-            return httpx.Response(200, json={"data": {"status": "OFFLINE"}})
-        if "/readers/" in path:
-            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
-        return httpx.Response(404, json={})
-
-    _configure_sumup(monkeypatch, handler)
+    _configure_sumup(monkeypatch, FakeSumUp(reader_status="OFFLINE").handler)
     resp = await client.post(
         "/api/pos/payments/cb/initiate",
         json={"amount": "5.00", "client_uuid": str(uuid.uuid4())},
@@ -278,34 +333,8 @@ async def test_initiate_push_failure_records_failed_attempt(client, auth_headers
 
 
 async def test_status_poll_pending_then_paid_emits_jet_once(client, auth_headers, monkeypatch):
-    state = {"paid": False}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/status") and "/readers/" in path:
-            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
-        if path.endswith("/checkout"):
-            return httpx.Response(202, json={"data": {}})
-        if "/readers/" in path:
-            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
-        if path.endswith("/transactions"):
-            if not state["paid"]:
-                return httpx.Response(404)  # pas encore tapé
-            return httpx.Response(
-                200,
-                json={
-                    "id": "txn-1",
-                    "status": "SUCCESSFUL",
-                    "transaction_code": "TC1",
-                    "auth_code": "AUTH1",
-                    "amount": 7.0,
-                    "currency": "EUR",
-                    "card": {"type": "mastercard", "last_4_digits": "9999"},
-                },
-            )
-        return httpx.Response(404, json={})
-
-    _configure_sumup(monkeypatch, handler)
+    fake = FakeSumUp()
+    _configure_sumup(monkeypatch, fake.handler)
     client_uuid = str(uuid.uuid4())
     init = await client.post(
         "/api/pos/payments/cb/initiate",
@@ -320,7 +349,7 @@ async def test_status_poll_pending_then_paid_emits_jet_once(client, auth_headers
     assert poll1.json()["status"] == "pending"
 
     # 2) Le client tape sa carte.
-    state["paid"] = True
+    fake.paid = True
     poll2 = await client.get(f"/api/pos/payments/cb/{checkout_id}/status", headers=auth_headers)
     assert poll2.json()["status"] == "paid"
     assert poll2.json()["transaction_code"] == "TC1"
@@ -341,22 +370,45 @@ async def test_status_poll_pending_then_paid_emits_jet_once(client, auth_headers
     assert attempt.sumup_card_last4 == "9999"
 
 
+async def test_attempt_stores_the_sumup_identifier_and_polls_with_it(
+    client, auth_headers, monkeypatch
+):
+    """PR13 — régression de l'incident du 18/09.
+
+    L'essai garde NOTRE `checkout_id` comme clé, mais mémorise l'identifiant
+    émis par SumUp ; c'est celui-là que le poll présente à la Transactions
+    API. Le double refuse tout autre identifiant (404) : si l'application
+    repollait sa propre clé, le statut resterait « pending » et la carte
+    tapée ne serait jamais vue — exactement la panne de production.
+    """
+    fake = FakeSumUp()
+    _configure_sumup(monkeypatch, fake.handler)
+    client_uuid = str(uuid.uuid4())
+    init = await client.post(
+        "/api/pos/payments/cb/initiate",
+        json={"amount": "7.00", "client_uuid": client_uuid},
+        headers=auth_headers,
+    )
+    assert init.status_code == 200, init.text
+    assert init.json()["checkout_id"] == client_uuid  # la caisse garde sa clé
+    # Le corps du push ne porte aucun identifiant imposé.
+    assert "client_transaction_id" not in fake.pushed[-1]
+
+    attempt = await _get_attempt(client_uuid)
+    assert attempt.client_transaction_id == fake.last_issued
+    assert attempt.client_transaction_id != client_uuid
+
+    fake.paid = True
+    poll = await client.get(
+        f"/api/pos/payments/cb/{client_uuid}/status", headers=auth_headers
+    )
+    assert poll.json()["status"] == "paid"
+    assert fake.queried == [fake.last_issued]
+
+
 async def test_status_poll_failed(client, auth_headers, monkeypatch):
-    state = {"resp": httpx.Response(404)}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/status") and "/readers/" in path:
-            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
-        if path.endswith("/checkout"):
-            return httpx.Response(202, json={"data": {}})
-        if "/readers/" in path:
-            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
-        if path.endswith("/transactions"):
-            return state["resp"]
-        return httpx.Response(404, json={})
-
-    _configure_sumup(monkeypatch, handler)
+    fake = FakeSumUp()
+    _configure_sumup(monkeypatch, fake.handler)
     client_uuid = str(uuid.uuid4())
     init = await client.post(
         "/api/pos/payments/cb/initiate",
@@ -365,10 +417,7 @@ async def test_status_poll_failed(client, auth_headers, monkeypatch):
     )
     checkout_id = init.json()["checkout_id"]
 
-    state["resp"] = httpx.Response(
-        200,
-        json={"id": "txn-2", "status": "FAILED"},
-    )
+    fake.txn_status = "FAILED"
     poll = await client.get(f"/api/pos/payments/cb/{checkout_id}/status", headers=auth_headers)
     assert poll.json()["status"] == "failed"
 
@@ -389,19 +438,8 @@ async def test_status_not_found(client, auth_headers, monkeypatch):
 
 
 async def test_cancel_pending_payment(client, auth_headers, monkeypatch):
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/status") and "/readers/" in path:
-            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
-        if path.endswith("/checkout"):
-            return httpx.Response(202, json={"data": {}})
-        if path.endswith("/terminate"):
-            return httpx.Response(202)
-        if "/readers/" in path:
-            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
-        return httpx.Response(404, json={})
-
-    _configure_sumup(monkeypatch, handler)
+    fake = FakeSumUp()
+    _configure_sumup(monkeypatch, fake.handler)
     client_uuid = str(uuid.uuid4())
     init = await client.post(
         "/api/pos/payments/cb/initiate",
@@ -433,21 +471,8 @@ async def test_cancel_not_found(client, auth_headers, monkeypatch):
 
 
 async def test_retry_after_failure_creates_new_attempt(client, auth_headers, monkeypatch):
-    state = {"fail_push": True}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/status") and "/readers/" in path:
-            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
-        if path.endswith("/checkout"):
-            if state["fail_push"]:
-                return httpx.Response(422, json={"error_code": "READER_BUSY"})
-            return httpx.Response(202, json={"data": {}})
-        if "/readers/" in path:
-            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
-        return httpx.Response(404, json={})
-
-    _configure_sumup(monkeypatch, handler)
+    fake = FakeSumUp(push_response=httpx.Response(422, json={"error_code": "READER_BUSY"}))
+    _configure_sumup(monkeypatch, fake.handler)
     client_uuid = str(uuid.uuid4())
     init = await client.post(
         "/api/pos/payments/cb/initiate",
@@ -460,7 +485,7 @@ async def test_retry_after_failure_creates_new_attempt(client, auth_headers, mon
     # premier essai (`attempt_count=1`), il est toujours `= client_uuid`.
     checkout_id = client_uuid
 
-    state["fail_push"] = False
+    fake.push_response = None  # le terminal se libère
     retry = await client.post(f"/api/pos/payments/cb/{checkout_id}/retry", headers=auth_headers)
     assert retry.status_code == 200, retry.text
     body = retry.json()
@@ -497,23 +522,11 @@ async def test_retry_not_retryable_when_pending(client, auth_headers, monkeypatc
 
 
 def _capturing_push_handler(captured: dict):
-    """Comme `_online_reader_handler`, mais capture le `description` du
-    payload poussé sur `/checkout` (corps JSON complet exposé par httpx)."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/status") and "/readers/" in path:
-            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
-        if path.endswith("/checkout"):
-            import json as _json
-
-            captured["description"] = _json.loads(request.content)["description"]
-            return httpx.Response(202, json={"data": {}})
-        if "/readers/" in path:
-            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
-        return httpx.Response(404, json={})
-
-    return handler
+    """Comme `_online_reader_handler`, mais garde le double sous la main :
+    `captured["fake"].pushed` contient les corps envoyés à `/checkout`."""
+    fake = FakeSumUp()
+    captured["fake"] = fake
+    return fake.handler
 
 
 async def test_initiate_uses_shop_name_in_sumup_description(client, auth_headers, monkeypatch):
@@ -532,7 +545,7 @@ async def test_initiate_uses_shop_name_in_sumup_description(client, auth_headers
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text
-    assert captured["description"] == "Vente Frip & Co Street — Rouen Centre"
+    assert captured["fake"].pushed[-1]["description"] == "Vente Frip & Co Street — Rouen Centre"
 
 
 async def test_initiate_falls_back_to_default_description_when_shop_name_blank(
@@ -551,26 +564,12 @@ async def test_initiate_falls_back_to_default_description_when_shop_name_blank(
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text
-    assert captured["description"] == "Vente Frip & Co Street"
+    assert captured["fake"].pushed[-1]["description"] == "Vente Frip & Co Street"
 
 
 async def test_retry_uses_shop_name_in_sumup_description(client, auth_headers, monkeypatch):
-    state = {"fail_push": True}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/status") and "/readers/" in path:
-            return httpx.Response(200, json={"data": {"status": "ONLINE"}})
-        if path.endswith("/checkout"):
-            if state["fail_push"]:
-                return httpx.Response(422, json={"error_code": "READER_BUSY"})
-            import json as _json
-
-            state["description"] = _json.loads(request.content)["description"]
-            return httpx.Response(202, json={"data": {}})
-        if "/readers/" in path:
-            return httpx.Response(200, json={"status": "paired", "name": "Solo"})
-        return httpx.Response(404, json={})
+    fake = FakeSumUp(push_response=httpx.Response(422, json={"error_code": "READER_BUSY"}))
+    handler = fake.handler
 
     put_resp = await client.put(
         "/api/admin/settings/shop", json={"name": "Frip & Co Street — Pop-up"}, headers=auth_headers
@@ -586,7 +585,7 @@ async def test_retry_uses_shop_name_in_sumup_description(client, auth_headers, m
     )
     assert init.status_code == 409  # premier push refusé (READER_BUSY)
 
-    state["fail_push"] = False
+    fake.push_response = None  # le terminal se libère
     retry = await client.post(f"/api/pos/payments/cb/{client_uuid}/retry", headers=auth_headers)
     assert retry.status_code == 200, retry.text
-    assert state["description"] == "Vente Frip & Co Street — Pop-up"
+    assert fake.pushed[-1]["description"] == "Vente Frip & Co Street — Pop-up"
