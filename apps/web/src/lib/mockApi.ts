@@ -2935,7 +2935,7 @@ function buildMonitoringSnapshot(): Monitoring {
   return {
     generated_at: nowIso(),
     app: {
-      version: "0.13.0",
+      version: "0.13.1",
       build_sha: "a1b2c3d",
       build_date: new Date(Date.now() - 6 * 86_400_000).toISOString(),
       environment: "demo",

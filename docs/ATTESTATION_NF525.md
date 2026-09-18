@@ -79,7 +79,11 @@ paiement et restent **hors périmètre fiscal** : `sumup_exchanges` (journal
 de débogage des appels au service SumUp, purgeable) et `failed_payments`
 (file des encaissements carte à relancer). Aucune vente n'y naît — une vente
 n'est écrite que lorsque le paiement est confirmé —, elles ne portent aucun
-montant opposable et ne participent à aucune chaîne de preuve.
+montant opposable et ne participent à aucune chaîne de preuve. Le correctif
+de la version 0.13.1, qui fait relire l'état d'un paiement avec l'identifiant
+de transaction rendu par SumUp au lieu de celui généré par l'application, ne
+touche que ce dialogue avec le terminal : ni les ventes, ni leur signature,
+ni aucune chaîne de preuve n'en sont modifiées.
 
 Les **rapports** (jour, semaine, mois, avec leur export CSV), le **cahier du
 jour** (objectif, message, opération, signatures) et la **météo locale**

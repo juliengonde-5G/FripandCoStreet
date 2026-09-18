@@ -116,7 +116,7 @@ async def test_monitoring_full_shape(client, auth_headers):
         "db_revision_ok",
         "uptime_seconds",
     }
-    assert body["app"]["version"] == "0.13.0"
+    assert body["app"]["version"] == "0.13.1"
     assert body["app"]["environment"] == "test"
     assert body["app"]["db_revision_ok"] is True
     assert body["app"]["current_db_revision"] == body["app"]["expected_db_revision"]
