@@ -18,9 +18,12 @@
 # lue uniquement depuis ``settings``, D12) ; clés affiliate.
 #
 # Conséquence du push-to-reader devenu l'UNIQUE mode CB (plus de checkout
-# « lien ») : un ``checkout_id`` est toujours un ``client_transaction_id``
-# SumUp (pas de préfixe ``reader:`` — inutile sans second espace d'ids à
-# désambiguïser).
+# « lien ») : pas de préfixe ``reader:`` sur les identifiants — inutile sans
+# second espace d'ids à désambiguïser. Attention toutefois (PR13) : un
+# ``checkout_id`` n'est PAS un ``client_transaction_id`` SumUp. Le premier est
+# le nôtre (clé de ``PaymentAttempt``, jamais envoyé à SumUp) ; le second est
+# généré par la Readers API et rendu dans la réponse du push — c'est le seul
+# que la Transactions API sait relire.
 from __future__ import annotations
 
 import json as _json
@@ -318,6 +321,31 @@ def _extract_sumup_error_code(body_text: str | None) -> str | None:
         val = data.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip().upper()
+    return None
+
+
+def _extract_client_transaction_id(resp: httpx.Response) -> str | None:
+    """Lit le ``client_transaction_id`` genere par SumUp dans une reponse push.
+
+    Forme documentee : ``201 {"data": {"client_transaction_id": "..."}}``.
+    Tolere un corps vide, non-JSON, ou sans ``data`` (le TPE part quand meme :
+    c'est l'appelant qui decide du repli).
+    """
+    if not resp.content:
+        return None
+    try:
+        body = resp.json()
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    data = body.get("data")
+    candidates = [data, body]
+    for source in candidates:
+        if isinstance(source, dict):
+            value = source.get("client_transaction_id")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return None
 
 
@@ -700,17 +728,27 @@ class SumUpService:
         self,
         *,
         amount: Decimal,
-        client_transaction_id: str,
+        checkout_id: str,
         description: str = "Vente Frip & Co Street",
     ) -> dict:
         """Pousse un paiement sur le SumUp Solo via la Readers API.
 
         Spec : ``POST /v0.1/merchants/{m}/readers/{r}/checkout``. Le montant
         est envoyé en unités mineures (centimes) entières, comme l'exige
-        SumUp. ``client_transaction_id`` est notre propre identifiant
-        (``client_uuid`` de la vente, ou une variante suffixée en cas de
-        réessai) — devient le ``checkout_id`` retourné, unique par
-        ``PaymentAttempt``.
+        SumUp.
+
+        Deux identifiants, à ne jamais confondre (PR13) :
+
+        - ``checkout_id`` (paramètre) est le NÔTRE — ``client_uuid`` de la
+          vente, ou une variante suffixée en cas de réessai. Il reste la clé
+          stable de la caisse et de ``PaymentAttempt.checkout_id``. La
+          Readers API ne l'accepte pas dans le corps : il n'y est pas envoyé.
+        - ``client_transaction_id`` est celui de SUMUP, qu'il génère lui-même
+          et renvoie dans ``201 {"data": {"client_transaction_id": …}}``.
+          C'est le seul que la Transactions API sait relire : sans lui, le
+          poll de statut interroge un identifiant inconnu et reste 404 pour
+          toujours (incident du 18/09). S'il manque, on se replie sur le
+          nôtre — le paiement partira quand même, le suivi sera dégradé.
         """
         url = self._url(f"/v0.1/merchants/{self.merchant_code}/readers/{self.reader_id}/checkout")
         minor_units = int(
@@ -723,7 +761,6 @@ class SumUpService:
                 "minor_unit": 2,
             },
             "description": description,
-            "client_transaction_id": client_transaction_id,
         }
         try:
             async with self._client(CHECKOUT_TIMEOUT) as client:
@@ -733,13 +770,15 @@ class SumUpService:
                     "POST",
                     url,
                     json=payload,
-                    checkout_id=client_transaction_id,
-                    client_transaction_id=client_transaction_id,
+                    checkout_id=checkout_id,
+                    # Valeur d'attente : remplacée par l'identifiant SumUp
+                    # dès qu'il est connu, avant la persistance du journal.
+                    client_transaction_id=checkout_id,
                 )
         except httpx.HTTPError as exc:
             return {
-                "checkout_id": client_transaction_id,
-                "client_transaction_id": client_transaction_id,
+                "checkout_id": checkout_id,
+                "client_transaction_id": checkout_id,
                 "status": "FAILED",
                 "error_type": type(exc).__name__,
                 "error_detail": redact_sumup_error(f"network error: {exc}"),
@@ -747,9 +786,22 @@ class SumUpService:
                 "recoverable": True,
             }
         if resp.status_code in (200, 201, 202):
+            sumup_ctid = _extract_client_transaction_id(resp)
+            if sumup_ctid is None:
+                _log.warning(
+                    "SumUp push_to_reader (HTTP %s) n'a pas renvoyé de "
+                    "client_transaction_id pour le checkout %s — repli sur "
+                    "notre identifiant, le suivi du paiement sera dégradé.",
+                    resp.status_code,
+                    checkout_id,
+                )
+                sumup_ctid = checkout_id
+            # Le journal des échanges doit porter l'identifiant réellement
+            # utilisable pour retrouver la transaction chez SumUp.
+            self._tag_last_exchange_client_transaction_id(sumup_ctid)
             return {
-                "checkout_id": client_transaction_id,
-                "client_transaction_id": client_transaction_id,
+                "checkout_id": checkout_id,
+                "client_transaction_id": sumup_ctid,
                 "status": "PENDING",
                 "reader_id": self.reader_id,
             }
@@ -757,8 +809,8 @@ class SumUpService:
         error_code = _extract_sumup_error_code(body_text)
         recoverable, retry_after = _reader_error_recoverability(resp.status_code, error_code)
         result = {
-            "checkout_id": client_transaction_id,
-            "client_transaction_id": client_transaction_id,
+            "checkout_id": checkout_id,
+            "client_transaction_id": checkout_id,
             "status": "FAILED",
             "http_status": resp.status_code,
             "error_code": error_code,
@@ -770,19 +822,41 @@ class SumUpService:
             result["retry_after"] = retry_after
         return result
 
+    def _tag_last_exchange_client_transaction_id(self, client_transaction_id: str) -> None:
+        """Complète le dernier échange journalisé avec l'identifiant SumUp."""
+        if self.exchanges:
+            self.exchanges[-1].client_transaction_id = client_transaction_id
+
     # ------------------------------------------------------------------
     # Poll statut
     # ------------------------------------------------------------------
-    async def get_checkout_status(self, checkout_id: str) -> dict:
+    async def get_checkout_status(
+        self, checkout_id: str, *, client_transaction_id: str | None = None
+    ) -> dict:
+        """Relit l'état d'un paiement poussé sur le TPE.
+
+        ``checkout_id`` est notre clé (celle de ``PaymentAttempt``) et est
+        toujours retournée telle quelle : les appelants comparent et
+        journalisent avec elle. ``client_transaction_id`` est l'identifiant
+        SumUp du push (``PaymentAttempt.client_transaction_id``) : c'est lui
+        qui est envoyé à la Transactions API. Sans lui — essai antérieur au
+        correctif PR13, ou push dont la réponse s'est perdue — on retombe sur
+        notre identifiant, que SumUp ne connaît pas : le statut restera
+        ``PENDING`` (cf. §4 du contrat, traitement manuel).
+        """
         if not self.is_configured:
             return {
                 "checkout_id": checkout_id,
                 "status": "FAILED",
                 "error": "SumUp non configuré",
             }
-        return await self._reader_checkout_status(checkout_id)
+        return await self._reader_checkout_status(
+            checkout_id, client_transaction_id or checkout_id
+        )
 
-    async def _reader_checkout_status(self, client_transaction_id: str) -> dict:
+    async def _reader_checkout_status(
+        self, checkout_id: str, client_transaction_id: str
+    ) -> dict:
         """Résout un push reader via la Transactions API.
 
         Tant que le client n'a pas tapé sa carte, la transaction n'existe pas
@@ -790,7 +864,7 @@ class SumUpService:
         aussi mappées ``PENDING`` (le front-end borne l'attente à 90 s côté
         UI) plutôt que d'afficher un faux « Carte refusée ».
         """
-        base = {"checkout_id": client_transaction_id}
+        base = {"checkout_id": checkout_id}
         if not self.merchant_code:
             return {**base, "status": "FAILED", "error": "SUMUP_MERCHANT_CODE manquant"}
         url = self._url(f"/v2.1/merchants/{self.merchant_code}/transactions")
@@ -802,7 +876,7 @@ class SumUpService:
                     "GET",
                     url,
                     params={"client_transaction_id": client_transaction_id},
-                    checkout_id=client_transaction_id,
+                    checkout_id=checkout_id,
                     client_transaction_id=client_transaction_id,
                 )
         except httpx.HTTPError:

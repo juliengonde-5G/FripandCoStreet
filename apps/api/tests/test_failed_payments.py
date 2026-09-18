@@ -91,6 +91,15 @@ def _handler(state: dict):
     Compte aussi les appels (`pushes`, `terminates`, `lookups`) : la
     question « a-t-on présenté le montant une seconde fois ? » se vérifie
     au nombre d'envois, pas au discours du service.
+
+    PR13 — comme le vrai SumUp, ce double **génère** le
+    `client_transaction_id` (`state["issued"]`) et n'accepte de relire que
+    les siens : présenter un identifiant maison à la Transactions API
+    répond 404. Seule exception, fidèle à la réalité : quand la réponse du
+    push s'est perdue (exception), aucun identifiant n'a pu nous parvenir —
+    l'application ne dispose que du sien, et c'est bien ce scénario
+    « la cliente a peut-être déjà payé » que jouent les tests de
+    réconciliation.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -99,10 +108,15 @@ def _handler(state: dict):
             return httpx.Response(200, json={"data": {"status": "ONLINE"}})
         if path.endswith("/checkout"):
             state["pushes"] = state.get("pushes", 0) + 1
+            assert "client_transaction_id" not in (request.content or b"").decode()
             push = state.get("push")
             if isinstance(push, Exception):
                 raise push
-            return push if push is not None else httpx.Response(202, json={"data": {}})
+            if push is not None:
+                return push
+            ctid = f"ctid_{state['pushes']}"
+            state.setdefault("issued", []).append(ctid)
+            return httpx.Response(201, json={"data": {"client_transaction_id": ctid}})
         if path.endswith("/terminate"):
             state["terminates"] = state.get("terminates", 0) + 1
             return httpx.Response(202, json={})
@@ -110,6 +124,11 @@ def _handler(state: dict):
             return httpx.Response(200, json={"status": "paired", "name": "Solo"})
         if path.endswith("/transactions"):
             state["lookups"] = state.get("lookups", 0) + 1
+            queried = request.url.params.get("client_transaction_id")
+            state.setdefault("queried", []).append(queried)
+            issued = state.get("issued") or []
+            if issued and queried not in issued:
+                return httpx.Response(404, json={"error_code": "NOT_FOUND"})
             if not state.get("paid"):
                 if state.get("txn_status"):
                     return httpx.Response(
@@ -328,6 +347,10 @@ async def test_retry_failed_creates_new_checkout_and_increments(
     assert [a.attempt_count for a in attempts] == [1, 2]
     assert attempts[0].status == PaymentAttemptStatus.failed
     assert attempts[1].status == PaymentAttemptStatus.pending
+    # PR13 — le nouvel essai retient l'identifiant émis par SumUp ; notre
+    # `checkout_id` reste la clé locale, les deux ne se confondent pas.
+    assert attempts[1].client_transaction_id == state["issued"][-1]
+    assert attempts[1].client_transaction_id != attempts[1].checkout_id
 
     # Une seule ligne en file : un réessai fait avancer un compteur, il
     # n'empile pas les incidents.
@@ -580,6 +603,9 @@ async def test_paid_then_sale_closes_queue_and_links_transaction(
     )
     assert poll.status_code == 200, poll.text
     assert poll.json()["status"] == "paid"
+    # PR13 — le statut n'a pu être relu que parce que la Transactions API a
+    # été interrogée avec l'identifiant de SumUp, pas avec le nôtre.
+    assert state["queried"][-1] == state["issued"][-1]
 
     queued = await _only_queued()
     assert queued.status == FailedPaymentStatus.succeeded

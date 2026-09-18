@@ -4,6 +4,7 @@
 # source (`tests/test_sumup_robustness.py`).
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 import httpx
@@ -104,9 +105,9 @@ async def test_all_call_families_target_configured_api_base(monkeypatch):
     # 1) pré-vol (v0.1 readers/{id} + /status)
     await s.ping_reader()
     # 2) push (v0.1 readers/{id}/checkout)
-    await s._push_to_reader(amount=Decimal("5.00"), client_transaction_id="ctid-fake")
+    await s._push_to_reader(amount=Decimal("5.00"), checkout_id="chk-fake")
     # 3) poll statut (v2.1 transactions)
-    status = await s.get_checkout_status("ctid-fake")
+    status = await s.get_checkout_status("chk-fake", client_transaction_id="ctid-fake")
     assert status["status"] == "PAID"
     # 4) annulation (v0.1 readers/{id}/terminate)
     await s.cancel_checkout("ctid-fake")
@@ -136,9 +137,11 @@ async def test_push_to_reader_success():
         return httpx.Response(202, json={"data": {"client_transaction_id": "ctid-1"}})
 
     s = _make_service(handler)
-    result = await s._push_to_reader(amount=Decimal("12.50"), client_transaction_id="ctid-1")
+    result = await s._push_to_reader(amount=Decimal("12.50"), checkout_id="chk-1")
     assert result["status"] == "PENDING"
-    assert result["checkout_id"] == "ctid-1"
+    # Notre identifiant reste la cle de la caisse…
+    assert result["checkout_id"] == "chk-1"
+    # …et celui de SumUp, lu dans la reponse, est le seul relisable.
     assert result["client_transaction_id"] == "ctid-1"
     assert seen["path"].endswith("/readers/reader-1/checkout")
     assert seen["auth"] == "Bearer sup_sk_live_abc123"
@@ -154,10 +157,89 @@ async def test_push_to_reader_sends_amount_in_cents():
         return httpx.Response(202, json={"data": {}})
 
     s = _make_service(handler)
-    await s._push_to_reader(amount=Decimal("19.99"), client_transaction_id="ctid-2")
+    await s._push_to_reader(amount=Decimal("19.99"), checkout_id="chk-2")
     assert captured["body"]["total_amount"]["value"] == 1999
     assert captured["body"]["total_amount"]["currency"] == "EUR"
-    assert captured["body"]["client_transaction_id"] == "ctid-2"
+    # La Readers API n'accepte pas d'identifiant impose : l'envoyer quand
+    # meme, c'est se condamner a poller un id que SumUp ignore (PR13).
+    assert "client_transaction_id" not in captured["body"]
+
+
+# ---------------------------------------------------------------------------
+# PR13 — l'identifiant relu chez SumUp est CELUI DE SUMUP
+#
+# Regression de l'incident du 18/09 : le push envoyait notre identifiant et
+# le poll le redemandait a la Transactions API, qui ne l'a jamais connu →
+# 404 en boucle, caisse bloquee sur « attente retour du TPE » alors que la
+# carte etait passee.
+# ---------------------------------------------------------------------------
+
+
+async def test_poll_uses_the_client_transaction_id_returned_by_sumup():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/checkout"):
+            return httpx.Response(201, json={"data": {"client_transaction_id": "ctid_X"}})
+        seen["query"] = dict(request.url.params)
+        # Le faux SumUp se comporte comme le vrai : il ne connait QUE
+        # l'identifiant qu'il a emis.
+        if request.url.params.get("client_transaction_id") != "ctid_X":
+            return httpx.Response(404, json={"error_code": "NOT_FOUND"})
+        return httpx.Response(200, json={"id": "txn-9", "status": "SUCCESSFUL", "amount": 5.0})
+
+    s = _make_service(handler)
+    push = await s._push_to_reader(amount=Decimal("5.00"), checkout_id="chk-X")
+    assert push["client_transaction_id"] == "ctid_X"
+
+    status = await s.get_checkout_status(
+        push["checkout_id"], client_transaction_id=push["client_transaction_id"]
+    )
+    assert seen["query"]["client_transaction_id"] == "ctid_X"
+    assert status["status"] == "PAID"
+    # La reponse reste libellee avec NOTRE identifiant : c'est la cle de
+    # `PaymentAttempt` et celle que la caisse et le journal manipulent.
+    assert status["checkout_id"] == "chk-X"
+
+
+async def test_push_without_client_transaction_id_falls_back_and_warns(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201)  # corps vide : SumUp n'a rien rendu
+
+    s = _make_service(handler)
+    with caplog.at_level(logging.WARNING, logger="fripco"):
+        result = await s._push_to_reader(amount=Decimal("5.00"), checkout_id="chk-Y")
+    assert result["status"] == "PENDING"
+    assert result["checkout_id"] == "chk-Y"
+    assert result["client_transaction_id"] == "chk-Y"  # repli documente
+    assert any("client_transaction_id" in r.getMessage() for r in caplog.records)
+
+
+async def test_push_records_the_sumup_identifier_in_the_exchange_log():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={"data": {"client_transaction_id": "ctid_Z"}})
+
+    s = _make_service(handler)
+    await s._push_to_reader(amount=Decimal("5.00"), checkout_id="chk-Z")
+    record = s.exchanges[-1]
+    assert record.checkout_id == "chk-Z"
+    assert record.client_transaction_id == "ctid_Z"
+
+
+async def test_get_checkout_status_without_sumup_identifier_queries_our_own():
+    """Essai anterieur au correctif : on n'a que notre identifiant. Il part
+    tel quel (SumUp repondra 404 → PENDING, cf. §4 du contrat)."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(404, json={})
+
+    s = _make_service(handler)
+    result = await s.get_checkout_status("chk-legacy")
+    assert seen["query"]["client_transaction_id"] == "chk-legacy"
+    assert result["status"] == "PENDING"
+    assert result["checkout_id"] == "chk-legacy"
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +252,7 @@ async def test_push_to_reader_busy_is_recoverable_with_retry_after():
         return httpx.Response(422, json={"error_code": "READER_BUSY"})
 
     s = _make_service(handler)
-    result = await s._push_to_reader(amount=Decimal("10.00"), client_transaction_id="ctid-3")
+    result = await s._push_to_reader(amount=Decimal("10.00"), checkout_id="chk-3")
     assert result["status"] == "FAILED"
     assert result["recoverable"] is True
     assert result["retry_after"] == 5
@@ -182,7 +264,7 @@ async def test_push_to_reader_offline_is_recoverable():
         return httpx.Response(422, json={"error_code": "READER_OFFLINE"})
 
     s = _make_service(handler)
-    result = await s._push_to_reader(amount=Decimal("10.00"), client_transaction_id="ctid-4")
+    result = await s._push_to_reader(amount=Decimal("10.00"), checkout_id="chk-4")
     assert result["recoverable"] is True
     assert result["error_code"] == "READER_OFFLINE"
 
@@ -192,7 +274,7 @@ async def test_push_to_reader_bad_key_is_definitive():
         return httpx.Response(401, json={"error_code": "UNAUTHORIZED"})
 
     s = _make_service(handler)
-    result = await s._push_to_reader(amount=Decimal("10.00"), client_transaction_id="ctid-5")
+    result = await s._push_to_reader(amount=Decimal("10.00"), checkout_id="chk-5")
     assert result["status"] == "FAILED"
     assert result["recoverable"] is False
 
@@ -202,7 +284,7 @@ async def test_push_to_reader_network_error_is_recoverable():
         raise httpx.ConnectError("no net", request=request)
 
     s = _make_service(handler)
-    result = await s._push_to_reader(amount=Decimal("10.00"), client_transaction_id="ctid-6")
+    result = await s._push_to_reader(amount=Decimal("10.00"), checkout_id="chk-6")
     assert result["status"] == "FAILED"
     assert result["recoverable"] is True
 

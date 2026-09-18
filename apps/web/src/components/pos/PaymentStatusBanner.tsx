@@ -57,7 +57,7 @@ export default function PaymentStatusBanner({
             <path d="M3 10l5 5 9-9" />
           </svg>
         )}
-        <span className="font-semibold">{label || palette.defaultLabel}</span>
+        <span className="min-w-0 break-words font-semibold">{label || palette.defaultLabel}</span>
         <div className="ml-auto flex items-center gap-2">
           {secondaryActionLabel && onSecondaryAction && (
             <button
@@ -79,7 +79,9 @@ export default function PaymentStatusBanner({
           )}
         </div>
       </div>
-      {detail && <p className="mt-1 text-sm opacity-80">{detail}</p>}
+      {/* PR13/O6 — le detail porte le message brut de SumUp : il doit se
+          couper plutôt que déborder de la carte. */}
+      {detail && <p className="mt-1 min-w-0 break-words text-sm opacity-80">{detail}</p>}
       <ErrorReference reference={reference} />
     </div>
   );

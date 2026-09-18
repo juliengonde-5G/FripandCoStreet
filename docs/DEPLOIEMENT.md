@@ -274,6 +274,32 @@ curl -s -H "Authorization: Bearer <jeton>" \
   "https://app.lloomi.fr/api/admin/payment-failures?days=7" | jq
 ```
 
+### 6.2 Après le déploiement du correctif SumUp (PR13)
+
+Jusqu'à la version 0.13.1, la demande de paiement partait bien sur le Solo mais
+l'application relisait l'état du paiement avec **son** identifiant, que SumUp
+n'a jamais connu : la caisse restait sur « attente retour du TPE » alors que la
+carte était passée. Le correctif utilise désormais l'identifiant de transaction
+rendu par SumUp au moment de l'envoi. Une fois le déploiement passé
+(`scripts/deploy.sh`, tests de fumée verts) :
+
+1. **Libérer le terminal** s'il affiche encore un montant : annuler sur le Solo
+   (touche ✕), ou depuis le VPS
+   `POST https://api.sumup.com/v0.1/merchants/{code}/readers/{reader}/terminate`
+   avec la clé API en Bearer. Sans cela, la demande suivante repart en
+   `READER_BUSY`.
+2. **Traiter les paiements restés en attente avant le correctif.** Ils gardent
+   l'ancien identifiant : ils resteront « en attente » et ne se débloqueront
+   pas tout seuls (aucun rattrapage automatique). Comparer le tableau de bord
+   SumUp à l'écran Administration → Paiements CB : un encaissement présent chez
+   SumUp sans vente dans l'application se **rembourse** (depuis SumUp ou
+   l'application), puis se ré-encaisse normalement. Ne jamais créer une vente
+   rétroactivement — la chaîne fiscale n'a rien à corriger, elle ne contient
+   pas ces paiements.
+3. **Vérifier en réel** : un paiement carte de 1,00 €. La caisse doit passer à
+   « payé » dès que la carte est tapée. Annuler ensuite cette vente
+   (annulation normale, avoir automatique).
+
 ## 7. E-mail des tickets et newsletter (PR3)
 
 Compte Brevo **partagé** avec la boutique de Vernon : la caisse n'utilise que sa

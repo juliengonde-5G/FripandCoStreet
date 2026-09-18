@@ -93,7 +93,10 @@ async def verify_card_tender(
     # (`persist_detached`), sinon elle disparaitrait avec le rollback.
     verification_failed = False
     try:
-        status_result = await svc.get_checkout_status(tender.checkout_id)
+        status_result = await svc.get_checkout_status(
+            tender.checkout_id,
+            client_transaction_id=attempt.client_transaction_id,
+        )
         sumup_status = str(status_result.get("status") or "").upper()
         if sumup_status != "PAID":
             raise CardNotConfirmed(

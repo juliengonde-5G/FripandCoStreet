@@ -1,5 +1,7 @@
 import pytest
 
+from app.version import APP_VERSION
+
 pytestmark = pytest.mark.anyio
 
 
@@ -8,7 +10,8 @@ async def test_health_ok(client):
     assert response.status_code == 200
     body = response.json()
     assert body["app"] == "fripco-street-api"
-    assert "version" in body
+    # PR13 — correctif du suivi des paiements terminal SumUp.
+    assert body["version"] == APP_VERSION == "0.13.1"
     assert body["environment"] == "test"
     # PR11 (0011_cahier_days) — cf.
     # app/version.py::EXPECTED_DB_REVISION.

@@ -302,10 +302,13 @@ async def initiate_cb_payment(
             status_code=409,
         )
 
-    client_transaction_id = str(body.client_uuid)
+    # Notre identifiant de checkout — celui de la caisse et de l'essai. SumUp
+    # génère le sien (`client_transaction_id`) et le renvoie dans la réponse
+    # du push : c'est lui qui servira à relire le statut (PR13).
+    our_checkout_id = str(body.client_uuid)
     description = await _cb_description(db)
     result = await svc._push_to_reader(  # noqa: SLF001 — service interne, même paquet
-        amount=body.amount, client_transaction_id=client_transaction_id, description=description
+        amount=body.amount, checkout_id=our_checkout_id, description=description
     )
     failed = str(result.get("status", "")).upper() == "FAILED"
     # PR9/K1 — le push est joué, on peut journaliser l'échange (pré-vol
@@ -316,8 +319,8 @@ async def initiate_cb_payment(
         client_uuid=body.client_uuid,
         amount=body.amount,
         status=PaymentAttemptStatus.failed if failed else PaymentAttemptStatus.pending,
-        checkout_id=result.get("checkout_id") or client_transaction_id,
-        client_transaction_id=result.get("client_transaction_id") or client_transaction_id,
+        checkout_id=result.get("checkout_id") or our_checkout_id,
+        client_transaction_id=result.get("client_transaction_id") or our_checkout_id,
         reader_id=svc.reader_id,
         error_message=(
             redact_sumup_error(result.get("error_detail") or result.get("error_friendly") or "Refusé par SumUp")
@@ -372,7 +375,11 @@ async def get_cb_payment_status(
         return _status_response(attempt)
 
     svc = SumUpService()
-    poll = await svc.get_checkout_status(checkout_id)
+    # PR13 — la Transactions API ne connaît que l'identifiant généré par
+    # SumUp au moment du push ; notre `checkout_id` y est inconnu (404).
+    poll = await svc.get_checkout_status(
+        checkout_id, client_transaction_id=attempt.client_transaction_id
+    )
     norm = str(poll.get("status", "PENDING")).upper()
     # PR9/K1 — avant le retour anticipé « pending » : c'est la suite des
     # polls qui raconte ce qu'a fait le terminal.
@@ -485,7 +492,9 @@ async def cancel_cb_payment(
         # carte (paiement en cours de finalisation côté SumUp) — on revérifie
         # avant de marquer localement « annulé » pour ne jamais créer un écart
         # comptable (client débité mais vente marquée annulée).
-        recheck = await svc.get_checkout_status(checkout_id)
+        recheck = await svc.get_checkout_status(
+            checkout_id, client_transaction_id=attempt.client_transaction_id
+        )
         if str(recheck.get("status", "")).upper() == "PAID":
             raise PosServiceError(
                 "Le client vient de valider sa carte — ce paiement ne peut plus être annulé.",
@@ -582,11 +591,11 @@ async def retry_cb_payment(
         }
 
     new_count = attempt.attempt_count + 1
-    new_client_transaction_id = f"{attempt.client_uuid}:r{new_count}"
+    new_checkout_id = f"{attempt.client_uuid}:r{new_count}"
     description = await _cb_description(db)
     result = await svc._push_to_reader(  # noqa: SLF001
         amount=attempt.amount,
-        client_transaction_id=new_client_transaction_id,
+        checkout_id=new_checkout_id,
         description=description,
     )
     failed = str(result.get("status", "")).upper() == "FAILED"
@@ -597,8 +606,8 @@ async def retry_cb_payment(
         client_uuid=attempt.client_uuid,
         amount=attempt.amount,
         status=PaymentAttemptStatus.failed if failed else PaymentAttemptStatus.pending,
-        checkout_id=result.get("checkout_id") or new_client_transaction_id,
-        client_transaction_id=result.get("client_transaction_id") or new_client_transaction_id,
+        checkout_id=result.get("checkout_id") or new_checkout_id,
+        client_transaction_id=result.get("client_transaction_id") or new_checkout_id,
         reader_id=svc.reader_id,
         error_message=(
             redact_sumup_error(result.get("error_detail") or result.get("error_friendly") or "Refusé par SumUp")

@@ -444,7 +444,7 @@ export default function MultiStepPaymentWizard({
         )}
 
         {step.kind === "card-pending" && (
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             <PaymentStatusBanner
               status={step.status}
               label={step.label ?? (step.recovery ? (step.recovery.exhausted ? EXHAUSTED_LABEL : RECOVERABLE_LABEL) : undefined)}
@@ -501,8 +501,11 @@ export default function MultiStepPaymentWizard({
 
         {step.kind === "confirm" && (
           <div className="space-y-3">
+            {/* PR13/O6 — un message SumUp long (« SumUp Cloud 401 :
+                Unauthorized ») doit rester DANS l'encart : on autorise la
+                coupure de mot et on empêche la boîte de s'élargir. */}
             {errorText(commitError) && (
-              <div role="alert" className="rounded-fc-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+              <div role="alert" className="min-w-0 break-words rounded-fc-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">
                 {errorText(commitError)}
                 <ErrorReference reference={errorRef(commitError)} />
               </div>
