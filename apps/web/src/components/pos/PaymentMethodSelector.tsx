@@ -104,13 +104,16 @@ export default function PaymentMethodSelector({
           const cfg = METHODS[id];
           const isDisabled = !!disabled[id];
           const reason = disabledReasons[id];
+          // PR13/O6 — `min-w-0` + `overflow-hidden` sur la tuile, `break-words`
+          // sur le texte : la raison affichée quand la carte est désactivée
+          // (message SumUp) reste dans le cadre « Carte bancaire ».
           return (
             <button
               key={id}
               type="button"
               onClick={() => !isDisabled && onPick(id)}
               disabled={isDisabled}
-              className={`flex h-[132px] flex-col items-center justify-center gap-2 rounded-2xl border transition-all focus:outline-none focus:ring-2 focus:ring-fc-primary focus:ring-offset-2 min-h-touch ${
+              className={`flex h-[132px] min-w-0 flex-col items-center justify-center gap-2 overflow-hidden rounded-2xl border transition-all focus:outline-none focus:ring-2 focus:ring-fc-primary focus:ring-offset-2 min-h-touch ${
                 isDisabled
                   ? "cursor-not-allowed border-fc-line bg-fc-bg-alt opacity-60"
                   : "border-fc-line bg-fc-bg-alt hover:bg-fc-primary-soft active:bg-fc-primary-soft active:scale-[0.98]"
@@ -121,7 +124,9 @@ export default function PaymentMethodSelector({
               <span className={isDisabled ? "text-fc-ink-mute" : "text-fc-primary"}>{cfg.icon}</span>
               <span className="text-base font-semibold text-fc-ink">{cfg.label}</span>
               {(isDisabled ? reason : cfg.hint) && (
-                <span className="text-xs text-fc-ink-mute text-center px-1">{isDisabled ? reason : cfg.hint}</span>
+                <span className="min-w-0 break-words px-1 text-center text-xs text-fc-ink-mute">
+                  {isDisabled ? reason : cfg.hint}
+                </span>
               )}
             </button>
           );
